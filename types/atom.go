@@ -1,9 +1,9 @@
 package types
 
 type Atom struct {
-	Name         string    // 原子名称
-	DataSlice    []Data    // Data
-	AbilitySlice []Ability // Ability
+	Name       string             // 原子名称
+	DataMap    map[string]Data    // Data keyed by name
+	AbilityMap map[string]Ability // Ability keyed by name
 }
 
 // 获得Atom名称
@@ -12,13 +12,13 @@ func (a *Atom) GetName() string {
 }
 
 // 获得Atom的Data
-func (a *Atom) GetAllData() []Data {
-	return a.DataSlice
+func (a *Atom) GetAllData() map[string]Data {
+	return a.DataMap
 }
 
 // 获得Atom的Ability
-func (a *Atom) GetAllAbility() []Ability {
-	return a.AbilitySlice
+func (a *Atom) GetAllAbility() map[string]Ability {
+	return a.AbilityMap
 }
 
 // 修改Atom名称
@@ -28,10 +28,16 @@ func (a *Atom) SetName(name string) {
 
 // 新增Ability
 func (a *Atom) AddAbility(ability Ability) {
-	a.AbilitySlice = append(a.AbilitySlice, ability)
+	if a.AbilityMap == nil {
+		a.AbilityMap = make(map[string]Ability)
+	}
+	a.AbilityMap[ability.GetName()] = ability
 }
 
 // 新增Data
 func (a *Atom) AddData(data Data) {
-	a.DataSlice = append(a.DataSlice, data)
+	if a.DataMap == nil {
+		a.DataMap = make(map[string]Data)
+	}
+	a.DataMap[data.GetName()] = data
 }

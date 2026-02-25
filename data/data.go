@@ -10,7 +10,7 @@ func (b *BaseData) GetName() string {
 }
 
 func (b *BaseData) Describe() string {
-	return "BaseData存储一些基本数据，简化通过DataPool进行的访问。"
+	return "BaseData存储一些基本数据，可以在其中存储各种基本信息。"
 }
 
 func (b *BaseData) Check(atmo types.Atom) bool {
@@ -18,13 +18,14 @@ func (b *BaseData) Check(atmo types.Atom) bool {
 }
 
 func (b *BaseData) Mount(atmo types.Atom) bool {
-	val, _ := GetData("_data_list")
-	list, _ := val.([]string)
-	list = append(list, b.GetName())
-	SetData("_data_list", list)
+	b.Check(atmo)
+	atmo.AddData(b)
 	return true
 }
 
 func (b *BaseData) Command(atmo types.Atom, act string, args ...string) bool {
-	return false
+	switch act {
+	}
+
+	return true
 }

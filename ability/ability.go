@@ -1,7 +1,6 @@
 package ability
 
 import (
-	"github.com/FasterEdge/FasterEdge/data"
 	"github.com/FasterEdge/FasterEdge/types"
 )
 
@@ -17,31 +16,29 @@ func (b *BaseAbility) Describe() string {
 }
 
 func (b *BaseAbility) Check(atmo types.Atom) bool {
+	// 检查BaseDaata是否已经被挂载
+	if _, ok := atmo.GetAllData()["BaseData"]; !ok {
+		return false
+	}
 	return true
 }
 
 func (b *BaseAbility) Mount(atmo types.Atom) bool {
-	val, _ := data.GetData("_data_list")
-	list, _ := val.([]string)
-	list = append(list, b.GetName())
-	data.SetData("_data_list", list)
+	b.Check(atmo)
+	atmo.AddAbility(b)
 	return true
 }
 
 func (b *BaseAbility) Command(atmo types.Atom, act string, args ...string) bool {
 	switch act {
-	case "list_data":
-		val, _ := data.GetData("_data_list")
-		list, _ := val.([]string)
-		for _, item := range list {
-			println(item)
+	case "list_data_name":
+		for key := range atmo.GetAllData() { // print map keys
+			println(key)
 		}
 		return true
-	case "list_ability":
-		val, _ := data.GetData("_ability_list")
-		list, _ := val.([]string)
-		for _, item := range list {
-			println(item)
+	case "list_ability_name":
+		for key := range atmo.GetAllAbility() { // print map keys
+			println(key)
 		}
 		return true
 	}

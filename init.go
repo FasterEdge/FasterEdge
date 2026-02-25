@@ -22,5 +22,5 @@ func RunAtom(atom types.Atom) {
 	for _, ability := range atom.GetAllAbility() {
 		ability.Mount(atom)
 	}
-	
+
 }
