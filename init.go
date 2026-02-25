@@ -13,6 +13,19 @@ func InitAtom() types.Atom {
 	return atom
 }
 
+// 只挂载数据和能力，不执行任何命令
+func PreRunAtom(atom types.Atom) {
+	// 对所有的Data进行挂载
+	for _, data := range atom.GetAllData() {
+		data.Mount(atom)
+	}
+	// 对所有的Ability进行挂载
+	for _, ability := range atom.GetAllAbility() {
+		ability.Mount(atom)
+	}
+}
+
+// 挂载并直接使用携程运行所有Ability里面的run指令（如果runable返回true）
 func RunAtom(atom types.Atom) {
 	// 对所有的Data进行挂载
 	for _, data := range atom.GetAllData() {
@@ -23,4 +36,14 @@ func RunAtom(atom types.Atom) {
 		ability.Mount(atom)
 	}
 
+	// 直接使用携程运行所有Ability里面的run指令（如果runable返回true）
+	for _, ability := range atom.GetAllAbility() {
+		if ability.Command(atom, "runable") {
+			go ability.Command(atom, "run")
+		}
+	}
+
+	if base, ok := atom.GetAllAbility()["BaseAbility"]; ok {
+		go base.Command(atom, "list_ability_name")
+	}
 }

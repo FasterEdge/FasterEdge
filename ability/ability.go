@@ -41,7 +41,10 @@ func (b *BaseAbility) Command(atmo types.Atom, act string, args ...string) bool 
 			println(key)
 		}
 		return true
+	case "blocking":
+		select {}
+		return true
 	}
 
-	return true
+	return false
 }
