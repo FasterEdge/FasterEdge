@@ -3,6 +3,7 @@ package FasterEdge
 import (
 	"testing"
 
+	"github.com/FasterEdge/FasterEdge/ability"
 	"github.com/FasterEdge/FasterEdge/types"
 )
 
@@ -21,8 +22,8 @@ func (b *TestData) Mount(atmo types.Atom) bool {
 	return false
 }
 
-func (b *TestData) Command(atmo types.Atom, act string, args ...string) bool {
-	return false
+func (b *TestData) Command(atmo types.Atom, act string, args ...string) string {
+	return "false"
 }
 
 type TestAbility struct {
@@ -54,5 +55,6 @@ func TestAtom(t *testing.T) {
 	atom := InitAtom()
 	atom.AddData(&TestData{})
 	atom.AddAbility(&TestAbility{})
+	atom.AddAbility(&ability.TimeAbility{})
 	RunAtom(atom)
 }

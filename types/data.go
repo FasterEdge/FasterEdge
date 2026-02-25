@@ -6,5 +6,5 @@ type Data interface {
 	Describe() string     // 获得描述
 	Check(atmo Atom) bool // 检查方法
 	Mount(atmo Atom) bool // 挂载方法
-	Command(atmo Atom, act string, args ...string) bool
+	Command(atmo Atom, act string, args ...string) string
 }
