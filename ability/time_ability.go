@@ -102,6 +102,7 @@ func (t *TimeAbility) Command(atmo types.Atom, act string, args ...string) bool 
 		}
 
 	case "get_time":
+		t.ensureSynced()
 		// 打印当前时间内容，而不是指令名
 		fmt.Printf("[%s] %s\n", t.GetName(), t.now().Format(time.RFC3339Nano))
 		return true
