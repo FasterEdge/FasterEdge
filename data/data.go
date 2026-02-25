@@ -2,22 +2,29 @@ package data
 
 import "github.com/FasterEdge/FasterEdge/types"
 
-func init() {
-	dataPool["faster_edge_version"] = "1.0.20260225"
-}
-
 type BaseData struct {
 }
 
+func (b *BaseData) GetName() string {
+	return "BaseData"
+}
+
 func (b *BaseData) Describe() string {
-	return "BaseAbility is the base struct for all abilities. It provides common fields and methods that can be used by all abilities."
+	return "BaseData存储一些基本数据，简化通过DataPool进行的访问。"
 }
 
 func (b *BaseData) Check(atmo types.Atom) bool {
-	return false
-
+	return true
 }
 
 func (b *BaseData) Mount(atmo types.Atom) bool {
+	val, _ := GetData("_data_list")
+	list, _ := val.([]string)
+	list = append(list, b.GetName())
+	SetData("_data_list", list)
+	return true
+}
+
+func (b *BaseData) Command(atmo types.Atom, act string, args ...string) bool {
 	return false
 }

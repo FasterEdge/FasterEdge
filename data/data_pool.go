@@ -2,6 +2,12 @@ package data
 
 var dataPool = make(map[string]interface{})
 
+func init() {
+	dataPool["_faster_edge_version"] = "1.0.20260225"
+	dataPool["_ability_list"] = []string{}
+	dataPool["_data_list"] = []string{}
+}
+
 // 获取数据
 func GetData(name string) (interface{}, bool) {
 	data, exists := dataPool[name]
