@@ -13,8 +13,17 @@ var logo string = `
 `
 var version string = "1.0.20260225"
 
-type BaseData struct {
+// BaseDataArgs defines accepted arguments for BaseData commands.
+type BaseDataArgs struct{}
+
+// BaseDataOutput represents command outputs.
+type BaseDataOutput struct {
+	Message string
+	Success bool
+	Error   string
 }
+
+type BaseData struct{}
 
 func (b *BaseData) GetName() string {
 	return "BaseData"
@@ -35,15 +44,22 @@ func (b *BaseData) Mount(atmo types.Atom) bool {
 	return true
 }
 
-func (b *BaseData) Command(atmo types.Atom, act string, args ...string) string {
+func (b *BaseData) Command(atmo types.Atom, act string, args BaseDataArgs) types.DataOutput[BaseDataOutput] {
+	_ = atmo
 	switch act {
 	case "print_logo":
 		fmt.Println(logo)
-		return "true"
+		return types.DataOutput[BaseDataOutput]{Name: act, Success: true}
 	case "print_info":
 		fmt.Println("FasterEdge v" + version + " - 对称、可靠、安全的多场景边缘计算框架")
-		return "true"
+		return types.DataOutput[BaseDataOutput]{Name: act, Success: true}
 	}
 
-	return "false"
+	return types.DataOutput[BaseDataOutput]{Name: act, Success: false, Error: "unsupported act"}
+}
+
+func (b *BaseData) CommandAny(atmo types.Atom, act string, args any) types.DataOutput[any] {
+	typed, _ := args.(BaseDataArgs)
+	out := b.Command(atmo, act, typed)
+	return types.DataOutput[any]{Name: out.Name, Value: out.Value, Success: out.Success, Error: out.Error}
 }

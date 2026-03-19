@@ -12,6 +12,17 @@ import (
 	"github.com/FasterEdge/FasterEdge/types"
 )
 
+type TimeAbilityArgs struct {
+	URL   string
+	Value string
+}
+
+type TimeAbilityOutput struct {
+	Message string
+	Success bool
+	Error   string
+}
+
 type TimeAbility struct {
 	mu            sync.RWMutex
 	lastSource    string
@@ -42,54 +53,46 @@ func (t *TimeAbility) Mount(atmo types.Atom) bool {
 	return true
 }
 
-// - sync_net [url]: 从给定URL(默认 worldtimeapi UTC)获取时间
-// - sync_manual <rfc3339>: 使用提供的时间字符串对时
-// - sync_system: 使用当前系统时间
-// - last: 返回最近一次对时来源
-// - runnable: 标记此能力可运行
-// - run: 启动一个goroutine，每秒推进一次当前时间
-// - get_time: 打印当前时间
-func (t *TimeAbility) Command(atmo types.Atom, act string, args ...string) bool {
+// CommandTyped executes actions based on act with typed args.
+func (t *TimeAbility) CommandTyped(atmo types.Atom, act string, args TimeAbilityArgs) types.AbilityOutput[TimeAbilityOutput] {
+	_ = atmo // not used currently
 	switch act {
 	case "sync_net":
 		fmt.Printf("[%s] 正在执行 sync_net\n", t.GetName())
-		url := "https://timeapi.io/api/Time/current/zone?timeZone=Asia/Shanghai"
-		if len(args) > 0 && args[0] != "" {
-			url = args[0]
+		url := args.URL
+		if url == "" {
+			url = "https://timeapi.io/api/Time/current/zone?timeZone=Asia/Shanghai"
 		}
 		if ts, err := fetchNetworkTime(url); err == nil {
 			t.setSync(ts, "net:"+url)
-			return true
+			return types.AbilityOutput[TimeAbilityOutput]{Name: act, Success: true}
 		}
-		return false
+		return types.AbilityOutput[TimeAbilityOutput]{Name: act, Success: false, Error: "fetch failed"}
 
 	case "sync_manual":
 		fmt.Printf("[%s] 正在执行 sync_manual\n", t.GetName())
-		if len(args) == 0 {
-			return false
-		}
-		ts, err := time.Parse(time.RFC3339, args[0])
+		ts, err := time.Parse(time.RFC3339, args.Value)
 		if err != nil {
-			return false
+			return types.AbilityOutput[TimeAbilityOutput]{Name: act, Success: false, Error: "invalid time"}
 		}
 		t.setSync(ts, "manual")
-		return true
+		return types.AbilityOutput[TimeAbilityOutput]{Name: act, Success: true}
 
 	case "sync_system":
 		fmt.Printf("[%s] 正在执行 sync_system\n", t.GetName())
 		now := time.Now()
 		t.setSync(now, "system")
-		return true
+		return types.AbilityOutput[TimeAbilityOutput]{Name: act, Success: true}
 
 	case "last":
 		fmt.Printf("[%s] 正在执行 last\n", t.GetName())
 		src, ts := t.getLast()
 		println(src, ts.String())
-		return true
+		return types.AbilityOutput[TimeAbilityOutput]{Name: act, Success: true, Value: TimeAbilityOutput{Message: ts.String(), Success: true}}
 
 	case "runnable":
 		fmt.Printf("[%s] 正在执行 runnable\n", t.GetName())
-		return true
+		return types.AbilityOutput[TimeAbilityOutput]{Name: act, Success: true}
 
 	case "run":
 		fmt.Printf("[%s] 正在执行 run\n", t.GetName())
@@ -100,15 +103,16 @@ func (t *TimeAbility) Command(atmo types.Atom, act string, args ...string) bool 
 		for now := range ticker.C {
 			t.advance(now) // 每秒推进一次当前时间
 		}
+		return types.AbilityOutput[TimeAbilityOutput]{Name: act, Success: true}
 
 	case "get_time":
 		t.ensureSynced()
 		// 打印当前时间内容，而不是指令名
 		fmt.Printf("[%s] %s\n", t.GetName(), t.now().Format(time.RFC3339Nano))
-		return true
+		return types.AbilityOutput[TimeAbilityOutput]{Name: act, Success: true}
 	}
 
-	return false
+	return types.AbilityOutput[TimeAbilityOutput]{Name: act, Success: false, Error: "unsupported act"}
 }
 
 func fetchNetworkTime(url string) (time.Time, error) {
@@ -116,7 +120,7 @@ func fetchNetworkTime(url string) (time.Time, error) {
 	if err != nil {
 		return time.Time{}, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -185,4 +189,11 @@ func (t *TimeAbility) now() time.Time {
 	cur := t.current
 	t.mu.RUnlock()
 	return cur
+}
+
+// Command implements AnyAbility by accepting any args and forwarding to CommandTyped.
+func (t *TimeAbility) Command(atmo types.Atom, act string, args any) types.AbilityOutput[any] {
+	typed, _ := args.(TimeAbilityArgs)
+	out := t.CommandTyped(atmo, act, typed)
+	return types.AbilityOutput[any]{Name: out.Name, Value: out.Value, Success: out.Success, Error: out.Error}
 }

@@ -22,8 +22,13 @@ func (b *TestData) Mount(atmo types.Atom) bool {
 	return false
 }
 
-func (b *TestData) Command(atmo types.Atom, act string, args ...string) string {
-	return "false"
+func (b *TestData) Command(atmo types.Atom, act string, args struct{}) types.DataOutput[struct{}] {
+	return types.DataOutput[struct{}]{Name: act, Success: false}
+}
+
+func (b *TestData) CommandAny(atmo types.Atom, act string, args any) types.DataOutput[any] {
+	out := b.Command(atmo, act, struct{}{})
+	return types.DataOutput[any]{Name: out.Name, Value: out.Value, Success: out.Success, Error: out.Error}
 }
 
 type TestAbility struct {
@@ -47,8 +52,13 @@ func (b *TestAbility) Mount(atmo types.Atom) bool {
 
 }
 
-func (b *TestAbility) Command(atmo types.Atom, act string, args ...string) bool {
-	return false
+func (b *TestAbility) Command(atmo types.Atom, act string, args struct{}) types.AbilityOutput[struct{}] {
+	return types.AbilityOutput[struct{}]{Name: act, Success: false}
+}
+
+func (b *TestAbility) CommandAny(atmo types.Atom, act string, args any) types.AbilityOutput[any] {
+	out := b.Command(atmo, act, struct{}{})
+	return types.AbilityOutput[any]{Name: out.Name, Value: out.Value, Success: out.Success, Error: out.Error}
 }
 
 func TestAtom(t *testing.T) {
