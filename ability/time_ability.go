@@ -31,6 +31,11 @@ type TimeAbility struct {
 	current       time.Time
 }
 
+func (t *TimeAbility) CommandAny(atmo types.Atom, act string, args any) types.AbilityOutput[any] {
+	//TODO implement me
+	panic("implement me")
+}
+
 func (t *TimeAbility) GetName() string {
 	return "TimeAbility"
 }

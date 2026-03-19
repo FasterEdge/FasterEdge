@@ -6,7 +6,6 @@ import (
 	"github.com/FasterEdge/FasterEdge/types"
 )
 
-// BaseAbilityArgs defines accepted arguments for BaseAbility commands.
 type BaseAbilityArgs struct {
 	ListArgs []string
 }
