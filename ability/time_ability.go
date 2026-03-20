@@ -124,7 +124,7 @@ func (t *TimeAbility) Command(atmo types.Atom, act string, args any) types.Abili
 	return types.AbilityOutput{Name: act, Success: false, Error: "unsupported act"}
 }
 
-// 工具方法实现
+// 通过网络地址请求获得时间
 func fetchNetworkTime(url string) (time.Time, error) {
 	resp, err := http.Get(url)
 	if err != nil {
@@ -153,6 +153,7 @@ func fetchNetworkTime(url string) (time.Time, error) {
 	return time.Parse(time.RFC3339Nano, dt)
 }
 
+// 设置同步时间和来源
 func (t *TimeAbility) setSync(ts time.Time, source string) {
 	t.mu.Lock()
 	t.lastSynced = ts
@@ -162,6 +163,7 @@ func (t *TimeAbility) setSync(ts time.Time, source string) {
 	t.mu.Unlock()
 }
 
+// 根据当前系统时间和基准单调时间计算当前时间
 func (t *TimeAbility) advance(now time.Time) {
 	t.mu.Lock()
 	if t.baseMonotonic.IsZero() || t.lastSynced.IsZero() {
@@ -175,6 +177,7 @@ func (t *TimeAbility) advance(now time.Time) {
 	t.mu.Unlock()
 }
 
+// 确保至少有一个同步时间，如果没有则使用系统时间进行初始化
 func (t *TimeAbility) ensureSynced() {
 	t.mu.RLock()
 	zero := t.lastSynced.IsZero()
@@ -184,12 +187,14 @@ func (t *TimeAbility) ensureSynced() {
 	}
 }
 
+// 获取最后一次同步的时间和来源
 func (t *TimeAbility) getLast() (string, time.Time) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	return t.lastSource, t.lastSynced
 }
 
+// 获取当前时间，如果没有同步过则返回系统时间
 func (t *TimeAbility) now() time.Time {
 	t.mu.RLock()
 	if t.current.IsZero() {
