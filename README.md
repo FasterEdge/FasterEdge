@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="./Logo.png" alt="logo" width="96" />
+  <img src="https://avatars.githubusercontent.com/u/245985800?s=200&v=4" style="width:100px;" width="100"/>
   <h3>FasterEdge - 对称、可靠、安全的多场景边缘计算框架</h3>
 </div>
 
