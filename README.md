@@ -14,7 +14,7 @@
 这意味着您可以通过这个框架（或者说这种符合“依赖抽象而不依赖具体”的强规范）下的“树”来构建一个相当灵活的分布式的边缘计算系统，甚至是一个分布式的边缘计算生态系统。
 
 <div align="center">
-  <img src="https://github.com/FasterEdge/.github/blob/65efc7066ee8cdd791bf4e65d9854130997b49fd/images/concept.png" alt="logo" width="96" />
+  <img src="https://github.com/FasterEdge/.github/blob/65efc7066ee8cdd791bf4e65d9854130997b49fd/images/concept.png" style="width:96%;" width="100"/>
 </div>
 
 图中的小女孩代表着业务或用户（Business/User），这些树枝是由树根（Data）提供养分生长出来的，而树根又可以从大地（Data）。
