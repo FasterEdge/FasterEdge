@@ -31,11 +31,6 @@ type TimeAbility struct {
 	current       time.Time
 }
 
-func (t *TimeAbility) CommandAny(atmo types.Atom, act string, args any) types.AbilityOutput[any] {
-	//TODO implement me
-	panic("implement me")
-}
-
 func (t *TimeAbility) GetName() string {
 	return "TimeAbility"
 }
@@ -58,66 +53,65 @@ func (t *TimeAbility) Mount(atmo types.Atom) bool {
 	return true
 }
 
-// CommandTyped executes actions based on act with typed args.
-func (t *TimeAbility) CommandTyped(atmo types.Atom, act string, args TimeAbilityArgs) types.AbilityOutput[TimeAbilityOutput] {
-	_ = atmo // not used currently
+// Command executes actions based on act with loose args (expects TimeAbilityArgs).
+func (t *TimeAbility) Command(atmo types.Atom, act string, args any) types.AbilityOutput {
+	typed, _ := args.(TimeAbilityArgs)
 	switch act {
 	case "sync_net":
 		fmt.Printf("[%s] 正在执行 sync_net\n", t.GetName())
-		url := args.URL
+		url := typed.URL
 		if url == "" {
 			url = "https://timeapi.io/api/Time/current/zone?timeZone=Asia/Shanghai"
 		}
 		if ts, err := fetchNetworkTime(url); err == nil {
 			t.setSync(ts, "net:"+url)
-			return types.AbilityOutput[TimeAbilityOutput]{Name: act, Success: true}
+			return types.AbilityOutput{Name: act, Success: true}
 		}
-		return types.AbilityOutput[TimeAbilityOutput]{Name: act, Success: false, Error: "fetch failed"}
+		return types.AbilityOutput{Name: act, Success: false, Error: "fetch failed"}
 
 	case "sync_manual":
 		fmt.Printf("[%s] 正在执行 sync_manual\n", t.GetName())
-		ts, err := time.Parse(time.RFC3339, args.Value)
+		ts, err := time.Parse(time.RFC3339, typed.Value)
 		if err != nil {
-			return types.AbilityOutput[TimeAbilityOutput]{Name: act, Success: false, Error: "invalid time"}
+			return types.AbilityOutput{Name: act, Success: false, Error: "invalid time"}
 		}
 		t.setSync(ts, "manual")
-		return types.AbilityOutput[TimeAbilityOutput]{Name: act, Success: true}
+		return types.AbilityOutput{Name: act, Success: true}
 
 	case "sync_system":
 		fmt.Printf("[%s] 正在执行 sync_system\n", t.GetName())
 		now := time.Now()
 		t.setSync(now, "system")
-		return types.AbilityOutput[TimeAbilityOutput]{Name: act, Success: true}
+		return types.AbilityOutput{Name: act, Success: true}
 
 	case "last":
 		fmt.Printf("[%s] 正在执行 last\n", t.GetName())
 		src, ts := t.getLast()
 		println(src, ts.String())
-		return types.AbilityOutput[TimeAbilityOutput]{Name: act, Success: true, Value: TimeAbilityOutput{Message: ts.String(), Success: true}}
+		return types.AbilityOutput{Name: act, Success: true, Value: TimeAbilityOutput{Message: ts.String(), Success: true}}
 
 	case "runnable":
 		fmt.Printf("[%s] 正在执行 runnable\n", t.GetName())
-		return types.AbilityOutput[TimeAbilityOutput]{Name: act, Success: true}
+		return types.AbilityOutput{Name: act, Success: true}
 
 	case "run":
 		fmt.Printf("[%s] 正在执行 run\n", t.GetName())
-		// ensure baseline exists
 		t.ensureSynced()
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
 		for now := range ticker.C {
-			t.advance(now) // 每秒推进一次当前时间
+			t.advance(now)
 		}
-		return types.AbilityOutput[TimeAbilityOutput]{Name: act, Success: true}
+		return types.AbilityOutput{Name: act, Success: true}
 
 	case "get_time":
 		t.ensureSynced()
-		// 打印当前时间内容，而不是指令名
 		fmt.Printf("[%s] %s\n", t.GetName(), t.now().Format(time.RFC3339Nano))
-		return types.AbilityOutput[TimeAbilityOutput]{Name: act, Success: true}
+		return types.AbilityOutput{Name: act, Success: true}
 	}
 
-	return types.AbilityOutput[TimeAbilityOutput]{Name: act, Success: false, Error: "unsupported act"}
+	_ = atmo
+	return types.AbilityOutput{Name: act, Success: false, Error: "unsupported act"}
 }
 
 func fetchNetworkTime(url string) (time.Time, error) {
@@ -194,11 +188,4 @@ func (t *TimeAbility) now() time.Time {
 	cur := t.current
 	t.mu.RUnlock()
 	return cur
-}
-
-// Command implements AnyAbility by accepting any args and forwarding to CommandTyped.
-func (t *TimeAbility) Command(atmo types.Atom, act string, args any) types.AbilityOutput[any] {
-	typed, _ := args.(TimeAbilityArgs)
-	out := t.CommandTyped(atmo, act, typed)
-	return types.AbilityOutput[any]{Name: out.Name, Value: out.Value, Success: out.Success, Error: out.Error}
 }

@@ -1,34 +1,18 @@
 package types
 
-// Data marks a data element with typed args/output.
-type Data[Args any, Out any] interface {
-	GetName() string      // 获得名称
-	Describe() string     // 获得描述
-	Check(atmo Atom) bool // 检查方法
-	Mount(atmo Atom) bool // 挂载方法
-	Command(atmo Atom, act string, args Args) DataOutput[Out]
-}
-
-// AnyData provides an untyped entry-point for heterogeneous storage.
-type AnyData interface {
+// Data 表示一种可存储的数据，Command 接受任意参数。
+type Data interface {
 	GetName() string
 	Describe() string
 	Check(atmo Atom) bool
 	Mount(atmo Atom) bool
-	CommandAny(atmo Atom, act string, args any) DataOutput[any]
+	Command(atmo Atom, act string, args any) DataOutput
 }
 
-// DataArgs is a generic type for data arguments.
-type DataArgs[T any] struct {
-	Name        string // The name of the data
-	Description string // A brief description of the data
-	Value       T      // The value of the data
-}
-
-// DataOutput is a generic type for data output results.
-type DataOutput[T any] struct {
-	Name    string // The name of the output
-	Value   T      // The value of the output
-	Success bool   // Indicates if the operation was successful
-	Error   string // Contains error message if any
+// DataOutput 描述 Data 操作的返回结果。
+type DataOutput struct {
+	Name    string // 输出名称
+	Value   any    // 输出值
+	Success bool   // 操作是否成功
+	Error   string // 错误信息（若有）
 }

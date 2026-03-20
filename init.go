@@ -3,7 +3,6 @@ package FasterEdge
 import (
 	"github.com/FasterEdge/FasterEdge/ability"
 	"github.com/FasterEdge/FasterEdge/data"
-	dataPkg "github.com/FasterEdge/FasterEdge/data"
 	"github.com/FasterEdge/FasterEdge/types"
 )
 
@@ -26,8 +25,8 @@ func PreRunAtom(atom types.Atom) {
 	}
 
 	if d, ok := atom.GetAllData()["BaseData"]; ok {
-		d.CommandAny(atom, "print_logo", dataPkg.BaseDataArgs{})
-		d.CommandAny(atom, "print_info", dataPkg.BaseDataArgs{})
+		d.Command(atom, "print_logo", nil)
+		d.Command(atom, "print_info", nil)
 	}
 }
 
@@ -44,17 +43,17 @@ func RunAtom(atom types.Atom) {
 
 	// 直接使用携程运行所有Ability里面的run指令（如果runable返回true）
 	for _, ab := range atom.GetAllAbility() {
-		if ab.CommandAny(atom, "runnable", nil).Success {
-			go ab.CommandAny(atom, "run", nil)
+		if ab.Command(atom, "runnable", nil).Success {
+			go ab.Command(atom, "run", nil)
 		}
 	}
 
 	if d, ok := atom.GetAllData()["BaseData"]; ok {
-		d.CommandAny(atom, "print_logo", dataPkg.BaseDataArgs{})
-		d.CommandAny(atom, "print_info", dataPkg.BaseDataArgs{})
+		d.Command(atom, "print_logo", nil)
+		d.Command(atom, "print_info", nil)
 	}
 
 	if base, ok := atom.GetAllAbility()["BaseAbility"]; ok {
-		base.CommandAny(atom, "blocking", nil)
+		base.Command(atom, "blocking", nil)
 	}
 }

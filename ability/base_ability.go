@@ -6,57 +6,63 @@ import (
 	"github.com/FasterEdge/FasterEdge/types"
 )
 
+// 基础能力的入参定义
 type BaseAbilityArgs struct {
-	ListArgs []string
+	ListArgs []string // 用于存储参数列表
 }
 
-// BaseAbilityOutput represents the command result.
-type BaseAbilityOutput struct {
-	Success bool
-	Error   string
-}
+// 基础能力的出参定义（可以封存在AbilityOutput中的Data）...
 
+// BaseAbility 相关参数
 type BaseAbility struct {
 }
 
+// 能力名称
 func (a *BaseAbility) GetName() string {
 	return "BaseAbility"
 }
 
+// 能力描述
 func (b *BaseAbility) Describe() string {
 	return "BaseAbility是一个基础能力，提供一些基本功能。"
 }
 
+// 挂载前检查定义
 func (b *BaseAbility) Check(atmo types.Atom) bool {
-	// 检查BaseData是否已经被挂载
+	// 检查 BaseData 是否已经被挂载
 	if _, ok := atmo.GetAllData()["BaseData"]; !ok {
 		return false
 	}
 	return true
 }
 
+// 挂载定义
 func (b *BaseAbility) Mount(atmo types.Atom) bool {
-	b.Check(atmo)
+	if !b.Check(atmo) {
+		fmt.Errorf("[%s] 挂载失败: BaseData未挂载", b.GetName())
+		return false
+	}
 	atmo.AddAbility(b)
 	return true
 }
 
-// Command implements typed handler for BaseAbility.
-func (b *BaseAbility) Command(atmo types.Atom, act string, args BaseAbilityArgs) types.AbilityOutput[BaseAbilityOutput] {
+// 指令入口
+func (b *BaseAbility) Command(atmo types.Atom, act string, args any) types.AbilityOutput {
+	typed, _ := args.(BaseAbilityArgs)
 	switch act {
 	case "list_data_name":
 		fmt.Printf("[%s] 正在执行 list_data_name\n", b.GetName())
 		for key := range atmo.GetAllData() { // print map keys
 			println(key)
 		}
-		return types.AbilityOutput[BaseAbilityOutput]{Name: act, Success: true}
+		return types.AbilityOutput{Name: act, Success: true}
 
 	case "list_ability_name":
 		fmt.Printf("[%s] 正在执行 list_ability_name\n", b.GetName())
 		for key := range atmo.GetAllAbility() { // print map keys
 			println(key)
 		}
-		return types.AbilityOutput[BaseAbilityOutput]{Name: act, Success: true}
+		return types.AbilityOutput{Name: act, Success: true}
 
 	case "blocking":
 		fmt.Printf("[%s] 正在执行 blocking\n", b.GetName())
@@ -64,12 +70,8 @@ func (b *BaseAbility) Command(atmo types.Atom, act string, args BaseAbilityArgs)
 		select {}
 	}
 
-	return types.AbilityOutput[BaseAbilityOutput]{Name: act, Success: false, Error: "unsupported act"}
+	_ = typed
+	return types.AbilityOutput{Name: act, Success: false, Error: "unsupported act"}
 }
 
-// CommandAny adapts untyped args to the typed Command.
-func (b *BaseAbility) CommandAny(atmo types.Atom, act string, args any) types.AbilityOutput[any] {
-	typed, _ := args.(BaseAbilityArgs)
-	out := b.Command(atmo, act, typed)
-	return types.AbilityOutput[any]{Name: out.Name, Value: out.Value, Success: out.Success, Error: out.Error}
-}
+// 细节方法实现...

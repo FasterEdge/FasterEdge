@@ -44,22 +44,16 @@ func (b *BaseData) Mount(atmo types.Atom) bool {
 	return true
 }
 
-func (b *BaseData) Command(atmo types.Atom, act string, args BaseDataArgs) types.DataOutput[BaseDataOutput] {
+func (b *BaseData) Command(atmo types.Atom, act string, args any) types.DataOutput {
 	_ = atmo
 	switch act {
 	case "print_logo":
 		fmt.Println(logo)
-		return types.DataOutput[BaseDataOutput]{Name: act, Success: true}
+		return types.DataOutput{Name: act, Success: true}
 	case "print_info":
 		fmt.Println("FasterEdge v" + version + " - 对称、可靠、安全的多场景边缘计算框架")
-		return types.DataOutput[BaseDataOutput]{Name: act, Success: true}
+		return types.DataOutput{Name: act, Success: true}
 	}
 
-	return types.DataOutput[BaseDataOutput]{Name: act, Success: false, Error: "unsupported act"}
-}
-
-func (b *BaseData) CommandAny(atmo types.Atom, act string, args any) types.DataOutput[any] {
-	typed, _ := args.(BaseDataArgs)
-	out := b.Command(atmo, act, typed)
-	return types.DataOutput[any]{Name: out.Name, Value: out.Value, Success: out.Success, Error: out.Error}
+	return types.DataOutput{Name: act, Success: false, Error: "unsupported act"}
 }
