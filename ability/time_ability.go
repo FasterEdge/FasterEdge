@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/FasterEdge/FasterEdge/types"
+	"github.com/beevik/ntp"
 )
 
 // TimeAbilityArgs 定义时间能力相关命令的入参
@@ -25,7 +26,7 @@ type TimeAbilityOutput struct {
 	Error   string
 }
 
-// TimeAbility
+// TimeAbility 相关参数
 type TimeAbility struct {
 	mu            sync.RWMutex
 	lastSource    string
@@ -67,7 +68,7 @@ func (t *TimeAbility) Mount(atmo types.Atom) bool {
 func (t *TimeAbility) Command(atmo types.Atom, act string, args any) types.AbilityOutput {
 	typed, _ := args.(TimeAbilityArgs)
 	switch act {
-	case "sync_net":
+	case "sync_net": // 通过网络地址请求获得时间并同步
 		fmt.Printf("[%s] 正在执行 sync_net\n", t.GetName())
 		url := typed.URL
 		if url == "" {
@@ -79,7 +80,7 @@ func (t *TimeAbility) Command(atmo types.Atom, act string, args any) types.Abili
 		}
 		return types.AbilityOutput{Name: act, Success: false, Error: "fetch failed"}
 
-	case "sync_manual":
+	case "sync_manual": // 通过手动输入的时间字符串进行同步
 		fmt.Printf("[%s] 正在执行 sync_manual\n", t.GetName())
 		ts, err := time.Parse(time.RFC3339, typed.Value)
 		if err != nil {
@@ -88,10 +89,24 @@ func (t *TimeAbility) Command(atmo types.Atom, act string, args any) types.Abili
 		t.setSync(ts, "manual")
 		return types.AbilityOutput{Name: act, Success: true}
 
-	case "sync_system":
+	case "sync_system": // 直接使用系统时间进行同步
 		fmt.Printf("[%s] 正在执行 sync_system\n", t.GetName())
 		now := time.Now()
 		t.setSync(now, "system")
+		return types.AbilityOutput{Name: act, Success: true}
+
+	case "sync_ntp": // 通过NTP服务器进行同步
+		fmt.Printf("[%s] 正在执行 sync_ntp\n", t.GetName())
+		url := typed.URL
+		if url == "" {
+			url = "pool.ntp.org"
+		}
+		ts, err := ntp.Time(url)
+		if err != nil {
+			fmt.Printf("[%s] NTP同步失败: %v\n", t.GetName(), err)
+			return types.AbilityOutput{Name: act, Success: false, Error: "ntp fetch failed"}
+		}
+		t.setSync(ts, "ntp:"+url)
 		return types.AbilityOutput{Name: act, Success: true}
 
 	case "last":
