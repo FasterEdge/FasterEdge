@@ -12,17 +12,20 @@ import (
 	"github.com/FasterEdge/FasterEdge/types"
 )
 
+// TimeAbilityArgs 定义时间能力相关命令的入参
 type TimeAbilityArgs struct {
 	URL   string
 	Value string
 }
 
+// TimeAbilityOutput 描述时间能力命令的输出结果
 type TimeAbilityOutput struct {
 	Message string
 	Success bool
 	Error   string
 }
 
+// TimeAbility
 type TimeAbility struct {
 	mu            sync.RWMutex
 	lastSource    string
@@ -31,14 +34,17 @@ type TimeAbility struct {
 	current       time.Time
 }
 
+// 能力名称
 func (t *TimeAbility) GetName() string {
 	return "TimeAbility"
 }
 
+// 能力描述
 func (t *TimeAbility) Describe() string {
 	return "提供网络/手动/系统对时能力，缓解设备本地时间不准的问题。"
 }
 
+// 验证是否满足挂载条件（需要BaseData）
 func (t *TimeAbility) Check(atmo types.Atom) bool {
 	// 检查BaseData是否已经被挂载
 	if _, ok := atmo.GetAllData()["BaseData"]; !ok {
@@ -47,13 +53,17 @@ func (t *TimeAbility) Check(atmo types.Atom) bool {
 	return true
 }
 
+// 将能力挂载到原子上
 func (t *TimeAbility) Mount(atmo types.Atom) bool {
-	t.Check(atmo)
+	if !t.Check(atmo) {
+		fmt.Errorf("[%s] 挂载失败: BaseData未挂载\n", t.GetName())
+		return false
+	}
 	atmo.AddAbility(t)
 	return true
 }
 
-// Command executes actions based on act with loose args (expects TimeAbilityArgs).
+// 指令入口
 func (t *TimeAbility) Command(atmo types.Atom, act string, args any) types.AbilityOutput {
 	typed, _ := args.(TimeAbilityArgs)
 	switch act {
@@ -114,6 +124,7 @@ func (t *TimeAbility) Command(atmo types.Atom, act string, args any) types.Abili
 	return types.AbilityOutput{Name: act, Success: false, Error: "unsupported act"}
 }
 
+// 工具方法实现
 func fetchNetworkTime(url string) (time.Time, error) {
 	resp, err := http.Get(url)
 	if err != nil {
