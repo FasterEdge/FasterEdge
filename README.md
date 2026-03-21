@@ -17,8 +17,7 @@
   <img src="https://github.com/FasterEdge/.github/blob/65efc7066ee8cdd791bf4e65d9854130997b49fd/images/concept.png" style="width:96%;" width="100"/>
 </div>
 
-图中的小女孩代表着业务或用户（Business/User），这些树枝是由树根（Data）提供养分生长出来的，而树根又可以从大地（Data）。
-
+图中的小女孩代表着业务或用户（Business/User），这些树枝（Ability）是由树根（Data）提供养分生长出来的。 
 
 ### 术语
 

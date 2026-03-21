@@ -31,10 +31,13 @@ func (b *TestAbility) Command(atmo types.Atom, act string, args any) types.Abili
 	return types.AbilityOutput{Name: act, Success: false}
 }
 
-func TestAtom(t *testing.T) {
+func TestTimeAtom(t *testing.T) {
 	atom := InitAtom()
 	atom.AddData(&TestData{})
 	atom.AddAbility(&TestAbility{})
 	atom.AddAbility(&ability.TimeAbility{})
-	RunAtom(atom)
+	PreRunAtom(atom)
+	atom.GetAllAbility()["TimeAbility"].Command(atom, "sync_ntp", nil)
+	atom.GetAllAbility()["TimeAbility"].Command(atom, "get_time", nil)
+
 }

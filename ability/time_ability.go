@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,8 +16,11 @@ import (
 
 // TimeAbilityArgs 定义时间能力相关命令的入参
 type TimeAbilityArgs struct {
-	URL   string
-	Value string
+	URL      string
+	NTP      string
+	Value    string
+	Mode     string // run中的的定时依据 “CPU”：就是直接使用ticker、“System”:利用系统时钟的变化量（因为系统时间可能是不准或者错乱的，但是时间变化量是固定的）来调整当前时间，默认 "System"
+	Accuracy string // 当指定的是 CPU模式时，精度要求，单位可以是 "ns"：、"ms"、"s"、"m"，默认 "ms"
 }
 
 // TimeAbilityOutput 描述时间能力命令的输出结果
@@ -24,6 +28,7 @@ type TimeAbilityOutput struct {
 	Message string
 	Success bool
 	Error   string
+	Time    time.Time
 }
 
 // TimeAbility 相关参数
@@ -32,7 +37,9 @@ type TimeAbility struct {
 	lastSource    string
 	lastSynced    time.Time
 	baseMonotonic time.Time
+	baseWallClock time.Time // 记录上次同步时的系统时间
 	current       time.Time
+	runMode       string
 }
 
 // 能力名称
@@ -46,26 +53,26 @@ func (t *TimeAbility) Describe() string {
 }
 
 // 验证是否满足挂载条件（需要BaseData）
-func (t *TimeAbility) Check(atmo types.Atom) bool {
+func (t *TimeAbility) Check(atom types.Atom) bool {
 	// 检查BaseData是否已经被挂载
-	if _, ok := atmo.GetAllData()["BaseData"]; !ok {
+	if _, ok := atom.GetAllData()["BaseData"]; !ok {
 		return false
 	}
 	return true
 }
 
 // 将能力挂载到原子上
-func (t *TimeAbility) Mount(atmo types.Atom) bool {
-	if !t.Check(atmo) {
+func (t *TimeAbility) Mount(atom types.Atom) bool {
+	if !t.Check(atom) {
 		fmt.Errorf("[%s] 挂载失败: BaseData未挂载\n", t.GetName())
 		return false
 	}
-	atmo.AddAbility(t)
+	atom.AddAbility(t)
 	return true
 }
 
 // 指令入口
-func (t *TimeAbility) Command(atmo types.Atom, act string, args any) types.AbilityOutput {
+func (t *TimeAbility) Command(atom types.Atom, act string, args any) types.AbilityOutput {
 	typed, _ := args.(TimeAbilityArgs)
 	switch act {
 	case "sync_net": // 通过网络地址请求获得时间并同步
@@ -97,7 +104,7 @@ func (t *TimeAbility) Command(atmo types.Atom, act string, args any) types.Abili
 
 	case "sync_ntp": // 通过NTP服务器进行同步
 		fmt.Printf("[%s] 正在执行 sync_ntp\n", t.GetName())
-		url := typed.URL
+		url := typed.NTP
 		if url == "" {
 			url = "pool.ntp.org"
 		}
@@ -122,20 +129,48 @@ func (t *TimeAbility) Command(atmo types.Atom, act string, args any) types.Abili
 	case "run":
 		fmt.Printf("[%s] 正在执行 run\n", t.GetName())
 		t.ensureSynced()
-		ticker := time.NewTicker(time.Second)
-		defer ticker.Stop()
-		for now := range ticker.C {
-			t.advance(now)
+		mode := strings.ToLower(strings.TrimSpace(typed.Mode))
+		if mode == "" {
+			mode = "system"
+		}
+		accuracy := strings.ToLower(strings.TrimSpace(typed.Accuracy))
+		if accuracy == "" {
+			accuracy = "ms"
+		}
+		interval, err := parseAccuracy(accuracy)
+		if err != nil {
+			return types.AbilityOutput{Name: act, Success: false, Error: err.Error()}
+		}
+
+		t.mu.Lock()
+		t.runMode = mode
+		t.mu.Unlock()
+
+		switch mode {
+		case "system":
+			// system 模式依赖 get_time 时使用系统时钟推算，不需要常驻 ticker
+			return types.AbilityOutput{Name: act, Success: true}
+		case "cpu":
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			for now := range ticker.C {
+				t.advance(now)
+			}
+		default:
+			return types.AbilityOutput{Name: act, Success: false, Error: "unsupported run mode"}
 		}
 		return types.AbilityOutput{Name: act, Success: true}
 
 	case "get_time":
 		t.ensureSynced()
-		fmt.Printf("[%s] %s\n", t.GetName(), t.now().Format(time.RFC3339Nano))
-		return types.AbilityOutput{Name: act, Success: true}
+		now := t.now()
+		msg := now.Format(time.RFC3339Nano)
+		fmt.Printf("[%s] %s\n", t.GetName(), msg)
+		return types.AbilityOutput{Name: act, Success: true, Value: TimeAbilityOutput{Message: msg, Success: true, Time: now}}
+
 	}
 
-	_ = atmo
+	_ = atom
 	return types.AbilityOutput{Name: act, Success: false, Error: "unsupported act"}
 }
 
@@ -172,7 +207,9 @@ func fetchNetworkTime(url string) (time.Time, error) {
 func (t *TimeAbility) setSync(ts time.Time, source string) {
 	t.mu.Lock()
 	t.lastSynced = ts
-	t.baseMonotonic = time.Now()
+	current := time.Now()
+	t.baseMonotonic = current
+	t.baseWallClock = current
 	t.current = ts
 	t.lastSource = source
 	t.mu.Unlock()
@@ -212,11 +249,49 @@ func (t *TimeAbility) getLast() (string, time.Time) {
 // 获取当前时间，如果没有同步过则返回系统时间
 func (t *TimeAbility) now() time.Time {
 	t.mu.RLock()
-	if t.current.IsZero() {
-		t.mu.RUnlock()
+	mode := t.runMode
+	cur := t.current
+	lastSynced := t.lastSynced
+	wall := t.baseWallClock
+	t.mu.RUnlock()
+
+	if lastSynced.IsZero() {
 		return time.Now()
 	}
-	cur := t.current
-	t.mu.RUnlock()
+
+	// system 模式：按需用系统壁钟推算（跟随系统时间变动）
+	if mode == "" || mode == "system" {
+		if wall.IsZero() {
+			return lastSynced
+		}
+		offset := lastSynced.Sub(wall)
+		return time.Now().Add(offset)
+	}
+
+	if cur.IsZero() {
+		return time.Now()
+	}
 	return cur
+}
+
+// 根据精度字符串解析时间间隔
+func parseAccuracy(acc string) (time.Duration, error) {
+	switch acc {
+	case "ns":
+		return time.Nanosecond, nil
+	case "us", "µs":
+		return time.Microsecond, nil
+	case "ms":
+		return time.Millisecond, nil
+	case "s":
+		return time.Second, nil
+	case "m":
+		return time.Minute, nil
+	case "":
+		return time.Millisecond, nil
+	}
+	if d, err := time.ParseDuration(acc); err == nil && d > 0 {
+		return d, nil
+	}
+	return 0, fmt.Errorf("unsupported accuracy: %s", acc)
 }
