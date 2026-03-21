@@ -43,6 +43,8 @@ func (r *RoleAbility) Command(atmo types.Atom, act string, args any) types.Abili
 	case "set_role":
 		r.role = typed.Role
 		return types.AbilityOutput{Name: act, Success: true, Value: RoleAbilityOutput{Message: "角色设置成功", Success: true}}
+	case "get_role":
+		return types.AbilityOutput{Name: act, Success: true, Value: RoleAbilityOutput{Message: r.role, Success: true}}
 	}
 	return types.AbilityOutput{Name: act, Success: false, Error: "unsupported act"}
 }
