@@ -14,7 +14,9 @@ type RoleAbilityOutput struct {
 	Error   string
 }
 
-type RoleAbility struct{}
+type RoleAbility struct {
+	role string
+}
 
 func (r *RoleAbility) GetName() string { return "RoleAbility" }
 
@@ -38,8 +40,9 @@ func (r *RoleAbility) Command(atmo types.Atom, act string, args any) types.Abili
 	switch act {
 	case "describe":
 		return types.AbilityOutput{Name: act, Success: true, Value: RoleAbilityOutput{Message: r.Describe(), Success: true}}
+	case "set_role":
+		r.role = typed.Role
+		return types.AbilityOutput{Name: act, Success: true, Value: RoleAbilityOutput{Message: "角色设置成功", Success: true}}
 	}
-	_ = atmo
-	_ = typed
 	return types.AbilityOutput{Name: act, Success: false, Error: "unsupported act"}
 }
