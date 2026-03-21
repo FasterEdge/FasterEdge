@@ -21,5 +21,13 @@
 
 ### 术语
 
+### 开发模式
+
+### 生态系统
+
+### 设计哲学
+- 依赖抽象而不依赖具体（Depend on Abstractions, Not on Concrete Implementations.）
+- 遵循策略模式（Strategy Pattern）、 命令模式（Command Pattern）、 组合模式（Composite Pattern）
+
 
     
