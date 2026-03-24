@@ -2,7 +2,7 @@ package ability
 
 import (
 	"fmt"
-
+	
 	"github.com/FasterEdge/FasterEdge/types"
 )
 

@@ -39,5 +39,12 @@ func TestTimeAtom(t *testing.T) {
 	PreRunAtom(atom)
 	atom.GetAllAbility()["TimeAbility"].Command(atom, "sync_ntp", nil)
 	atom.GetAllAbility()["TimeAbility"].Command(atom, "get_time", nil)
+}
+
+func TestSendUnixSocket(t *testing.T) {
+
+}
+
+func TestReceiveUnixSocket(t *testing.T) {
 
 }
