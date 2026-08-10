@@ -19,11 +19,14 @@ const (
 )
 
 type Atom struct {
-	mu        sync.RWMutex
-	name      string
-	data      map[string]Data
-	abilities map[string]Ability
-	state     AtomState
+	mu               sync.RWMutex
+	name             string
+	data             map[string]Data
+	abilities        map[string]Ability
+	state            AtomState
+	mounted          []namedComponent
+	mountedAbilities []namedComponent
+	transitioning    bool
 }
 
 func (a *Atom) GetName() string {
@@ -41,7 +44,7 @@ func (a *Atom) SetName(name string) error {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.state != AtomCreated {
+	if a.state != AtomCreated || a.transitioning {
 		return fmt.Errorf("set atom name: %w", ErrInvalidState)
 	}
 	if strings.TrimSpace(name) == "" || strings.TrimSpace(name) != name {
@@ -72,7 +75,7 @@ func (a *Atom) addData(d Data) error {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.state != AtomCreated {
+	if a.state != AtomCreated || a.transitioning {
 		return fmt.Errorf("add data %s: %w", name, ErrInvalidState)
 	}
 	if a.data == nil {

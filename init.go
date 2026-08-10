@@ -20,14 +20,7 @@ func InitAtom() *types.Atom {
 
 // 只挂载数据和能力，用于给用户提供自定义开发的基础环境
 func PreRunAtom(atom *types.Atom) {
-	// 对所有的Data进行挂载
-	for _, d := range atom.GetAllData() {
-		_ = d.Mount(atom)
-	}
-	// 对所有的Ability进行挂载
-	for _, ab := range atom.GetAllAbility() {
-		_ = ab.Mount(atom)
-	}
+	_ = atom.PreRun()
 
 	if d, ok := atom.GetAllData()["BaseData"]; ok {
 		d.Command(atom, "print_logo", nil)
