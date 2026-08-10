@@ -330,6 +330,7 @@ defaultNTPServer:  "pool.ntp.org"
 ```
 
 Every duration and byte limit option rejects non-positive values with `types.ErrInvalidArguments`. The constructor applies defaults first, then options, and installs the same config used by lazy zero-value initialization.
+Passing a nil `TimeOption` is also an `types.ErrInvalidArguments` error; no nil option is silently skipped.
 
 - [ ] **Step 5: Verify GREEN**
 

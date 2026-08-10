@@ -319,7 +319,11 @@ func (a *Atom) SetName(name string) error {
     if a.state != AtomCreated {
         return fmt.Errorf("set atom name: %w", ErrInvalidState)
     }
-    a.name = strings.TrimSpace(name)
+    trimmed := strings.TrimSpace(name)
+    if trimmed == "" || trimmed != name {
+        return fmt.Errorf("set atom name: %w", ErrInvalidComponentName)
+    }
+    a.name = name
     return nil
 }
 
@@ -565,7 +569,7 @@ Implement `MountAll` as this state machine:
 3. before every callback, recover `GetName` panic and compare the returned string exactly to the registered name;
 4. invoke every `Check` through `safeComponentCall` and join all check failures;
 5. only when all checks pass, invoke `Mount` in stable order;
-6. on mount failure, invoke `Unmount` for already-mounted components in reverse order with `context.Background()` rather than a canceled context;
+6. on mount failure, invoke `Unmount` for already-mounted components in reverse order using a fresh cleanup context rather than a canceled context;
 7. lock only to publish `mounted`, the distinct `mountedAbilities` slice, `state`, and `transitioning` after callbacks finish.
 
 In the same GREEN change, update `SetName`, `AddData`, and `AddAbility` to require `AtomCreated && !transitioning`. This closes the window where a component could be registered after the pre-run snapshot but before Atom becomes mounted.
@@ -592,6 +596,8 @@ func safeComponentCall(name, phase string, call func() error) (err error) {
 ```
 
 Add `safeComponentName` with the same panic recovery discipline and `unmountReverse` that calls only components implementing `Unmounter` and uses `errors.Join`. Never hold `Atom.mu` while invoking `GetName`, `Check`, `Mount`, or `Unmount`. Do not infer Data versus Ability from the markerless `Component` method set; populate `mountedAbilities` while copying the Ability registry.
+
+Mount rollback must use `context.WithTimeout(context.Background(), 5*time.Second)`, not a canceled caller context. Run each rollback `Unmount` through a buffered result channel; if a component ignores the cleanup context, return `ShutdownTimeoutError{Phase: "mount rollback", Components: []string{name}}`, keep Atom in `AtomFailed`, and do not invoke later cleanup callbacks that could race with the stuck component.
 
 - [ ] **Step 4: Make PreRunAtom delegate to the mount transaction**
 

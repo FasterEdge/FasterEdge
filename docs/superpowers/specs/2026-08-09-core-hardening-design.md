@@ -54,6 +54,8 @@ func RunAtom(ctx context.Context, atom *types.Atom, opts ...RunOption) error
 
 `RunAtom` 默认关闭等待时间为 5 秒，并提供 `WithShutdownTimeout` 调整。nil Atom、非法状态和非正关闭时间均返回明确错误。
 
+由于 `types.Atom` 持有生命周期私有状态，根包入口委托给 `(*Atom).MountAll() error` 与 `(*Atom).RunAll(context.Context, time.Duration) error`；这两个方法是内核实现边界，公开根包入口负责统一校验和默认选项。
+
 组件接口共享以下约定：
 
 ```go
@@ -143,7 +145,7 @@ func (a *Atom) State() AtomState
 4. 任一 Runner 返回非 context 错误时，监督器记录组件名称和原始错误，并取消其他 Runner。
 5. Runner goroutine 的 panic 被恢复为 `ComponentPanicError`，按 Runner 错误处理，不允许传播到进程顶层。
 6. 外部 context 取消或截止时，监督器把取消信号传播给全部 Runner。
-7. 监督器等待 Runner 退出；超过关闭等待时间则返回 `ErrShutdownTimeout`。Go 无法强制杀死 goroutine，因此 Runner 必须响应 context，超时错误用于暴露违反契约的实现。
+7. 监督器等待 Runner 退出；超过关闭等待时间则返回包含超时值和活跃 Runner 名称的 `ShutdownTimeoutError`，并可通过 `errors.Is` 判断 `ErrShutdownTimeout`。Go 无法强制杀死 goroutine，因此 Runner 必须响应 context，超时错误用于暴露违反契约的实现。
 8. 只有 Runner 全部退出后，才使用独立的新清理 context 逆序卸载实现 `Unmounter` 的组件，不能复用已取消的 Runner context。清理完整时 Atom 转为 `Stopped`；卸载失败或超时时转为 `Failed` 并返回汇总错误。
 9. 若关闭超时，监督器不卸载仍可能被存活 Runner 使用的资源，Atom 转为 `Failed`。这会有意保留资源而不是制造并发关闭或 use-after-close；错误会明确列出未退出的 Runner。
 
