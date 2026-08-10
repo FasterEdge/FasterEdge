@@ -2,7 +2,7 @@ package ability
 
 import (
 	"fmt"
-	
+
 	"github.com/FasterEdge/FasterEdge/types"
 )
 
@@ -28,26 +28,24 @@ func (b *BaseAbility) Describe() string {
 }
 
 // 挂载前检查定义
-func (b *BaseAbility) Check(atom types.Atom) bool {
+func (b *BaseAbility) Check(atom *types.Atom) error {
 	// 检查 BaseData 是否已经被挂载
-	if _, ok := atom.GetAllData()["BaseData"]; !ok {
-		return false
+	if _, ok := atom.Data("BaseData"); !ok {
+		return types.ErrMissingDependency
 	}
-	return true
+	return nil
 }
 
 // 挂载定义
-func (b *BaseAbility) Mount(atom types.Atom) bool {
-	if !b.Check(atom) {
-		fmt.Errorf("[%s] 挂载失败: BaseData未挂载", b.GetName())
-		return false
+func (b *BaseAbility) Mount(atom *types.Atom) error {
+	if err := b.Check(atom); err != nil {
+		return err
 	}
-	atom.AddAbility(b)
-	return true
+	return nil
 }
 
 // 指令入口
-func (b *BaseAbility) Command(atom types.Atom, act string, args any) types.AbilityOutput {
+func (b *BaseAbility) Command(atom *types.Atom, act string, args any) types.CommandOutput {
 	typed, _ := args.(BaseAbilityArgs)
 	switch act {
 	case "list_data_name":
@@ -55,14 +53,14 @@ func (b *BaseAbility) Command(atom types.Atom, act string, args any) types.Abili
 		for key := range atom.GetAllData() { // print map keys
 			println(key)
 		}
-		return types.AbilityOutput{Name: act, Success: true}
+		return types.CommandOutput{Name: act}
 
 	case "list_ability_name":
 		fmt.Printf("[%s] 正在执行 list_ability_name\n", b.GetName())
 		for key := range atom.GetAllAbility() { // print map keys
 			println(key)
 		}
-		return types.AbilityOutput{Name: act, Success: true}
+		return types.CommandOutput{Name: act}
 
 	case "blocking":
 		fmt.Printf("[%s] 正在执行 blocking\n", b.GetName())
@@ -71,7 +69,7 @@ func (b *BaseAbility) Command(atom types.Atom, act string, args any) types.Abili
 	}
 
 	_ = typed
-	return types.AbilityOutput{Name: act, Success: false, Error: "unsupported act"}
+	return types.CommandOutput{Name: act, Err: fmt.Errorf("command %s: %w", act, types.ErrUnsupportedCommand)}
 }
 
 // 细节方法实现...

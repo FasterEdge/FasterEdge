@@ -53,26 +53,18 @@ func (t *TimeAbility) Describe() string {
 }
 
 // 验证是否满足挂载条件（需要BaseData）
-func (t *TimeAbility) Check(atom types.Atom) bool {
-	// 检查BaseData是否已经被挂载
-	if _, ok := atom.GetAllData()["BaseData"]; !ok {
-		return false
+func (t *TimeAbility) Check(atom *types.Atom) error {
+	if _, ok := atom.Data("BaseData"); !ok {
+		return types.ErrMissingDependency
 	}
-	return true
+	return nil
 }
 
 // 将能力挂载到原子上
-func (t *TimeAbility) Mount(atom types.Atom) bool {
-	if !t.Check(atom) {
-		fmt.Errorf("[%s] 挂载失败: BaseData未挂载\n", t.GetName())
-		return false
-	}
-	atom.AddAbility(t)
-	return true
-}
+func (t *TimeAbility) Mount(atom *types.Atom) error { return t.Check(atom) }
 
 // 指令入口
-func (t *TimeAbility) Command(atom types.Atom, act string, args any) types.AbilityOutput {
+func (t *TimeAbility) Command(atom *types.Atom, act string, args any) types.CommandOutput {
 	typed, _ := args.(TimeAbilityArgs)
 	switch act {
 	case "sync_net": // 通过网络地址请求获得时间并同步
@@ -83,24 +75,24 @@ func (t *TimeAbility) Command(atom types.Atom, act string, args any) types.Abili
 		}
 		if ts, err := fetchNetworkTime(url); err == nil {
 			t.setSync(ts, "net:"+url)
-			return types.AbilityOutput{Name: act, Success: true}
+			return types.CommandOutput{Name: act}
 		}
-		return types.AbilityOutput{Name: act, Success: false, Error: "fetch failed"}
+		return types.CommandOutput{Name: act, Err: fmt.Errorf("fetch failed")}
 
 	case "sync_manual": // 通过手动输入的时间字符串进行同步
 		fmt.Printf("[%s] 正在执行 sync_manual\n", t.GetName())
 		ts, err := time.Parse(time.RFC3339, typed.Value)
 		if err != nil {
-			return types.AbilityOutput{Name: act, Success: false, Error: "invalid time"}
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("invalid time")}
 		}
 		t.setSync(ts, "manual")
-		return types.AbilityOutput{Name: act, Success: true}
+		return types.CommandOutput{Name: act}
 
 	case "sync_system": // 直接使用系统时间进行同步
 		fmt.Printf("[%s] 正在执行 sync_system\n", t.GetName())
 		now := time.Now()
 		t.setSync(now, "system")
-		return types.AbilityOutput{Name: act, Success: true}
+		return types.CommandOutput{Name: act}
 
 	case "sync_ntp": // 通过NTP服务器进行同步
 		fmt.Printf("[%s] 正在执行 sync_ntp\n", t.GetName())
@@ -111,20 +103,20 @@ func (t *TimeAbility) Command(atom types.Atom, act string, args any) types.Abili
 		ts, err := ntp.Time(url)
 		if err != nil {
 			fmt.Printf("[%s] NTP同步失败: %v\n", t.GetName(), err)
-			return types.AbilityOutput{Name: act, Success: false, Error: "ntp fetch failed"}
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("ntp fetch failed")}
 		}
 		t.setSync(ts, "ntp:"+url)
-		return types.AbilityOutput{Name: act, Success: true}
+		return types.CommandOutput{Name: act}
 
 	case "last":
 		fmt.Printf("[%s] 正在执行 last\n", t.GetName())
 		src, ts := t.getLast()
 		println(src, ts.String())
-		return types.AbilityOutput{Name: act, Success: true, Value: TimeAbilityOutput{Message: ts.String(), Success: true}}
+		return types.CommandOutput{Name: act, Value: TimeAbilityOutput{Message: ts.String()}}
 
 	case "runnable":
 		fmt.Printf("[%s] 正在执行 runnable\n", t.GetName())
-		return types.AbilityOutput{Name: act, Success: true}
+		return types.CommandOutput{Name: act}
 
 	case "run":
 		fmt.Printf("[%s] 正在执行 run\n", t.GetName())
@@ -139,7 +131,7 @@ func (t *TimeAbility) Command(atom types.Atom, act string, args any) types.Abili
 		}
 		interval, err := parseAccuracy(accuracy)
 		if err != nil {
-			return types.AbilityOutput{Name: act, Success: false, Error: err.Error()}
+			return types.CommandOutput{Name: act, Err: err}
 		}
 
 		t.mu.Lock()
@@ -149,7 +141,7 @@ func (t *TimeAbility) Command(atom types.Atom, act string, args any) types.Abili
 		switch mode {
 		case "system":
 			// system 模式依赖 get_time 时使用系统时钟推算，不需要常驻 ticker
-			return types.AbilityOutput{Name: act, Success: true}
+			return types.CommandOutput{Name: act}
 		case "cpu":
 			ticker := time.NewTicker(interval)
 			defer ticker.Stop()
@@ -157,21 +149,21 @@ func (t *TimeAbility) Command(atom types.Atom, act string, args any) types.Abili
 				t.advance(now)
 			}
 		default:
-			return types.AbilityOutput{Name: act, Success: false, Error: "unsupported run mode"}
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("unsupported run mode")}
 		}
-		return types.AbilityOutput{Name: act, Success: true}
+		return types.CommandOutput{Name: act}
 
 	case "get_time":
 		t.ensureSynced()
 		now := t.now()
 		msg := now.Format(time.RFC3339Nano)
 		fmt.Printf("[%s] %s\n", t.GetName(), msg)
-		return types.AbilityOutput{Name: act, Success: true, Value: TimeAbilityOutput{Message: msg, Success: true, Time: now}}
+		return types.CommandOutput{Name: act, Value: TimeAbilityOutput{Message: msg, Time: now}}
 
 	}
 
 	_ = atom
-	return types.AbilityOutput{Name: act, Success: false, Error: "unsupported act"}
+	return types.CommandOutput{Name: act, Err: fmt.Errorf("command %s: %w", act, types.ErrUnsupportedCommand)}
 }
 
 // 通过网络地址请求获得时间
