@@ -47,29 +47,31 @@ func (p addressPolicy) dialUDP(timeout time.Duration) func(string, string) (net.
 			return nil, err
 		}
 		ctx := context.Background()
-		resolver := p
-		ips, err := resolver.resolve(ctx, host)
+		ips, err := p.resolve(ctx, host)
 		if err != nil {
 			return nil, err
 		}
-		d := net.Dialer{Timeout: timeout}
-		if localAddress != "" {
-			// LocalAddress is advisory in ntp; avoid parsing failures and let the
-			// standard dialer select the interface.
-			_ = localAddress
-		}
-		var errs []error
-		for _, ip := range ips {
-			addr := net.JoinHostPort(ip.IP.String(), port)
-			conn, e := d.DialContext(ctx, "udp", addr)
-			if e == nil {
-				_ = conn.SetDeadline(time.Now().Add(timeout))
-				return conn, nil
-			}
-			errs = append(errs, e)
-		}
-		return nil, errors.Join(errs...)
+		return dialUDPAddresses(timeout, localAddress, port, ips)
 	}
+}
+
+func dialUDPAddresses(timeout time.Duration, localAddress, port string, ips []net.IPAddr) (net.Conn, error) {
+	ctx := context.Background()
+	d := net.Dialer{Timeout: timeout}
+	if localAddress != "" {
+		_ = localAddress
+	}
+	var errs []error
+	for _, ip := range ips {
+		addr := net.JoinHostPort(ip.IP.String(), port)
+		conn, e := d.DialContext(ctx, "udp", addr)
+		if e == nil {
+			_ = conn.SetDeadline(time.Now().Add(timeout))
+			return conn, nil
+		}
+		errs = append(errs, e)
+	}
+	return nil, errors.Join(errs...)
 }
 
 func (t *TimeAbility) fetchNTPTime(address string) (time.Time, error) {
@@ -80,18 +82,25 @@ func (t *TimeAbility) fetchNTPTime(address string) (time.Time, error) {
 	}
 	// Resolve and validate every result before handing control to the client;
 	// the policy-aware dialer then connects only to numeric addresses.
-	if _, err := t.networkPolicy.resolve(context.Background(), ntpHost(server)); err != nil {
+	ips, err := t.networkPolicy.resolve(context.Background(), ntpHost(server))
+	if err != nil {
 		return time.Time{}, err
 	}
 	t.mu.RLock()
-	q, timeout, clock, policy := t.ntpQuery, t.ntpTimeout, t.clock, t.networkPolicy
+	q, timeout, clock := t.ntpQuery, t.ntpTimeout, t.clock
 	t.mu.RUnlock()
 	if q == nil {
 		return time.Time{}, errors.New("NTP query client is unavailable")
 	}
 	resp, err := q.QueryWithOptions(server, ntp.QueryOptions{
-		Timeout:       timeout,
-		Dialer:        policy.dialUDP(timeout),
+		Timeout: timeout,
+		Dialer: func(localAddress, remoteAddress string) (net.Conn, error) {
+			_, port, splitErr := net.SplitHostPort(remoteAddress)
+			if splitErr != nil {
+				return nil, splitErr
+			}
+			return dialUDPAddresses(timeout, localAddress, port, ips)
+		},
 		GetSystemTime: clock.Now,
 	})
 	if err != nil {

@@ -87,7 +87,7 @@ func (p addressPolicy) dialContext(d *net.Dialer) func(context.Context, string, 
 	return func(ctx context.Context, network, address string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(address)
 		if err != nil {
-			return nil, fmt.Errorf("%w: %v", ErrInvalidTimeURL, err)
+			return nil, fmt.Errorf("%w: %w: %v", types.ErrInvalidArguments, ErrInvalidTimeURL, err)
 		}
 		ips, err := p.resolve(ctx, host)
 		if err != nil {
