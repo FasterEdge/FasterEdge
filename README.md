@@ -29,5 +29,20 @@
 - 依赖抽象而不依赖具体（Depend on Abstractions, Not on Concrete Implementations.）
 - 遵循策略模式（Strategy Pattern）、 命令模式（Command Pattern）、 组合模式（Composite Pattern）
 
+### 生命周期与优雅退出
+
+FasterEdge 是库，不是独立进程。先注册组件，再挂载，最后在可取消的上下文中运行：
+
+```go
+atom, err := fasteredge.InitAtom()
+if err != nil { return err }
+if err := fasteredge.PreRunAtom(atom); err != nil { return err }
+return fasteredge.RunAtom(ctx, atom, fasteredge.WithShutdownTimeout(5*time.Second))
+```
+
+`RunAtom` 会监督实现 `types.Runner` 的 Ability；上下文取消或 Runner 返回错误后，框架使用新的清理上下文按逆序卸载组件。关闭超时、panic 和卸载错误均通过结构化 `error` 返回，组件注册表不会暴露内部 map。
+
+TimeAbility 的命令参数使用严格类型（例如 `TimeSyncManualArgs`），时间缓存基于单调时钟推进。网络时间源默认拒绝本机、私网、链路本地和组播地址，并禁用环境代理；只有显式启用 LAN 源选项时才放行私网地址。HTTP 响应限制为 64 KiB，NTP 使用校验后的响应偏移量。
+
 
     
