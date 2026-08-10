@@ -1,11 +1,9 @@
 package ability
 
 import (
-	"encoding/json"
+	"context"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -47,15 +45,83 @@ type TimeAbilityOutput = TimeSnapshot
 type TimeOutput = TimeSnapshot
 
 type TimeAbility struct {
-	initOnce   sync.Once
-	mu         sync.RWMutex
-	clock      timeClock
-	lastSource string
-	lastSynced time.Time
-	baseMono   time.Duration
-	current    time.Time
-	runMode    TimeRunMode
-	interval   time.Duration
+	initOnce          sync.Once
+	mu                sync.RWMutex
+	clock             timeClock
+	lastSource        string
+	lastSynced        time.Time
+	baseMono          time.Duration
+	current           time.Time
+	runMode           TimeRunMode
+	interval          time.Duration
+	networkPolicy     addressPolicy
+	httpTimeout       time.Duration
+	ntpTimeout        time.Duration
+	maxResponseBytes  int64
+	minimumTick       time.Duration
+	defaultNetworkURL string
+	defaultNTPServer  string
+}
+
+type timeAbilityConfig struct {
+	allowPrivate                        bool
+	httpTimeout, ntpTimeout             time.Duration
+	maxResponseBytes                    int64
+	minimumTick                         time.Duration
+	defaultNetworkURL, defaultNTPServer string
+}
+type TimeOption func(*timeAbilityConfig) error
+
+func WithPrivateNetworkTimeSources() TimeOption {
+	return func(c *timeAbilityConfig) error { c.allowPrivate = true; return nil }
+}
+func WithHTTPTimeout(v time.Duration) TimeOption {
+	return func(c *timeAbilityConfig) error {
+		if v <= 0 {
+			return types.ErrInvalidArguments
+		}
+		c.httpTimeout = v
+		return nil
+	}
+}
+func WithNTPTimeout(v time.Duration) TimeOption {
+	return func(c *timeAbilityConfig) error {
+		if v <= 0 {
+			return types.ErrInvalidArguments
+		}
+		c.ntpTimeout = v
+		return nil
+	}
+}
+func WithMaxResponseBytes(v int64) TimeOption {
+	return func(c *timeAbilityConfig) error {
+		if v <= 0 {
+			return types.ErrInvalidArguments
+		}
+		c.maxResponseBytes = v
+		return nil
+	}
+}
+func WithMinimumTickInterval(v time.Duration) TimeOption {
+	return func(c *timeAbilityConfig) error {
+		if v <= 0 {
+			return types.ErrInvalidArguments
+		}
+		c.minimumTick = v
+		return nil
+	}
+}
+func NewTimeAbility(options ...TimeOption) (*TimeAbility, error) {
+	c := timeAbilityConfig{httpTimeout: 5 * time.Second, ntpTimeout: 5 * time.Second, maxResponseBytes: 64 << 10, minimumTick: time.Millisecond, defaultNetworkURL: "https://timeapi.io/api/Time/current/zone?timeZone=Asia/Shanghai", defaultNTPServer: "pool.ntp.org"}
+	for _, o := range options {
+		if o == nil {
+			return nil, fmt.Errorf("%w: nil option", types.ErrInvalidArguments)
+		}
+		if err := o(&c); err != nil {
+			return nil, fmt.Errorf("%w", err)
+		}
+	}
+	return &TimeAbility{httpTimeout: c.httpTimeout, ntpTimeout: c.ntpTimeout, maxResponseBytes: c.maxResponseBytes, minimumTick: c.minimumTick, defaultNetworkURL: c.defaultNetworkURL, defaultNTPServer: c.defaultNTPServer, networkPolicy: addressPolicy{allowPrivate: c.allowPrivate}}, nil
 }
 
 var _ types.Ability = (*TimeAbility)(nil)
@@ -72,6 +138,24 @@ func (t *TimeAbility) ensureDefaults() {
 		}
 		if t.interval == 0 {
 			t.interval = time.Millisecond
+		}
+		if t.httpTimeout == 0 {
+			t.httpTimeout = 5 * time.Second
+		}
+		if t.ntpTimeout == 0 {
+			t.ntpTimeout = 5 * time.Second
+		}
+		if t.maxResponseBytes == 0 {
+			t.maxResponseBytes = 64 << 10
+		}
+		if t.minimumTick == 0 {
+			t.minimumTick = time.Millisecond
+		}
+		if t.defaultNetworkURL == "" {
+			t.defaultNetworkURL = "https://timeapi.io/api/Time/current/zone?timeZone=Asia/Shanghai"
+		}
+		if t.defaultNTPServer == "" {
+			t.defaultNTPServer = "pool.ntp.org"
 		}
 	})
 }
@@ -124,9 +208,11 @@ func (t *TimeAbility) Command(atom *types.Atom, act string, args any) types.Comm
 			}
 		}
 		if a.URL == "" {
-			a.URL = "https://timeapi.io/api/Time/current/zone?timeZone=Asia/Shanghai"
+			a.URL = t.defaultNetworkURL
 		}
-		ts, err := fetchNetworkTime(a.URL)
+		ctx, cancel := context.WithTimeout(context.Background(), t.httpTimeout)
+		defer cancel()
+		ts, err := t.fetchNetworkTime(ctx, a.URL)
 		if err != nil {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, err)}
 		}
@@ -142,7 +228,7 @@ func (t *TimeAbility) Command(atom *types.Atom, act string, args any) types.Comm
 			}
 		}
 		if a.Address == "" {
-			a.Address = "pool.ntp.org"
+			a.Address = t.defaultNTPServer
 		}
 		ts, err := ntp.Time(a.Address)
 		if err != nil {
@@ -239,30 +325,4 @@ func (t *TimeAbility) snapshot() TimeSnapshot {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	return TimeSnapshot{Source: t.lastSource, Time: t.lastSynced}
-}
-
-func fetchNetworkTime(url string) (time.Time, error) {
-	resp, err := http.Get(url)
-	if err != nil {
-		return time.Time{}, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return time.Time{}, err
-	}
-	var p struct {
-		DateTime      string `json:"dateTime"`
-		DateTimeUpper string `json:"DateTime"`
-	}
-	if err = json.Unmarshal(body, &p); err != nil {
-		return time.Time{}, err
-	}
-	if p.DateTime == "" {
-		p.DateTime = p.DateTimeUpper
-	}
-	if p.DateTime == "" {
-		return time.Time{}, errors.New("datetime not found")
-	}
-	return time.Parse(time.RFC3339Nano, p.DateTime)
 }
