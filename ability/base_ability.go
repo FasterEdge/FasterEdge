@@ -2,16 +2,15 @@ package ability
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/FasterEdge/FasterEdge/types"
 )
 
-// 基础能力的入参定义
-type BaseAbilityArgs struct {
-	ListArgs []string // 用于存储参数列表
-}
-
-// 基础能力的出参定义（可以封存在AbilityOutput中的Data）...
+const (
+	CommandListDataNames    = "list_data_names"
+	CommandListAbilityNames = "list_ability_names"
+)
 
 // BaseAbility 相关参数
 type BaseAbility struct {
@@ -46,29 +45,28 @@ func (b *BaseAbility) Mount(atom *types.Atom) error {
 
 // 指令入口
 func (b *BaseAbility) Command(atom *types.Atom, act string, args any) types.CommandOutput {
-	typed, _ := args.(BaseAbilityArgs)
-	switch act {
-	case "list_data_name":
-		fmt.Printf("[%s] 正在执行 list_data_name\n", b.GetName())
-		for key := range atom.GetAllData() { // print map keys
-			println(key)
-		}
-		return types.CommandOutput{Name: act}
-
-	case "list_ability_name":
-		fmt.Printf("[%s] 正在执行 list_ability_name\n", b.GetName())
-		for key := range atom.GetAllAbility() { // print map keys
-			println(key)
-		}
-		return types.CommandOutput{Name: act}
-
-	case "blocking":
-		fmt.Printf("[%s] 正在执行 blocking\n", b.GetName())
-		// 这个指令会永久阻塞，以防止其他携程运行被打断
-		select {}
+	if args != nil {
+		return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
 	}
-
-	_ = typed
+	if atom == nil {
+		return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
+	}
+	switch act {
+	case CommandListDataNames:
+		names := make([]string, 0, len(atom.AllData()))
+		for key := range atom.AllData() {
+			names = append(names, key)
+		}
+		sort.Strings(names)
+		return types.CommandOutput{Name: act, Value: names}
+	case CommandListAbilityNames:
+		names := make([]string, 0, len(atom.AllAbilities()))
+		for key := range atom.AllAbilities() {
+			names = append(names, key)
+		}
+		sort.Strings(names)
+		return types.CommandOutput{Name: act, Value: names}
+	}
 	return types.CommandOutput{Name: act, Err: fmt.Errorf("command %s: %w", act, types.ErrUnsupportedCommand)}
 }
 

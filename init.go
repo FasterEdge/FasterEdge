@@ -20,13 +20,5 @@ func InitAtom() *types.Atom {
 
 // 只挂载数据和能力，用于给用户提供自定义开发的基础环境
 func PreRunAtom(atom *types.Atom) error {
-	if err := atom.PreRun(); err != nil {
-		return err
-	}
-
-	if d, ok := atom.GetAllData()["BaseData"]; ok {
-		d.Command(atom, "print_logo", nil)
-		d.Command(atom, "print_info", nil)
-	}
-	return nil
+	return atom.PreRun()
 }
