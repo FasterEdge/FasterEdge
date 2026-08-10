@@ -19,25 +19,14 @@ func InitAtom() *types.Atom {
 }
 
 // 只挂载数据和能力，用于给用户提供自定义开发的基础环境
-func PreRunAtom(atom *types.Atom) {
-	_ = atom.PreRun()
+func PreRunAtom(atom *types.Atom) error {
+	if err := atom.PreRun(); err != nil {
+		return err
+	}
 
 	if d, ok := atom.GetAllData()["BaseData"]; ok {
 		d.Command(atom, "print_logo", nil)
 		d.Command(atom, "print_info", nil)
 	}
-}
-
-// 使用携程运行所有Ability里面的run指令（如果runable返回true）
-func RunAtom(atom *types.Atom) {
-	// 直接使用携程运行所有Ability里面的run指令（如果runable返回true）
-	for _, ab := range atom.GetAllAbility() {
-		if ab.Command(atom, "runnable", nil).Success() {
-			go ab.Command(atom, "run", nil)
-		}
-	}
-
-	if base, ok := atom.GetAllAbility()["BaseAbility"]; ok {
-		base.Command(atom, "blocking", nil)
-	}
+	return nil
 }
