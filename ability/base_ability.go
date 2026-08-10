@@ -2,16 +2,15 @@ package ability
 
 import (
 	"fmt"
-	
+	"sort"
+
 	"github.com/FasterEdge/FasterEdge/types"
 )
 
-// 基础能力的入参定义
-type BaseAbilityArgs struct {
-	ListArgs []string // 用于存储参数列表
-}
-
-// 基础能力的出参定义（可以封存在AbilityOutput中的Data）...
+const (
+	CommandListDataNames    = "list_data_names"
+	CommandListAbilityNames = "list_ability_names"
+)
 
 // BaseAbility 相关参数
 type BaseAbility struct {
@@ -28,50 +27,47 @@ func (b *BaseAbility) Describe() string {
 }
 
 // 挂载前检查定义
-func (b *BaseAbility) Check(atom types.Atom) bool {
+func (b *BaseAbility) Check(atom *types.Atom) error {
 	// 检查 BaseData 是否已经被挂载
-	if _, ok := atom.GetAllData()["BaseData"]; !ok {
-		return false
+	if _, ok := atom.Data("BaseData"); !ok {
+		return types.ErrMissingDependency
 	}
-	return true
+	return nil
 }
 
 // 挂载定义
-func (b *BaseAbility) Mount(atom types.Atom) bool {
-	if !b.Check(atom) {
-		fmt.Errorf("[%s] 挂载失败: BaseData未挂载", b.GetName())
-		return false
+func (b *BaseAbility) Mount(atom *types.Atom) error {
+	if err := b.Check(atom); err != nil {
+		return err
 	}
-	atom.AddAbility(b)
-	return true
+	return nil
 }
 
 // 指令入口
-func (b *BaseAbility) Command(atom types.Atom, act string, args any) types.AbilityOutput {
-	typed, _ := args.(BaseAbilityArgs)
-	switch act {
-	case "list_data_name":
-		fmt.Printf("[%s] 正在执行 list_data_name\n", b.GetName())
-		for key := range atom.GetAllData() { // print map keys
-			println(key)
-		}
-		return types.AbilityOutput{Name: act, Success: true}
-
-	case "list_ability_name":
-		fmt.Printf("[%s] 正在执行 list_ability_name\n", b.GetName())
-		for key := range atom.GetAllAbility() { // print map keys
-			println(key)
-		}
-		return types.AbilityOutput{Name: act, Success: true}
-
-	case "blocking":
-		fmt.Printf("[%s] 正在执行 blocking\n", b.GetName())
-		// 这个指令会永久阻塞，以防止其他携程运行被打断
-		select {}
+func (b *BaseAbility) Command(atom *types.Atom, act string, args any) types.CommandOutput {
+	if args != nil {
+		return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
 	}
-
-	_ = typed
-	return types.AbilityOutput{Name: act, Success: false, Error: "unsupported act"}
+	if atom == nil {
+		return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
+	}
+	switch act {
+	case CommandListDataNames:
+		names := make([]string, 0, len(atom.AllData()))
+		for key := range atom.AllData() {
+			names = append(names, key)
+		}
+		sort.Strings(names)
+		return types.CommandOutput{Name: act, Value: names}
+	case CommandListAbilityNames:
+		names := make([]string, 0, len(atom.AllAbilities()))
+		for key := range atom.AllAbilities() {
+			names = append(names, key)
+		}
+		sort.Strings(names)
+		return types.CommandOutput{Name: act, Value: names}
+	}
+	return types.CommandOutput{Name: act, Err: fmt.Errorf("command %s: %w", act, types.ErrUnsupportedCommand)}
 }
 
 // 细节方法实现...
