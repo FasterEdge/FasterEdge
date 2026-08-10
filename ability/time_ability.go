@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/FasterEdge/FasterEdge/types"
-	"github.com/beevik/ntp"
 )
 
 const (
@@ -61,6 +60,7 @@ type TimeAbility struct {
 	minimumTick       time.Duration
 	defaultNetworkURL string
 	defaultNTPServer  string
+	ntpQuery          ntpQuerier
 }
 
 type timeAbilityConfig struct {
@@ -157,6 +157,9 @@ func (t *TimeAbility) ensureDefaults() {
 		if t.defaultNTPServer == "" {
 			t.defaultNTPServer = "pool.ntp.org"
 		}
+		if t.ntpQuery == nil {
+			t.ntpQuery = ntpQueryAdapter{}
+		}
 	})
 }
 func (t *TimeAbility) GetName() string { return "TimeAbility" }
@@ -230,7 +233,7 @@ func (t *TimeAbility) Command(atom *types.Atom, act string, args any) types.Comm
 		if a.Address == "" {
 			a.Address = t.defaultNTPServer
 		}
-		ts, err := ntp.Time(a.Address)
+		ts, err := t.fetchNTPTime(a.Address)
 		if err != nil {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, err)}
 		}
