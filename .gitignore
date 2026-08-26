@@ -1,1 +1,71 @@
+# Go
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, build with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+coverage.*
+
+# Dependency directories (remove the comment below to include it)
+# vendor/
+
+# Go workspace file
+go.work
+go.work.sum
+
+# Build artifacts
+/DontCrack
+/DontCrack.exe
+/childproc
+/childproc.exe
+
+# Test binaries
+/examples/*/example
+/examples/*/example.exe
+
+# ============================================
+# OS / Editor / IDE 噪音屏蔽
+# ============================================
+
+# macOS Finder
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows Explorer
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+
+# Linux trash
+.Trash-*
+
+# Editors / IDE
+*~
+*.swp
+*.swo
+*.bak
+*.tmp
+.vscode/
+.idea/
+*.iml
+.project
+.classpath
+.settings/
+
+# Logs
+*.log
+logs/
+
+# Git worktrees
 .worktrees/
