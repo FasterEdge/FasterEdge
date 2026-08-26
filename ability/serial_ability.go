@@ -1,0 +1,337 @@
+package ability
+
+import (
+	"fmt"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/FasterEdge/FasterEdge/types"
+)
+
+const (
+	SerialCommandOpen      = "open"
+	SerialCommandClose     = "close"
+	SerialCommandWrite     = "write"
+	SerialCommandRead      = "read"
+	SerialCommandIsOpen    = "is_open"
+	SerialCommandSetConfig = "set_config"
+	SerialCommandGetConfig = "get_config"
+	SerialCommandListPorts = "list_ports"
+)
+
+// SerialConfig 描述串口参数。
+type SerialConfig struct {
+	Baud     int
+	DataBits int
+	StopBits int
+	Parity   string // "N" | "O" | "E"
+}
+
+// SerialOpenArgs 是 open 命令的参数。
+type SerialOpenArgs struct {
+	Port   string
+	Config SerialConfig
+}
+
+// SerialPortArg 是 close / is_open 的参数。
+type SerialPortArg struct {
+	Port string
+}
+
+// SerialWriteArgs 是 write 命令的参数。
+type SerialWriteArgs struct {
+	Port   string
+	Data   []byte
+	Length int // 0 表示全部
+}
+
+// SerialReadArgs 是 read 命令的参数。
+type SerialReadArgs struct {
+	Port    string
+	Length  int
+	Timeout time.Duration
+}
+
+// SerialSetConfigArgs 是 set_config 命令的参数。
+type SerialSetConfigArgs struct {
+	Port   string
+	Config SerialConfig
+}
+
+// SerialTransport 抽象出真实串口字节流收发。
+// Open 打开并按配置初始化,Close 释放资源,Write/Read 完成字节流读写。
+type SerialTransport interface {
+	Open(port string, cfg SerialConfig) error
+	Close(port string) error
+	Write(port string, data []byte) (int, error)
+	Read(port string, length int, timeout time.Duration) ([]byte, error)
+}
+
+// SerialPortLister 抽象出列举可用串口设备(默认实现枚举 /dev/tty* 等)。
+type SerialPortLister interface {
+	ListPorts() ([]string, error)
+}
+
+// SerialAbility 在 Transport 之上提供串口管理。
+type SerialAbility struct {
+	mu        sync.RWMutex
+	openPorts map[string]SerialConfig
+	transport SerialTransport
+	lister    SerialPortLister
+}
+
+func NewSerialAbility() *SerialAbility {
+	return &SerialAbility{openPorts: make(map[string]SerialConfig)}
+}
+
+func (s *SerialAbility) SetTransport(t SerialTransport) {
+	s.mu.Lock()
+	s.transport = t
+	s.mu.Unlock()
+}
+
+func (s *SerialAbility) SetLister(l SerialPortLister) {
+	s.mu.Lock()
+	s.lister = l
+	s.mu.Unlock()
+}
+
+func (s *SerialAbility) GetName() string { return "SerialAbility" }
+
+func (s *SerialAbility) Describe() string {
+	return "SerialAbility提供串口管理能力:open/close/read/write,字节流通过注入的 SerialTransport 完成;默认提供 tty* 风格的 PortLister。"
+}
+
+func (s *SerialAbility) Check(atom *types.Atom) error {
+	if atom == nil {
+		return types.ErrMissingDependency
+	}
+	if _, ok := atom.Data("BaseData"); !ok {
+		return types.ErrMissingDependency
+	}
+	return nil
+}
+
+func (s *SerialAbility) Mount(atom *types.Atom) error {
+	if s.lister == nil {
+		s.SetLister(defaultPortLister{})
+	}
+	return s.Check(atom)
+}
+
+func (s *SerialAbility) Command(atom *types.Atom, act string, args any) types.CommandOutput {
+	if err := s.Check(atom); err != nil {
+		return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, err)}
+	}
+	switch act {
+	case SerialCommandOpen:
+		typed, ok := args.(SerialOpenArgs)
+		if !ok {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
+		}
+		port := strings.TrimSpace(typed.Port)
+		if !isValidSerialPort(port) {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: invalid port %q: %w", act, port, types.ErrInvalidArguments)}
+		}
+		if !isValidSerialConfig(typed.Config) {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: invalid config: %w", act, types.ErrInvalidArguments)}
+		}
+		s.mu.Lock()
+		transport := s.transport
+		s.mu.Unlock()
+		if transport == nil {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: no transport set: %w", act, types.ErrInvalidArguments)}
+		}
+		if err := transport.Open(port, typed.Config); err != nil {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: open: %w: %v", act, types.ErrInvalidArguments, err)}
+		}
+		s.mu.Lock()
+		s.openPorts[port] = typed.Config
+		s.mu.Unlock()
+		return types.CommandOutput{Name: act, Value: port}
+	case SerialCommandClose:
+		typed, ok := args.(SerialPortArg)
+		if !ok || strings.TrimSpace(typed.Port) == "" {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
+		}
+		port := strings.TrimSpace(typed.Port)
+		s.mu.Lock()
+		transport := s.transport
+		_, open := s.openPorts[port]
+		s.mu.Unlock()
+		if !open {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: port %q not open: %w", act, port, types.ErrInvalidArguments)}
+		}
+		if transport != nil {
+			if err := transport.Close(port); err != nil {
+				return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: close: %w: %v", act, types.ErrInvalidArguments, err)}
+			}
+		}
+		s.mu.Lock()
+		delete(s.openPorts, port)
+		s.mu.Unlock()
+		return types.CommandOutput{Name: act, Value: port}
+	case SerialCommandIsOpen:
+		typed, ok := args.(SerialPortArg)
+		if !ok || strings.TrimSpace(typed.Port) == "" {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
+		}
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		_, ok = s.openPorts[strings.TrimSpace(typed.Port)]
+		return types.CommandOutput{Name: act, Value: ok}
+	case SerialCommandWrite:
+		typed, ok := args.(SerialWriteArgs)
+		if !ok {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
+		}
+		port := strings.TrimSpace(typed.Port)
+		if !isValidSerialPort(port) || len(typed.Data) == 0 {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
+		}
+		data := typed.Data
+		if typed.Length > 0 && typed.Length < len(data) {
+			data = data[:typed.Length]
+		}
+		s.mu.RLock()
+		transport := s.transport
+		_, open := s.openPorts[port]
+		s.mu.RUnlock()
+		if !open {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: port %q not open: %w", act, port, types.ErrInvalidArguments)}
+		}
+		if transport == nil {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: no transport: %w", act, types.ErrInvalidArguments)}
+		}
+		n, err := transport.Write(port, data)
+		if err != nil {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: write: %w: %v", act, types.ErrInvalidArguments, err)}
+		}
+		return types.CommandOutput{Name: act, Value: n}
+	case SerialCommandRead:
+		typed, ok := args.(SerialReadArgs)
+		if !ok {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
+		}
+		if typed.Length <= 0 {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: length must be positive: %w", act, types.ErrInvalidArguments)}
+		}
+		if typed.Timeout < 0 {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: timeout must be non-negative: %w", act, types.ErrInvalidArguments)}
+		}
+		port := strings.TrimSpace(typed.Port)
+		if !isValidSerialPort(port) {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: invalid port: %w", act, types.ErrInvalidArguments)}
+		}
+		s.mu.RLock()
+		transport := s.transport
+		_, open := s.openPorts[port]
+		s.mu.RUnlock()
+		if !open {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: port %q not open: %w", act, port, types.ErrInvalidArguments)}
+		}
+		if transport == nil {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: no transport: %w", act, types.ErrInvalidArguments)}
+		}
+		buf, err := transport.Read(port, typed.Length, typed.Timeout)
+		if err != nil {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: read: %w: %v", act, types.ErrInvalidArguments, err)}
+		}
+		return types.CommandOutput{Name: act, Value: buf}
+	case SerialCommandSetConfig:
+		typed, ok := args.(SerialSetConfigArgs)
+		if !ok {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
+		}
+		port := strings.TrimSpace(typed.Port)
+		if !isValidSerialPort(port) || !isValidSerialConfig(typed.Config) {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
+		}
+		s.mu.Lock()
+		_, open := s.openPorts[port]
+		if open {
+			s.openPorts[port] = typed.Config
+		}
+		s.mu.Unlock()
+		if !open {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: port %q not open: %w", act, port, types.ErrInvalidArguments)}
+		}
+		return types.CommandOutput{Name: act, Value: typed.Config}
+	case SerialCommandGetConfig:
+		typed, ok := args.(SerialPortArg)
+		if !ok || strings.TrimSpace(typed.Port) == "" {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
+		}
+		port := strings.TrimSpace(typed.Port)
+		s.mu.RLock()
+		cfg, open := s.openPorts[port]
+		s.mu.RUnlock()
+		if !open {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: port %q not open: %w", act, port, types.ErrInvalidArguments)}
+		}
+		return types.CommandOutput{Name: act, Value: cfg}
+	case SerialCommandListPorts:
+		if args != nil {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
+		}
+		s.mu.RLock()
+		lister := s.lister
+		s.mu.RUnlock()
+		if lister == nil {
+			lister = defaultPortLister{}
+		}
+		ports, err := lister.ListPorts()
+		if err != nil {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: list: %w: %v", act, types.ErrInvalidArguments, err)}
+		}
+		return types.CommandOutput{Name: act, Value: ports}
+	}
+	return types.CommandOutput{Name: act, Err: fmt.Errorf("command %s: %w", act, types.ErrUnsupportedCommand)}
+}
+
+// isValidSerialPort 接受 /dev/tty*、COM1..COM255(Windows) 等。
+func isValidSerialPort(port string) bool {
+	if port == "" {
+		return false
+	}
+	if strings.HasPrefix(port, "/dev/tty") {
+		return true
+	}
+	upper := strings.ToUpper(port)
+	if strings.HasPrefix(upper, "COM") && len(upper) > 3 {
+		for _, r := range upper[3:] {
+			if r < '0' || r > '9' {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+func isValidSerialConfig(c SerialConfig) bool {
+	switch c.Baud {
+	case 1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600:
+	default:
+		return false
+	}
+	if c.DataBits != 5 && c.DataBits != 6 && c.DataBits != 7 && c.DataBits != 8 {
+		return false
+	}
+	if c.StopBits != 1 && c.StopBits != 2 {
+		return false
+	}
+	switch c.Parity {
+	case "N", "O", "E", "n", "o", "e":
+	default:
+		return false
+	}
+	return true
+}
+
+// defaultPortLister 是 SerialPortLister 的默认实现:返回空列表(避免跨平台枚举差异)。
+// 用户可通过 SetLister 注入真实实现(读取 /dev/tty* 或注册表)。
+type defaultPortLister struct{}
+
+func (defaultPortLister) ListPorts() ([]string, error) { return []string{}, nil }
