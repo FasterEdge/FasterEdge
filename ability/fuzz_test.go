@@ -6,7 +6,7 @@ import (
 
 // FuzzShellQuote 确保 shellQuote 输出的字符串在 POSIX sh 中可被原样解析回去。
 // 关键是:任何输入都不应该让 shellQuote 崩溃,且输出始终以单引号包裹。
-// 内嵌单引号会被替换为 '\'' 序列,这会在内部引入单引号,但那是正确的 POSIX 引用模式。
+// 内嵌单引号会使用标准 POSIX 单引号转义模式,因此输出仍可安全传给 sh。
 func FuzzShellQuote(f *testing.F) {
 	f.Add("")
 	f.Add("echo")

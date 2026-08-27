@@ -106,9 +106,9 @@ func BenchmarkMQTTPublishDrain(b *testing.B) {
 		for pb.Next() {
 			i := atomic.AddUint64(&ctr, 1)
 			m.PushMessage(MQTTMessage{
-				Topic:     "bench/topic",
-				Payload:   []byte("payload"),
-				Qos:       0,
+				Topic:      "bench/topic",
+				Payload:    []byte("payload"),
+				Qos:        0,
 				ReceivedAt: time.Now(),
 				// 用 i 作为唯一后缀避免完全相同的消息
 			})

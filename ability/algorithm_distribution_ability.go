@@ -1,6 +1,7 @@
 package ability
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -84,40 +85,105 @@ type AlgDistIDArg struct {
 
 // AlgDistAbility 在 FileTransferAbility 之上提供"算法分发"语义。
 // 它将算法文件 + 版本元数据关联起来,然后通过 FileTransferAbility 把源文件投递到目标节点。
+//
+// FileTransferAbility 的解析顺序:
+//  1. 构造函数注入(NewAlgDistAbilityWithTransfer)显式提供
+//  2. 注册到 atom 的 FileTransferAbility("FileTransferAbility") 实例
+//
+// 一旦解析成功,该 FileTransferAbility 视为必需依赖,会随 AlgDistAbility 一起被查询/校验。
+// 不再创建私有的隐式 FileTransferAbility,以避免状态分叉与共享 target 竞争。
 type AlgDistAbility struct {
 	mu       sync.RWMutex
 	algs     map[string]*AlgDistAlgorithm // key = "name@version"
 	jobs     map[string]*AlgDistJob
 	transfer *FileTransferAbility
-	seq      uint64
+	// pendingTransport 用于在 FileTransferAbility 尚未解析时暂存 transport,resolve 后注入。
+	pendingTransport FileTransferTransport
+	// watcherWG 跟踪所有进行中的状态同步 watcher,Unmount 时用于等待。
+	watcherWG sync.WaitGroup
+	seq       uint64
 }
 
+// NewAlgDistAbility 创建一个算法分发能力。
+// FileTransferAbility 由调用方通过 NewAlgDistAbilityWithTransfer 注入,或在 Command 时由 atom 解析。
+// 不再默认构造私有 FileTransferAbility。
 func NewAlgDistAbility() *AlgDistAbility {
 	return &AlgDistAbility{
-		algs:     make(map[string]*AlgDistAlgorithm),
-		jobs:     make(map[string]*AlgDistJob),
-		transfer: NewFileTransferAbility(),
+		algs: make(map[string]*AlgDistAlgorithm),
+		jobs: make(map[string]*AlgDistJob),
 	}
 }
 
 // NewAlgDistAbilityWithTransfer 注入外部 FileTransferAbility(便于共享传输层)。
+// 传 nil 表示完全依赖 atom 中注册的 FileTransferAbility。
 func NewAlgDistAbilityWithTransfer(ft *FileTransferAbility) *AlgDistAbility {
-	if ft == nil {
-		ft = NewFileTransferAbility()
+	a := &AlgDistAbility{
+		algs: make(map[string]*AlgDistAlgorithm),
+		jobs: make(map[string]*AlgDistJob),
 	}
-	return &AlgDistAbility{
-		algs:     make(map[string]*AlgDistAlgorithm),
-		jobs:     make(map[string]*AlgDistJob),
-		transfer: ft,
+	if ft != nil {
+		a.transfer = ft
 	}
+	return a
+}
+
+// resolveTransfer 返回底层 FileTransferAbility。
+// 优先使用构造注入,否则从 atom 解析;两者皆缺失则视为缺少依赖。
+// resolve 后,如果有 pendingTransport,会自动注入到 transfer。
+func (a *AlgDistAbility) resolveTransfer(atom *types.Atom) (*FileTransferAbility, error) {
+	a.mu.RLock()
+	ft := a.transfer
+	pending := a.pendingTransport
+	a.mu.RUnlock()
+	if ft != nil {
+		if pending != nil {
+			ft.SetTransport(pending)
+			a.mu.Lock()
+			a.pendingTransport = nil
+			a.mu.Unlock()
+		}
+		return ft, nil
+	}
+	if atom == nil {
+		return nil, types.ErrMissingDependency
+	}
+	ab, ok := atom.Ability("FileTransferAbility")
+	if !ok || ab == nil {
+		return nil, types.ErrMissingDependency
+	}
+	ft, ok = ab.(*FileTransferAbility)
+	if !ok || ft == nil {
+		return nil, fmt.Errorf("%s: registered ability %q is not a FileTransferAbility: %w", "AlgDistAbility", ab.GetName(), types.ErrMissingDependency)
+	}
+	a.mu.Lock()
+	a.transfer = ft
+	pending = a.pendingTransport
+	a.pendingTransport = nil
+	a.mu.Unlock()
+	if pending != nil {
+		ft.SetTransport(pending)
+	}
+	return ft, nil
 }
 
 // SetTransport 透传到底层 FileTransferAbility。
+// 若 FileTransferAbility 尚未解析,transport 暂存,resolveTransfer 命中后自动注入。
 func (a *AlgDistAbility) SetTransport(t FileTransferTransport) {
-	a.transfer.SetTransport(t)
+	a.mu.Lock()
+	ft := a.transfer
+	if ft == nil {
+		a.pendingTransport = t
+		a.mu.Unlock()
+		return
+	}
+	a.mu.Unlock()
+	ft.SetTransport(t)
 }
 
 func (a *AlgDistAbility) GetName() string { return "AlgorithmDistributionAbility" }
+func (a *AlgDistAbility) Dependencies() []types.Dependency {
+	return []types.Dependency{{Kind: types.DependencyData, Name: "BaseData"}, {Kind: types.DependencyData, Name: "NetMapData"}, {Kind: types.DependencyAbility, Name: "FileTransferAbility"}}
+}
 
 func (a *AlgDistAbility) Describe() string {
 	return "AlgorithmDistributionAbility在FileTransferAbility之上提供算法分发能力:注册/查询算法元数据,把指定版本推送到目标对等节点。"
@@ -133,10 +199,39 @@ func (a *AlgDistAbility) Check(atom *types.Atom) error {
 	if _, ok := atom.Data("NetMapData"); !ok {
 		return types.ErrMissingDependency
 	}
+	// FileTransferAbility 在 distribute/cancel 时通过 resolveTransfer 严格校验。
+	// 这里 Check 做宽松校验:如果 atom 中已注册同名 ability 或构造注入了 transfer,
+	// 顺便预解析一次,把 transfer 字段缓存下来,避免每次 distribute 重复解析。
+	// 不存在也不在 Check 阶段抛错,留给 resolveTransfer 在实际 distribute/cancel
+	// 时返回 ErrMissingDependency。
+	if a.transfer == nil && atom != nil {
+		if ab, ok := atom.Ability("FileTransferAbility"); ok && ab != nil {
+			if ft, isFT := ab.(*FileTransferAbility); isFT && ft != nil {
+				a.mu.Lock()
+				if a.transfer == nil {
+					a.transfer = ft
+				}
+				pending := a.pendingTransport
+				a.pendingTransport = nil
+				a.mu.Unlock()
+				if pending != nil {
+					ft.SetTransport(pending)
+				}
+			}
+		}
+	}
 	return nil
 }
 
 func (a *AlgDistAbility) Mount(atom *types.Atom) error { return a.Check(atom) }
+
+// Unmount 等待所有状态同步 watcher 退出,保证 AlgDistJob 状态收敛。
+func (a *AlgDistAbility) Unmount(_ context.Context, _ *types.Atom) error {
+	a.watcherWG.Wait()
+	return nil
+}
+
+var _ types.Unmounter = (*AlgDistAbility)(nil)
 
 func (a *AlgDistAbility) Command(atom *types.Atom, act string, args any) types.CommandOutput {
 	if err := a.Check(atom); err != nil {
@@ -238,13 +333,15 @@ func (a *AlgDistAbility) Command(atom *types.Atom, act string, args any) types.C
 		if !ok {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: algorithm %s@%s not found: %w", act, name, version, types.ErrInvalidArguments)}
 		}
-		// 通过 FileTransferAbility 投递
-		if out := a.transfer.Command(atom, FileTransferCommandSetTarget, FileTransferTargetArgs{PeerName: target}); out.Err != nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: set target: %w", act, out.Err)}
+		transfer, err := a.resolveTransfer(atom)
+		if err != nil {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: resolve transfer: %w", act, err)}
 		}
-		txOut := a.transfer.Command(atom, FileTransferCommandUpload, FileTransferUploadArgs{
+		// 通过 per-call Target 投递,避免写共享 target 字段;这修复了多 target 并发竞争。
+		txOut := transfer.Command(atom, FileTransferCommandUpload, FileTransferUploadArgs{
 			LocalPath:  alg.SourcePath,
 			RemotePath: remote,
+			Target:     target,
 		})
 		if txOut.Err != nil {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: transfer: %w", act, txOut.Err)}
@@ -252,16 +349,8 @@ func (a *AlgDistAbility) Command(atom *types.Atom, act string, args any) types.C
 		transferID, _ := txOut.Value.(string)
 		job := a.newJob(name, version, target, remote, transferID)
 		a.storeJob(job)
-		// 骨架模式(无 transport)下,FileTransfer 立即完成,这里直接同步 job 状态。
-		getOut := a.transfer.Command(atom, FileTransferCommandGet, FileTransferIDArg{ID: transferID})
-		if getOut.Err == nil {
-			if tf, ok := getOut.Value.(FileTransfer); ok && tf.Status == FileTransferStatusCompleted {
-				a.mu.Lock()
-				job.Status = AlgDistStatusCompleted
-				job.FinishedAt = time.Now()
-				a.mu.Unlock()
-			}
-		}
+		// 启动 watcher 把 FileTransfer 终态对齐到 AlgDistJob,异步处理延迟成功/失败/取消。
+		a.startJobWatcher(job.ID, transferID)
 		return types.CommandOutput{Name: act, Value: job.ID}
 	case AlgDistCommandCancel:
 		typed, ok := args.(AlgDistIDArg)
@@ -335,14 +424,129 @@ func (a *AlgDistAbility) cancelJob(id string, atom *types.Atom) bool {
 	}
 	transferID := j.TransferID
 	a.mu.Unlock()
-	if transferID != "" {
-		a.transfer.Command(atom, FileTransferCommandCancel, FileTransferIDArg{ID: transferID})
+	transfer, err := a.resolveTransfer(atom)
+	if err == nil && transfer != nil && transferID != "" {
+		transfer.Command(atom, FileTransferCommandCancel, FileTransferIDArg{ID: transferID})
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	j.Status = AlgDistStatusCanceled
-	j.FinishedAt = time.Now()
-	return true
+	// 二次校验防止并发取消已结束的 job
+	if cur, ok := a.jobs[id]; ok {
+		if cur.Status != AlgDistStatusRunning && cur.Status != AlgDistStatusPending {
+			return false
+		}
+		cur.Status = AlgDistStatusCanceled
+		cur.FinishedAt = time.Now()
+		return true
+	}
+	return false
+}
+
+// startJobWatcher 启动一个后台 watcher,把 FileTransfer 终态传播到 AlgDistJob。
+// 骨架模式下 transfer 立即处于终态,watcher 也会在下一次轮询中收敛。
+func (a *AlgDistAbility) startJobWatcher(jobID, transferID string) {
+	if jobID == "" || transferID == "" {
+		return
+	}
+	a.watcherWG.Add(1)
+	go func() {
+		defer a.watcherWG.Done()
+		a.watchJob(jobID, transferID)
+	}()
+}
+
+// watchJob 周期性拉取 FileTransfer 状态,直到终态对齐到 AlgDistJob。
+// 骨架模式下首次拉取即收敛;带 transport 时按轮询间隔收敛。
+// 轮询退避策略:50ms → 100ms → 200ms → 500ms,上限 500ms,最长 30s。
+func (a *AlgDistAbility) watchJob(jobID, transferID string) {
+	const maxBackoff = 500 * time.Millisecond
+	const maxTotal = 30 * time.Second
+	start := time.Now()
+	delay := 50 * time.Millisecond
+	for time.Since(start) < maxTotal {
+		// 已取消或已完成直接退出
+		a.mu.RLock()
+		j := a.jobs[jobID]
+		var status AlgDistStatus
+		if j != nil {
+			status = j.Status
+		}
+		a.mu.RUnlock()
+		if j == nil {
+			return
+		}
+		if isTerminalAlgDist(status) {
+			return
+		}
+		// 从当前已解析的 transfer 取状态;不强制使用 atom。
+		a.mu.RLock()
+		ft := a.transfer
+		a.mu.RUnlock()
+		if ft == nil {
+			time.Sleep(delay)
+			if delay < maxBackoff {
+				delay *= 2
+			}
+			continue
+		}
+		// 通过 Lookup 直接读 FileTransfer 状态,避免伪造 atom 调用 Command。
+		transfer, ok := ft.Lookup(transferID)
+		if !ok {
+			// transfer 不存在 → 视为失败/取消(已清理或被 Unmount 移除)
+			a.mu.Lock()
+			if cur, ok := a.jobs[jobID]; ok {
+				cur.Status = AlgDistStatusFailed
+				cur.Error = "underlying transfer missing"
+				cur.FinishedAt = time.Now()
+			}
+			a.mu.Unlock()
+			return
+		}
+		// FileTransfer 终态已达成 → 对齐 AlgDistJob
+		if isTerminalFileTransfer(transfer.Status) {
+			a.mu.Lock()
+			cur, exists := a.jobs[jobID]
+			a.mu.Unlock()
+			if !exists {
+				return
+			}
+			a.mu.Lock()
+			switch transfer.Status {
+			case FileTransferStatusCompleted:
+				cur.Status = AlgDistStatusCompleted
+			case FileTransferStatusFailed:
+				cur.Status = AlgDistStatusFailed
+				cur.Error = transfer.Error
+			case FileTransferStatusCanceled:
+				cur.Status = AlgDistStatusCanceled
+			}
+			cur.FinishedAt = time.Now()
+			a.mu.Unlock()
+			return
+		}
+		time.Sleep(delay)
+		if delay < maxBackoff {
+			delay *= 2
+		}
+	}
+}
+
+// isTerminalAlgDist reports whether s is a final AlgDistStatus.
+func isTerminalAlgDist(s AlgDistStatus) bool {
+	switch s {
+	case AlgDistStatusCompleted, AlgDistStatusFailed, AlgDistStatusCanceled:
+		return true
+	}
+	return false
+}
+
+// isTerminalFileTransfer reports whether s is a final FileTransferStatus.
+func isTerminalFileTransfer(s FileTransferStatus) bool {
+	switch s {
+	case FileTransferStatusCompleted, FileTransferStatusFailed, FileTransferStatusCanceled:
+		return true
+	}
+	return false
 }
 
 func (a *AlgDistAbility) clearFinished() int {

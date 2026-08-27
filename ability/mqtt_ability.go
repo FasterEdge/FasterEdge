@@ -1,6 +1,8 @@
 package ability
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -95,9 +97,13 @@ type MQTTTransport interface {
 	Unsubscribe(topic string) error
 }
 
+// mqttClosingError 表示能力已被 Unmount 关闭后再次接收新命令。
+var mqttClosingError = errors.New("MQTTAbility is closing")
+
 // MQTTAbility 在 Transport 之上提供 MQTT 客户端命令,并维护每个订阅的本地消息队列。
 type MQTTAbility struct {
 	mu        sync.RWMutex
+	closing   bool
 	broker    string
 	clientID  string
 	username  string
@@ -199,7 +205,11 @@ func (m *MQTTAbility) SetTransport(t MQTTTransport) {
 func (m *MQTTAbility) PushMessage(msg MQTTMessage) bool {
 	m.mu.RLock()
 	q, ok := m.queues[msg.Topic]
+	closing := m.closing
 	m.mu.RUnlock()
+	if closing {
+		return false
+	}
 	if !ok {
 		return false
 	}
@@ -223,6 +233,61 @@ func (m *MQTTAbility) Check(atom *types.Atom) error {
 }
 
 func (m *MQTTAbility) Mount(atom *types.Atom) error { return m.Check(atom) }
+
+// beginShutdown 标记为 closing。返回是否成功。
+func (m *MQTTAbility) beginShutdown() bool {
+	m.mu.Lock()
+	if m.closing {
+		m.mu.Unlock()
+		return false
+	}
+	m.closing = true
+	m.mu.Unlock()
+	return true
+}
+
+// Unmount tears down all subscriptions and disconnects the transport under a
+// bounded context. Subscriptions are detached before transport disconnect so
+// that no new command can recreate queues after Unmount has run.
+func (m *MQTTAbility) Unmount(ctx context.Context, _ *types.Atom) error {
+	if ctx == nil {
+		return types.ErrNilContext
+	}
+	if !m.beginShutdown() {
+		return nil
+	}
+	m.mu.Lock()
+	transport := m.transport
+	queues := m.queues
+	m.queues = make(map[string]*mqttQueue)
+	m.mu.Unlock()
+	for _, q := range queues {
+		q.close()
+	}
+	if transport == nil {
+		return nil
+	}
+	result := make(chan error, 1)
+	go func() { result <- transport.Disconnect() }()
+	select {
+	case err := <-result:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// rejectIfClosing 用于拒绝 closing 之后到达的新命令。
+func (m *MQTTAbility) rejectIfClosing(act string) *types.CommandOutput {
+	m.mu.RLock()
+	closing := m.closing
+	m.mu.RUnlock()
+	if closing {
+		out := types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, mqttClosingError)}
+		return &out
+	}
+	return nil
+}
 
 func (m *MQTTAbility) Command(atom *types.Atom, act string, args any) types.CommandOutput {
 	if err := m.Check(atom); err != nil {
@@ -272,6 +337,9 @@ func (m *MQTTAbility) Command(atom *types.Atom, act string, args any) types.Comm
 		if args != nil {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
 		}
+		if out := m.rejectIfClosing(act); out != nil {
+			return *out
+		}
 		m.mu.RLock()
 		transport := m.transport
 		m.mu.RUnlock()
@@ -286,19 +354,20 @@ func (m *MQTTAbility) Command(atom *types.Atom, act string, args any) types.Comm
 		if args != nil {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
 		}
-		m.mu.RLock()
+		if out := m.rejectIfClosing(act); out != nil {
+			return *out
+		}
+		m.mu.Lock()
 		transport := m.transport
 		queues := m.queues
-		m.mu.RUnlock()
+		m.queues = make(map[string]*mqttQueue)
+		m.mu.Unlock()
 		if transport != nil {
 			_ = transport.Disconnect()
 		}
 		for _, q := range queues {
 			q.close()
 		}
-		m.mu.Lock()
-		m.queues = make(map[string]*mqttQueue)
-		m.mu.Unlock()
 		return types.CommandOutput{Name: act, Value: true}
 	case MQTTCommandIsConnected:
 		if args != nil {
@@ -315,6 +384,9 @@ func (m *MQTTAbility) Command(atom *types.Atom, act string, args any) types.Comm
 		typed, ok := args.(MQTTPublishArgs)
 		if !ok {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
+		}
+		if out := m.rejectIfClosing(act); out != nil {
+			return *out
 		}
 		topic := strings.TrimSpace(typed.Topic)
 		if topic == "" {
@@ -345,20 +417,26 @@ func (m *MQTTAbility) Command(atom *types.Atom, act string, args any) types.Comm
 		if typed.Qos > MQTTQos2 {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: invalid qos: %w", act, types.ErrInvalidArguments)}
 		}
-		m.mu.RLock()
-		transport := m.transport
-		_, exists := m.queues[topic]
-		m.mu.RUnlock()
-		if exists {
+		// Reserve topic/queue while holding the write lock so Unmount can't
+		// detach and a concurrent subscribe recreate the queue afterwards.
+		m.mu.Lock()
+		if m.closing {
+			m.mu.Unlock()
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, mqttClosingError)}
+		}
+		if _, exists := m.queues[topic]; exists {
+			m.mu.Unlock()
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: already subscribed: %w", act, types.ErrInvalidArguments)}
 		}
+		transport := m.transport
 		if transport == nil {
+			m.mu.Unlock()
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: no transport: %w", act, types.ErrInvalidArguments)}
 		}
 		if err := transport.Subscribe(topic, typed.Qos); err != nil {
+			m.mu.Unlock()
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %v", act, types.ErrInvalidArguments, err)}
 		}
-		m.mu.Lock()
 		m.queues[topic] = newMQTTQueue(typed.MaxQueue)
 		m.mu.Unlock()
 		return types.CommandOutput{Name: act, Value: topic}
@@ -442,3 +520,6 @@ func isAcceptableBrokerURL(u string) bool {
 	}
 	return false
 }
+
+// Compile-time guarantee that MQTTAbility satisfies Unmounter.
+var _ types.Unmounter = (*MQTTAbility)(nil)

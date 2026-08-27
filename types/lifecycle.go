@@ -5,6 +5,7 @@ import (
 	"errors"
 	"runtime/debug"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -23,10 +24,146 @@ const (
 	componentAbility
 )
 
+func (k componentKind) dependencyKind() DependencyKind {
+	if k == componentAbility {
+		return DependencyAbility
+	}
+	return DependencyData
+}
+func itemKey(item namedComponent) string {
+	return item.kind.dependencyKind().String() + ":" + item.name
+}
+func sortComponents(items []namedComponent) {
+	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].kind != items[j].kind {
+			return items[i].kind < items[j].kind
+		}
+		return items[i].name < items[j].name
+	})
+}
+
+func dependencyOrder(items []namedComponent) ([]namedComponent, error) {
+	sortComponents(items)
+	byKey := make(map[string]namedComponent, len(items))
+	byName := make(map[string][]namedComponent, len(items))
+	for _, item := range items {
+		byKey[itemKey(item)] = item
+		byName[item.name] = append(byName[item.name], item)
+	}
+	deps := make(map[string][]string, len(items))
+	var validation []error
+	for _, item := range items {
+		provider, ok := item.component.(DependencyProvider)
+		if !ok {
+			continue
+		}
+		decls := append([]Dependency(nil), provider.Dependencies()...)
+		sort.Slice(decls, func(i, j int) bool {
+			if decls[i].Kind != decls[j].Kind {
+				return decls[i].Kind < decls[j].Kind
+			}
+			return decls[i].Name < decls[j].Name
+		})
+		for _, dep := range decls {
+			if strings.TrimSpace(dep.Name) == "" || strings.TrimSpace(dep.Name) != dep.Name || (dep.Kind != DependencyData && dep.Kind != DependencyAbility) {
+				validation = append(validation, &DependencyError{Component: item.name, Dependency: dep, Err: ErrMissingDependency})
+				continue
+			}
+			key := dep.Kind.String() + ":" + dep.Name
+			if _, exists := byKey[key]; !exists {
+				actual := dep.Kind
+				wrong := false
+				for _, candidate := range byName[dep.Name] {
+					if candidate.kind.dependencyKind() != dep.Kind {
+						actual = candidate.kind.dependencyKind()
+						wrong = true
+						break
+					}
+				}
+				if wrong {
+					validation = append(validation, &DependencyError{Component: item.name, Dependency: dep, ActualKind: actual, Err: ErrWrongDependencyType})
+				} else {
+					validation = append(validation, &DependencyError{Component: item.name, Dependency: dep, Err: ErrMissingDependency})
+				}
+				continue
+			}
+			deps[itemKey(item)] = append(deps[itemKey(item)], key)
+		}
+	}
+	if len(validation) > 0 {
+		return nil, errors.Join(validation...)
+	}
+	state := make(map[string]uint8, len(items))
+	ordered := make([]namedComponent, 0, len(items))
+	stack := []string{}
+	var visit func(string) error
+	visit = func(key string) error {
+		if state[key] == 2 {
+			return nil
+		}
+		if state[key] == 1 {
+			start := 0
+			for i, k := range stack {
+				if k == key {
+					start = i
+					break
+				}
+			}
+			cycle := append([]string(nil), stack[start:]...)
+			cycle = append(cycle, key)
+			for i := range cycle {
+				cycle[i] = byKey[cycle[i]].name
+			}
+			return &DependencyCycleError{Components: cycle}
+		}
+		state[key] = 1
+		stack = append(stack, key)
+		for _, dep := range deps[key] {
+			if err := visit(dep); err != nil {
+				return err
+			}
+		}
+		stack = stack[:len(stack)-1]
+		state[key] = 2
+		ordered = append(ordered, byKey[key])
+		return nil
+	}
+	for _, item := range items {
+		if err := visit(itemKey(item)); err != nil {
+			return nil, err
+		}
+	}
+	return ordered, nil
+}
+
 // PreRun validates and mounts all registered components deterministically.
 // It returns the atom to Created on failure (after rolling back mounts), so a
 // caller may correct the registration and retry.
 func (a *Atom) PreRun() error { return a.MountAll() }
+
+// Reset transitions the atom from AtomStopped or AtomFailed back to
+// AtomCreated so a caller may re-mount or re-run. Registered components
+// are preserved; only mount bookkeeping (mounted, mountedAbilities) is
+// cleared. Reset does NOT run Unmount — by the time you can call Reset,
+// mounted components have already been torn down by UnmountAll or by
+// finalizeAfterRun at the end of RunAll.
+func (a *Atom) Reset() error {
+	if a == nil {
+		return ErrNilAtom
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.transitioning {
+		return ErrInvalidAtomState
+	}
+	if a.state != AtomStopped && a.state != AtomFailed {
+		return ErrInvalidAtomState
+	}
+	a.state = AtomCreated
+	a.mounted = nil
+	a.mountedAbilities = nil
+	return nil
+}
 
 // MountAll performs the pre-run lifecycle transaction.
 func (a *Atom) MountAll() error {
@@ -48,12 +185,14 @@ func (a *Atom) MountAll() error {
 	}
 	a.mu.Unlock()
 
-	sort.SliceStable(items, func(i, j int) bool {
-		if items[i].kind != items[j].kind {
-			return items[i].kind < items[j].kind
-		}
-		return items[i].name < items[j].name
-	})
+	ordered, orderErr := dependencyOrder(items)
+	if orderErr != nil {
+		a.mu.Lock()
+		a.transitioning = false
+		a.mu.Unlock()
+		return orderErr
+	}
+	items = ordered
 
 	finish := func(err error, mounted []namedComponent) error {
 		a.mu.Lock()
@@ -81,7 +220,7 @@ func (a *Atom) MountAll() error {
 			checkErrs = append(checkErrs, err)
 			continue
 		}
-		if err := callCheck(item, a); err != nil {
+		if err := a.observe(item.name, "", PhaseCheck, func() error { return callCheck(item, a) }); err != nil {
 			checkErrs = append(checkErrs, err)
 			continue
 		}
@@ -98,7 +237,7 @@ func (a *Atom) MountAll() error {
 		if err := verifyName(item); err != nil {
 			return finish(rollback(a, mounted, err), nil)
 		}
-		if err := callMount(item, a); err != nil {
+		if err := a.observe(item.name, "", PhaseMount, func() error { return callMount(item, a) }); err != nil {
 			return finish(rollback(a, mounted, err), nil)
 		}
 		mounted = append(mounted, item)
@@ -165,16 +304,20 @@ func rollback(atom *Atom, mounted []namedComponent, cause error) error {
 		if !ok {
 			continue
 		}
-		func() {
+		callErr := atom.observe(m.name, "", PhaseRollback, func() (err error) {
 			defer func() {
 				if v := recover(); v != nil {
-					errs = append(errs, &ComponentPanicError{Name: m.name, Phase: "unmount", Value: v, Stack: debug.Stack()})
+					err = &ComponentPanicError{Name: m.name, Phase: "rollback", Value: v, Stack: debug.Stack()}
 				}
 			}()
-			if err := u.Unmount(ctx, atom); err != nil {
-				errs = append(errs, &ComponentError{Name: m.name, Phase: "unmount", Err: err})
+			if err = u.Unmount(ctx, atom); err != nil {
+				return &ComponentError{Name: m.name, Phase: "rollback", Err: err}
 			}
-		}()
+			return nil
+		})
+		if callErr != nil {
+			errs = append(errs, callErr)
+		}
 	}
 	return errors.Join(errs...)
 }
@@ -182,6 +325,50 @@ func rollback(atom *Atom, mounted []namedComponent, cause error) error {
 type runnerResult struct {
 	name string
 	err  error
+}
+
+// UnmountAll releases mounted components in reverse order and transitions the
+// atom to Stopped. Cleanup is explicit and idempotent once the atom is stopped.
+func (a *Atom) UnmountAll(ctx context.Context, shutdown time.Duration) error {
+	if a == nil {
+		return ErrNilAtom
+	}
+	if ctx == nil {
+		return ErrNilContext
+	}
+	if shutdown <= 0 {
+		return ErrInvalidShutdownTimeout
+	}
+	a.mu.Lock()
+	if a.state == AtomStopped {
+		a.mu.Unlock()
+		return nil
+	}
+	if a.state != AtomMounted || a.transitioning {
+		a.mu.Unlock()
+		return ErrInvalidAtomState
+	}
+	a.transitioning = true
+	mounted := append([]namedComponent(nil), a.mounted...)
+	a.mu.Unlock()
+
+	err := a.unmountWithTimeout(ctx, mounted, shutdown)
+	a.mu.Lock()
+	a.transitioning = false
+	a.mounted = nil
+	a.mountedAbilities = nil
+	if err != nil {
+		a.state = AtomFailed
+	} else {
+		a.state = AtomStopped
+	}
+	a.mu.Unlock()
+	return err
+}
+
+// Close is the conventional cleanup alias for UnmountAll.
+func (a *Atom) Close(ctx context.Context, shutdown time.Duration) error {
+	return a.UnmountAll(ctx, shutdown)
 }
 
 // RunAll supervises all mounted abilities implementing Runner, then cleans up
@@ -263,8 +450,10 @@ func (a *Atom) RunAll(ctx context.Context, shutdown time.Duration) error {
 						}
 						sort.Strings(names)
 						cancel()
-						a.setState(AtomFailed)
-						return errors.Join(runErr, &ShutdownTimeoutError{Timeout: shutdown, Phase: "run", Components: names})
+						return a.finalizeAfterRun(
+							errors.Join(runErr, &ShutdownTimeoutError{Timeout: shutdown, Phase: "run", Components: names}),
+							mounted, shutdown, true,
+						)
 					}
 				}
 				if !timer.Stop() {
@@ -278,24 +467,49 @@ func (a *Atom) RunAll(ctx context.Context, shutdown time.Duration) error {
 		cancel()
 	} else if parentErr != nil {
 		runErr = parentErr
+	} else {
+		<-ctx.Done()
+		runErr = ctx.Err()
 	}
 
+	return a.finalizeAfterRun(runErr, mounted, shutdown, false)
+}
+
+// finalizeAfterRun tears down mounted components (mirroring UnmountAll), clears
+// mounted bookkeeping, transitions the atom to Stopped/Failed, and returns
+// the joined cleanup error alongside any pre-existing runErr. Both normal
+// completion and the shutdown-timeout branch in RunAll funnel through here so
+// the invariant "AtomStopped|AtomFailed ⇒ a.mounted == nil" is upheld by a
+// single code path.
+func (a *Atom) finalizeAfterRun(runErr error, mounted []namedComponent, shutdown time.Duration, forceFailed bool) error {
 	cleanupErr := a.unmountWithTimeout(context.Background(), mounted, shutdown)
+	a.mu.Lock()
+	a.mounted = nil
+	a.mountedAbilities = nil
+	if cleanupErr != nil || forceFailed {
+		a.state = AtomFailed
+	} else {
+		a.state = AtomStopped
+	}
+	a.mu.Unlock()
 	if cleanupErr != nil {
-		a.setState(AtomFailed)
 		return errors.Join(runErr, cleanupErr)
 	}
-	a.setState(AtomStopped)
 	return runErr
 }
 
 func safeRun(r Runner, ctx context.Context, atom *Atom, name string) (err error) {
-	defer func() {
-		if v := recover(); v != nil {
-			err = NewComponentPanicError(name, "run", v)
+	return atom.observe(name, "", PhaseRun, func() (err error) {
+		defer func() {
+			if v := recover(); v != nil {
+				err = NewComponentPanicError(name, "run", v)
+			}
+		}()
+		if err = r.Run(ctx, atom); err != nil {
+			return &ComponentError{Name: name, Phase: "run", Err: err}
 		}
-	}()
-	return r.Run(ctx, atom)
+		return nil
+	})
 }
 
 func (a *Atom) unmountWithTimeout(base context.Context, mounted []namedComponent, timeout time.Duration) error {
@@ -310,17 +524,17 @@ func (a *Atom) unmountWithTimeout(base context.Context, mounted []namedComponent
 		}
 		result := make(chan error, 1)
 		go func() {
-			var err error
-			defer func() {
-				if v := recover(); v != nil {
-					err = NewComponentPanicError(m.name, "unmount", v)
+			result <- a.observe(m.name, "", PhaseUnmount, func() (err error) {
+				defer func() {
+					if v := recover(); v != nil {
+						err = NewComponentPanicError(m.name, "unmount", v)
+					}
+				}()
+				if err = u.Unmount(ctx, a); err != nil {
+					return &ComponentError{Name: m.name, Phase: "unmount", Err: err}
 				}
-				result <- err
-			}()
-			err = u.Unmount(ctx, a)
-			if err != nil {
-				err = &ComponentError{Name: m.name, Phase: "unmount", Err: err}
-			}
+				return nil
+			})
 		}()
 		select {
 		case err := <-result:

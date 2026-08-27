@@ -74,6 +74,16 @@ func (a *NetMapAbility) Describe() string {
 	return "NetMapAbility提供对等节点拓扑管理能力:注册/更新/查询/移除对端节点,生成本节点 + 对等节点拓扑快照。"
 }
 
+// Dependencies declares the data components the ability requires at mount
+// time. Mirrors the runtime Check below and lets the framework compute
+// mount order topologically.
+func (a *NetMapAbility) Dependencies() []types.Dependency {
+	return []types.Dependency{
+		{Kind: types.DependencyData, Name: "BaseData"},
+		{Kind: types.DependencyData, Name: "NetMapData"},
+	}
+}
+
 func (a *NetMapAbility) Check(atom *types.Atom) error {
 	if atom == nil {
 		return types.ErrMissingDependency

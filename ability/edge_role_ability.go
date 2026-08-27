@@ -92,6 +92,9 @@ func NewEdgeRoleAbility() *EdgeRoleAbility {
 }
 
 func (e *EdgeRoleAbility) GetName() string { return "EdgeRoleAbility" }
+func (e *EdgeRoleAbility) Dependencies() []types.Dependency {
+	return []types.Dependency{{Kind: types.DependencyData, Name: "BaseData"}, {Kind: types.DependencyAbility, Name: "RoleAbility"}}
+}
 
 func (e *EdgeRoleAbility) Describe() string {
 	return "EdgeRoleAbility扩展RoleAbility,提供边缘节点特有的区域(zone)、本地能力清单、在线状态与延迟指标管理能力。"

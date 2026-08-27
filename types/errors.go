@@ -25,7 +25,46 @@ var (
 	ErrInvalidShutdownTimeout = errors.New("invalid shutdown timeout")
 	ErrShutdownTimeout        = errors.New("lifecycle shutdown timed out")
 	ErrMissingDependency      = errors.New("component dependency is missing")
+	ErrWrongDependencyType    = errors.New("component dependency has wrong type")
+	ErrDependencyCycle        = errors.New("component dependency cycle")
+	ErrUnhealthy              = errors.New("atom is not healthy")
+	ErrNotMounted             = errors.New("component is not mounted")
 )
+
+// DependencyError identifies an invalid dependency declaration or registration.
+type DependencyError struct {
+	Component  string
+	Dependency Dependency
+	ActualKind DependencyKind
+	Err        error
+}
+
+func (e *DependencyError) Error() string {
+	if e == nil {
+		return "<nil>"
+	}
+	if errors.Is(e.Err, ErrWrongDependencyType) {
+		return fmt.Sprintf("component %q requires %s %q, found %s: %v", e.Component, e.Dependency.Kind, e.Dependency.Name, e.ActualKind, e.Err)
+	}
+	return fmt.Sprintf("component %q requires %s %q: %v", e.Component, e.Dependency.Kind, e.Dependency.Name, e.Err)
+}
+func (e *DependencyError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+// DependencyCycleError reports a deterministic closed dependency path.
+type DependencyCycleError struct{ Components []string }
+
+func (e *DependencyCycleError) Error() string {
+	if e == nil {
+		return "<nil>"
+	}
+	return fmt.Sprintf("dependency cycle %s: %v", strings.Join(e.Components, " -> "), ErrDependencyCycle)
+}
+func (e *DependencyCycleError) Unwrap() error { return ErrDependencyCycle }
 
 // ComponentError annotates an error with the component and lifecycle phase
 // in which it occurred.
@@ -137,4 +176,44 @@ func (e *ShutdownTimeoutError) Unwrap() error {
 	}
 	e.normalize()
 	return ErrShutdownTimeout
+}
+
+// UnhealthyError aggregates one or more failing component health reports.
+// The aggregated Err field exists for callers that don't care about the
+// individual components; the Components slice preserves the original
+// errors so callers (and errors.Is) can introspect.
+type UnhealthyError struct {
+	Components []ComponentHealth
+}
+
+func (e *UnhealthyError) Error() string {
+	if e == nil || len(e.Components) == 0 {
+		return "<nil>"
+	}
+	names := make([]string, 0, len(e.Components))
+	for _, c := range e.Components {
+		if !c.OK && !c.Skipped {
+			names = append(names, c.Name)
+		}
+	}
+	sort.Strings(names)
+	return fmt.Sprintf("atom unhealthy: %s: %v", strings.Join(names, ", "), ErrUnhealthy)
+}
+
+// Unwrap returns the aggregated ErrUnhealthy sentinel plus each component's
+// underlying error. Implements the Go 1.20+ multi-error unwrap interface so
+// errors.Is(err, ErrUnhealthy) and errors.Is(err, componentSentinel) both
+// work transparently.
+func (e *UnhealthyError) Unwrap() []error {
+	if e == nil || len(e.Components) == 0 {
+		return nil
+	}
+	out := make([]error, 0, len(e.Components)+1)
+	out = append(out, ErrUnhealthy)
+	for _, c := range e.Components {
+		if c.Err != nil {
+			out = append(out, c.Err)
+		}
+	}
+	return out
 }

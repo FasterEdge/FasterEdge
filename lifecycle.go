@@ -25,6 +25,29 @@ func WithShutdownTimeout(timeout time.Duration) RunOption {
 	}
 }
 
+func CloseAtom(ctx context.Context, atom *types.Atom, opts ...RunOption) error {
+	if ctx == nil {
+		return types.ErrNilContext
+	}
+	if atom == nil {
+		return types.ErrNilAtom
+	}
+	options := runOptions{shutdownTimeout: defaultShutdownTimeout}
+	for _, option := range opts {
+		if option == nil {
+			return fmt.Errorf("nil RunOption: %w", types.ErrInvalidArguments)
+		}
+		if err := option(&options); err != nil {
+			return err
+		}
+	}
+	return atom.Close(ctx, options.shutdownTimeout)
+}
+
+func UnmountAtom(ctx context.Context, atom *types.Atom, opts ...RunOption) error {
+	return CloseAtom(ctx, atom, opts...)
+}
+
 func RunAtom(ctx context.Context, atom *types.Atom, opts ...RunOption) error {
 	if ctx == nil {
 		return types.ErrNilContext

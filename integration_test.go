@@ -117,6 +117,58 @@ func TestSmokeEveryAbility(t *testing.T) {
 	if _, err := os.Stat(path); err != nil {
 		t.Fatal(err)
 	}
+
+	// Smoke the remaining ten abilities on a fully independent atom. Read-only
+	// commands and skeleton-mode commands avoid host services and CGO.
+	extra := &types.Atom{}
+	for _, d := range []types.Data{&data.BaseData{}, data.NewNetMapData()} {
+		if err := extra.AddData(d); err != nil {
+			t.Fatal(err)
+		}
+	}
+	extraAbilities := []types.Ability{
+		ability.NewDockerAbility(), ability.NewK8sAbility(), ability.NewMQTTAbility(),
+		ability.NewInfluxAbility(), ability.NewEKuiperAbility(), ability.NewModbusAbility(),
+		ability.NewSerialAbility(), ability.NewTSNAbility(), ability.NewFileTransferAbility(),
+		ability.NewAlgDistAbility(),
+	}
+	for _, ab := range extraAbilities {
+		if err := extra.AddAbility(ab); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := extra.AddAbility(ability.NewNetMapAbility()); err != nil {
+		t.Fatal(err)
+	}
+	if err := extra.PreRun(); err != nil {
+		t.Fatal(err)
+	}
+	commands := []struct{ name, command string }{
+		{"DockerAbility", ability.DockerCommandGetEndpoint}, {"KubernetesAbility", ability.K8sCommandGetContext},
+		{"MQTTAbility", ability.MQTTCommandIsConnected}, {"InfluxDBAbility", ability.InfluxCommandGetConfig},
+		{"EKuiperAbility", ability.EKuiperCommandGetEndpoint}, {"ModbusAbility", ability.ModbusCommandGetUnitID},
+		{"SerialAbility", ability.SerialCommandListPorts}, {"TSNAbility", ability.TSNCommandListStreams},
+		{"FileTransferAbility", ability.FileTransferCommandList}, {"AlgorithmDistributionAbility", ability.AlgDistCommandList},
+	}
+	for _, tc := range commands {
+		ab, _ := extra.Ability(tc.name)
+		mustCommand(t, ab, extra, tc.command, nil)
+	}
+
+	// Role-specific abilities cannot coexist because they require opposite roles.
+	for role, factory := range map[string]func() types.Ability{"edge": func() types.Ability { return ability.NewEdgeRoleAbility() }, "cloud": func() types.Ability { return ability.NewCloudRoleAbility() }} {
+		roleAtom := InitStandardAtom()
+		ra, _ := roleAtom.Ability("RoleAbility")
+		mustCommand(t, ra, roleAtom, ability.CommandSetRole, ability.RoleAbilityArgs{Role: role})
+		roleAbility := factory()
+		if err := roleAtom.AddAbility(roleAbility); err != nil {
+			t.Fatal(err)
+		}
+		if err := roleAtom.PreRun(); err != nil {
+			t.Fatal(err)
+		}
+		mustCommand(t, roleAbility, roleAtom, "describe", nil)
+	}
 }
 
 func TestCombinationNetMapOneKey(t *testing.T) {

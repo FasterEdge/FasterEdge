@@ -1,9 +1,10 @@
 <div align="center">
-  <img src="https://avatars.githubusercontent.com/u/245985800?s=200&v=4" style="width:100px;" width="100"/>
-  <h3>FasterEdge - 对称、可靠、安全的多场景边缘计算框架</h3>
+  <img src="https://avatars.githubusercontent.com/u/245985800?s=200&v=4" alt="logo" width="100" />
+  <h2>FasterEdge</h2>
+  <h3>对称、可靠、安全的多场景边缘计算框架</h3>
 </div>
 
-### 项目简介
+### 一、项目简介
 
 - "我们把每棵树想象成是一个设备上的服务(Atom),这棵树有各式各样的根(Data),这棵树可以从根中吸取养分,并将养分输送至枝干(Ability),枝干上或许有几个鸟巢或蜂窝,这些小家伙会将那'那些东西'从一棵树带到另一棵树,而'那些东西'在自己这棵树上是完全可以被任何部分获取的。"
 
@@ -19,7 +20,7 @@
 
 - 图中的小女孩代表着业务或用户(Business/User),这些树枝(Ability)是由树根(Data)提供养分生长出来的。
 
-### 术语
+### 二、术语
 
 - **Atom**: 节点上注册的所有 Data 与 Ability 的容器,提供统一生命周期。
 - **Data**: 节点上的"根",承载持久化或运行时状态(配置、密钥、拓扑等)。
@@ -27,7 +28,7 @@
 - **Command**: Ability 与 Data 的统一调用接口,`Command(atom, act, args) -> CommandOutput{Name, Value, Err}`。
 - **Transport**: 注入到 Ability 内的外部依赖抽象(网络、MQTT、Docker、K8s 等),由用户实现。
 
-### 开发模式
+### 三、开发模式
 
 ```go
 // 1. 最小化启动(只含 BaseData + BaseAbility)
@@ -52,7 +53,7 @@ out := ab.Command(atom, ability.NetMapCommandRegisterPeer, ability.NetMapRegiste
 })
 ```
 
-### 生态系统
+### 四、生态系统
 
 #### 已实现 Data 组件
 
@@ -116,14 +117,14 @@ ok.Command(atom, ability.OneKeyCommandVerifyToken, ability.OneKeyVerifyTokenArgs
 })
 ```
 
-### 设计哲学
+### 五、设计哲学
 - 依赖抽象而不依赖具体(Depend on Abstractions, Not on Concrete Implementations.)
 - 遵循策略模式(Strategy Pattern)、命令模式(Command Pattern)、组合模式(Composite Pattern)
 - 所有命令参数为严格类型,任何 nil/类型不匹配/空白值都会返回 `types.ErrInvalidArguments`
 - 内部状态全部受 `sync.RWMutex` / `atomic` 保护,`-race` 干净
 - 涉及外部网络的 Ability 默认拒绝 `localhost` / `127.0.0.1` / `0.0.0.0` / `::1`,降低 SSRF 风险
 
-### 生命周期与优雅退出
+### 六、生命周期与优雅退出
 
 FasterEdge 是库,不是独立进程。先注册组件,再挂载,最后在可取消的上下文中运行:
 
@@ -138,7 +139,7 @@ return fasteredge.RunAtom(ctx, atom, fasteredge.WithShutdownTimeout(5*time.Secon
 
 TimeAbility 的命令参数使用严格类型(例如 `TimeSyncManualArgs`),时间缓存基于单调时钟推进。网络时间源默认拒绝本机、私网、链路本地和组播地址,并禁用环境代理;只有显式启用 LAN 源选项时才放行私网地址。HTTP 响应限制为 64 KiB,NTP 使用校验后的响应偏移量。
 
-### 测试
+### 七、测试
 
 ```bash
 go test ./...           # 运行所有单元测试

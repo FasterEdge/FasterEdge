@@ -1,18 +1,32 @@
 package data
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/FasterEdge/FasterEdge/types"
+)
+
+const (
+	keyringSnapshotVersion = "1.0"
+	keyringSnapshotMajor   = 1
+	keyringSnapshotMaxSize = int64(4 << 20) // 4 MiB
+	keyringSnapshotPerm    = os.FileMode(0o600)
 )
 
 const (
@@ -70,6 +84,7 @@ type KeyringData struct {
 	tokens          map[string]*KeyringToken // key = subject
 	defaultAlgo     string
 	defaultTokenTTL time.Duration
+	snapshotPath    string
 }
 
 func NewKeyringData() *KeyringData {
@@ -78,6 +93,24 @@ func NewKeyringData() *KeyringData {
 		defaultAlgo:     "HMAC-SHA256",
 		defaultTokenTTL: 24 * time.Hour,
 	}
+}
+
+// NewPersistentKeyringData constructs a KeyringData that loads its complete
+// private state from path on Mount and atomically saves it on Unmount. The
+// snapshot includes the secret and therefore is always written with 0600
+// permissions. It is never returned by status/Snapshot APIs.
+func NewPersistentKeyringData(path string) *KeyringData {
+	k := NewKeyringData()
+	k.snapshotPath = strings.TrimSpace(path)
+	return k
+}
+
+// SetSnapshotPath enables lifecycle persistence on an existing KeyringData.
+// It must be called before Mount. An empty path disables lifecycle I/O.
+func (k *KeyringData) SetSnapshotPath(path string) {
+	k.mu.Lock()
+	k.snapshotPath = strings.TrimSpace(path)
+	k.mu.Unlock()
 }
 
 func (k *KeyringData) GetName() string { return "KeyringData" }
@@ -89,6 +122,14 @@ func (k *KeyringData) Describe() string {
 func (k *KeyringData) Check(_ *types.Atom) error { return nil }
 
 func (k *KeyringData) Mount(_ *types.Atom) error {
+	k.mu.RLock()
+	path := k.snapshotPath
+	k.mu.RUnlock()
+	if path != "" {
+		if err := k.LoadSnapshot(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("KeyringData mount load %s: %w", path, err)
+		}
+	}
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	if len(k.secret) == 0 {
@@ -101,6 +142,18 @@ func (k *KeyringData) Mount(_ *types.Atom) error {
 		k.lastRotatedAt = time.Now()
 	}
 	return nil
+}
+
+// Unmount performs the final atomic snapshot flush for lifecycle-managed
+// keyrings. If persistence is disabled it is a no-op.
+func (k *KeyringData) Unmount(_ context.Context, _ *types.Atom) error {
+	k.mu.RLock()
+	path := k.snapshotPath
+	k.mu.RUnlock()
+	if path == "" {
+		return nil
+	}
+	return k.SaveSnapshot(path)
 }
 
 // SetSecret 直接覆盖当前密钥(供 Ability 或测试使用)。
@@ -310,6 +363,192 @@ func (k *KeyringData) Command(_ *types.Atom, act string, args any) types.Command
 		return types.CommandOutput{Name: act, Value: k.RevokeAll()}
 	}
 	return types.CommandOutput{Name: act, Err: fmt.Errorf("command %s: %w", act, types.ErrUnsupportedCommand)}
+}
+
+// keyringSnapshot is the private on-disk representation. It intentionally
+// includes the raw secret; no public status or command returns this type.
+type keyringSnapshot struct {
+	Version         string         `json:"version"`
+	SavedAt         time.Time      `json:"savedAt"`
+	Secret          string         `json:"secret"`
+	LastRotatedAt   time.Time      `json:"lastRotatedAt"`
+	TotalIssued     int            `json:"totalIssued"`
+	RevokedCount    int            `json:"revokedCount"`
+	Tokens          []KeyringToken `json:"tokens"`
+	DefaultAlgo     string         `json:"defaultAlgo"`
+	DefaultTokenTTL time.Duration  `json:"defaultTokenTTL"`
+}
+
+// SaveSnapshot atomically writes the complete KeyringData state to path.
+// A sibling temp file is chmod 0600 before bytes are written, fsynced,
+// closed, then atomically renamed over the target. Any error before rename
+// leaves the existing target untouched.
+func (k *KeyringData) SaveSnapshot(path string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return errors.New("keyring snapshot: path is required")
+	}
+	k.mu.RLock()
+	tokens := make([]KeyringToken, 0, len(k.tokens))
+	for _, tok := range k.tokens {
+		tokens = append(tokens, *tok)
+	}
+	sort.Slice(tokens, func(i, j int) bool { return tokens[i].Subject < tokens[j].Subject })
+	snap := keyringSnapshot{
+		Version:         keyringSnapshotVersion,
+		SavedAt:         time.Now().UTC(),
+		Secret:          base64.StdEncoding.EncodeToString(k.secret),
+		LastRotatedAt:   k.lastRotatedAt,
+		TotalIssued:     k.totalIssued,
+		RevokedCount:    k.revokedCount,
+		Tokens:          tokens,
+		DefaultAlgo:     k.defaultAlgo,
+		DefaultTokenTTL: k.defaultTokenTTL,
+	}
+	k.mu.RUnlock()
+
+	body, err := json.MarshalIndent(snap, "", "  ")
+	if err != nil {
+		return fmt.Errorf("keyring snapshot: encode: %w", err)
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("keyring snapshot: mkdir: %w", err)
+	}
+	tmp, err := os.CreateTemp(dir, ".keyring-*.json.tmp")
+	if err != nil {
+		return fmt.Errorf("keyring snapshot: temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	cleanup := func() { _ = os.Remove(tmpPath) }
+	if err := tmp.Chmod(keyringSnapshotPerm); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return fmt.Errorf("keyring snapshot: chmod: %w", err)
+	}
+	if _, err := tmp.Write(body); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return fmt.Errorf("keyring snapshot: write: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return fmt.Errorf("keyring snapshot: fsync: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return fmt.Errorf("keyring snapshot: close: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		cleanup()
+		return fmt.Errorf("keyring snapshot: rename: %w", err)
+	}
+	if d, err := os.Open(dir); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
+	return nil
+}
+
+// LoadSnapshot reads and validates a bounded keyring snapshot, then replaces
+// the in-memory state in one critical section. Unknown major versions are
+// rejected. The raw secret is decoded only inside this private path.
+func (k *KeyringData) LoadSnapshot(path string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return errors.New("keyring snapshot: path is required")
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if info.Size() > keyringSnapshotMaxSize {
+		return fmt.Errorf("keyring snapshot: file too large: %d > %d", info.Size(), keyringSnapshotMaxSize)
+	}
+	body, err := io.ReadAll(io.LimitReader(f, keyringSnapshotMaxSize+1))
+	if err != nil {
+		return fmt.Errorf("keyring snapshot: read: %w", err)
+	}
+	if int64(len(body)) > keyringSnapshotMaxSize {
+		return fmt.Errorf("keyring snapshot: exceeded %d-byte limit", keyringSnapshotMaxSize)
+	}
+	if len(body) == 0 {
+		return errors.New("keyring snapshot: empty file")
+	}
+	var snap keyringSnapshot
+	if err := json.Unmarshal(body, &snap); err != nil {
+		return fmt.Errorf("keyring snapshot: decode: %w", err)
+	}
+	major, err := parseKeyringMajor(snap.Version)
+	if err != nil {
+		return fmt.Errorf("keyring snapshot: invalid version %q: %w", snap.Version, err)
+	}
+	if major != keyringSnapshotMajor {
+		return fmt.Errorf("keyring snapshot: unsupported major version %d (expected %d, full=%q)", major, keyringSnapshotMajor, snap.Version)
+	}
+	secret, err := base64.StdEncoding.DecodeString(snap.Secret)
+	if err != nil || len(secret) == 0 {
+		return errors.New("keyring snapshot: missing or invalid secret")
+	}
+	tokens := make(map[string]*KeyringToken, len(snap.Tokens))
+	for i := range snap.Tokens {
+		tok := snap.Tokens[i]
+		if strings.TrimSpace(tok.Subject) == "" {
+			return fmt.Errorf("keyring snapshot: tokens[%d] has empty subject", i)
+		}
+		if _, exists := tokens[tok.Subject]; exists {
+			return fmt.Errorf("keyring snapshot: duplicate subject %q", tok.Subject)
+		}
+		copyTok := tok
+		tokens[tok.Subject] = &copyTok
+	}
+	algo := strings.TrimSpace(snap.DefaultAlgo)
+	if algo == "" {
+		algo = "HMAC-SHA256"
+	}
+	ttl := snap.DefaultTokenTTL
+	if ttl <= 0 {
+		ttl = 24 * time.Hour
+	}
+	k.mu.Lock()
+	k.secret = append([]byte(nil), secret...)
+	k.lastRotatedAt = snap.LastRotatedAt
+	k.totalIssued = snap.TotalIssued
+	k.revokedCount = snap.RevokedCount
+	k.tokens = tokens
+	k.defaultAlgo = algo
+	k.defaultTokenTTL = ttl
+	k.mu.Unlock()
+	return nil
+}
+
+func parseKeyringMajor(v string) (int, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0, errors.New("empty version")
+	}
+	major := strings.SplitN(v, ".", 2)[0]
+	n, err := strconv.Atoi(major)
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("bad major %q", major)
+	}
+	return n, nil
+}
+
+// JSONMarshal returns only the normal public status shape. It is deliberately
+// separate from SaveSnapshot and can never reveal the raw secret.
+func (k *KeyringData) JSONMarshal() ([]byte, error) {
+	status, tokens := k.Snapshot()
+	return json.Marshal(struct {
+		Status KeyringStatus  `json:"status"`
+		Tokens []KeyringToken `json:"tokens"`
+	}{Status: status, Tokens: tokens})
 }
 
 // Sign 计算给定 subject + expiresAt 的 HMAC 签名,返回 base64 字符串。

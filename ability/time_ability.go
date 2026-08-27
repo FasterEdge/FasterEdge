@@ -50,7 +50,6 @@ type TimeAbility struct {
 	lastSource        string
 	lastSynced        time.Time
 	baseMono          time.Duration
-	current           time.Time
 	runMode           TimeRunMode
 	interval          time.Duration
 	networkPolicy     addressPolicy
@@ -289,7 +288,6 @@ func (t *TimeAbility) setSync(ts time.Time, source string) {
 	t.mu.Lock()
 	t.lastSynced = ts
 	t.baseMono = mono
-	t.current = ts
 	t.lastSource = source
 	t.mu.Unlock()
 }
@@ -306,7 +304,6 @@ func (t *TimeAbility) ensureSynced() {
 	if t.lastSynced.IsZero() {
 		t.lastSynced = ts
 		t.baseMono = mono
-		t.current = ts
 		t.lastSource = "system"
 	}
 	t.mu.Unlock()
@@ -329,3 +326,109 @@ func (t *TimeAbility) snapshot() TimeSnapshot {
 	defer t.mu.RUnlock()
 	return TimeSnapshot{Source: t.lastSource, Time: t.lastSynced}
 }
+
+// timeCommands is the canonical command catalogue for TimeAbility. The
+// Command switch and ListCommands both consume it so the list cannot drift
+// from the dispatch table.
+var timeCommands = []string{
+	TimeCommandSyncNetwork,
+	TimeCommandSyncManual,
+	TimeCommandSyncSystem,
+	TimeCommandSyncNTP,
+	TimeCommandLastSync,
+	TimeCommandGetTime,
+	TimeCommandConfigureRun,
+}
+
+// ListCommands satisfies types.CommandLister.
+func (t *TimeAbility) ListCommands() []string { return append([]string(nil), timeCommands...) }
+
+// HealthCheck satisfies types.HealthChecker. It returns nil if the ability
+// has ever synced; otherwise it reports ErrNotSynced so callers can decide
+// whether to wait or surface a readiness issue.
+func (t *TimeAbility) HealthCheck(ctx context.Context, _ *types.Atom) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	t.mu.RLock()
+	synced := !t.lastSynced.IsZero()
+	t.mu.RUnlock()
+	if !synced {
+		return ErrTimeNotSynced
+	}
+	return nil
+}
+
+// ErrTimeNotSynced is returned by TimeAbility.HealthCheck when the ability
+// has not yet performed a sync. It is not a fatal failure — callers may
+// follow it up by issuing a sync command.
+var ErrTimeNotSynced = errors.New("time ability has not been synced")
+
+// Run implements types.Runner. TimeAbility supervises itself as a Runner:
+// it promotes any unset clock state to system time on entry, then drives a
+// periodic ticker in either monotonic (default) or ticker mode until ctx is
+// cancelled. Returns nil on clean cancellation. Rejects zero / negative
+// intervals to avoid busy-looping in ticker mode. The default interval for
+// unconfigured monotonic mode is 1 second so the supervision loop does not
+// burn CPU when the user never called configure_run.
+func (t *TimeAbility) Run(ctx context.Context, _ *types.Atom) error {
+	t.mu.RLock()
+	mode, interval := t.runMode, t.interval
+	t.mu.RUnlock()
+	if interval <= 0 {
+		return fmt.Errorf("time ability run: interval %s: %w", interval, types.ErrInvalidArguments)
+	}
+	t.ensureDefaults()
+	t.ensureSynced()
+	if mode == TimeRunModeMonotonic && interval < time.Second {
+		// Avoid the default 1ms busy loop that ensureDefaults seeds for
+		// backwards compatibility with non-Runner callers.
+		interval = time.Second
+	}
+	if interval < t.minimumTick {
+		interval = t.minimumTick
+	}
+	switch mode {
+	case TimeRunModeTicker:
+		return t.runTicker(ctx, interval)
+	default:
+		return t.runMonotonic(ctx, interval)
+	}
+}
+
+func (t *TimeAbility) runMonotonic(ctx context.Context, interval time.Duration) error {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			// currentTime() is a pure function over lastSynced +
+			// (nowMono - baseMono). Ticking it periodically keeps the
+			// path warm for get_time and exposes liveness without
+			// touching the underlying sync source.
+			_, _, _ = t.currentTime()
+		}
+	}
+}
+
+func (t *TimeAbility) runTicker(ctx context.Context, interval time.Duration) error {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			t.setSync(t.clock.Now(), "system")
+		}
+	}
+}
+
+// Compile-time interface assertions.
+var (
+	_ types.Runner         = (*TimeAbility)(nil)
+	_ types.CommandLister  = (*TimeAbility)(nil)
+	_ types.HealthChecker  = (*TimeAbility)(nil)
+)

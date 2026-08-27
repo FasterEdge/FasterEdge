@@ -94,6 +94,9 @@ func NewCloudRoleAbility() *CloudRoleAbility {
 }
 
 func (c *CloudRoleAbility) GetName() string { return "CloudRoleAbility" }
+func (c *CloudRoleAbility) Dependencies() []types.Dependency {
+	return []types.Dependency{{Kind: types.DependencyData, Name: "BaseData"}, {Kind: types.DependencyAbility, Name: "RoleAbility"}}
+}
 
 func (c *CloudRoleAbility) Describe() string {
 	return "CloudRoleAbility扩展RoleAbility,提供云端节点特有的控制器注册、服务清单、心跳与状态管理能力。"

@@ -58,6 +58,9 @@ type OneKeyAbility struct {
 func NewOneKeyAbility() *OneKeyAbility { return &OneKeyAbility{} }
 
 func (o *OneKeyAbility) GetName() string { return "OneKeyAbility" }
+func (o *OneKeyAbility) Dependencies() []types.Dependency {
+	return []types.Dependency{{Kind: types.DependencyData, Name: "BaseData"}, {Kind: types.DependencyData, Name: "NetMapData"}, {Kind: types.DependencyData, Name: "KeyringData"}}
+}
 
 func (o *OneKeyAbility) Describe() string {
 	return "OneKeyAbility提供节点加密访问(One-Key)能力:为对等节点签发短期 HMAC 令牌并支持校验/吊销,依赖 KeyringData 共享密钥。"

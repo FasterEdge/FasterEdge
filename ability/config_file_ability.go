@@ -46,6 +46,9 @@ type ConfigFileAbility struct {
 func NewConfigFileAbility() *ConfigFileAbility { return &ConfigFileAbility{} }
 
 func (a *ConfigFileAbility) GetName() string { return "ConfigFileAbility" }
+func (a *ConfigFileAbility) Dependencies() []types.Dependency {
+	return []types.Dependency{{Kind: types.DependencyData, Name: "BaseData"}, {Kind: types.DependencyData, Name: "ConfigData"}}
+}
 
 func (a *ConfigFileAbility) Describe() string {
 	return "ConfigFileAbility在ConfigData之上提供 JSON 配置文件的加载/保存/路径管理,支持扁平点号键。"

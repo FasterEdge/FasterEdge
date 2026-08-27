@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"reflect"
 	"runtime/debug"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -27,6 +28,7 @@ type Atom struct {
 	mounted          []namedComponent
 	mountedAbilities []namedComponent
 	transitioning    bool
+	eventSink        EventSink
 }
 
 func (a *Atom) GetName() string {
@@ -109,6 +111,56 @@ func (a *Atom) AddAbility(ab Ability) error {
 	a.abilities[name] = ab
 	return nil
 }
+
+// RemoveData deletes a registered Data component. The atom must be in
+// AtomCreated, AtomStopped, or AtomFailed state (not mounted, not running).
+// Returns ErrMissingDependency if the name is not currently registered.
+func (a *Atom) RemoveData(name string) error {
+	if a == nil {
+		return ErrNilAtom
+	}
+	if strings.TrimSpace(name) == "" || strings.TrimSpace(name) != name {
+		return fmt.Errorf("remove data %q: %w", name, ErrInvalidComponentName)
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.transitioning {
+		return fmt.Errorf("remove data %s: %w", name, ErrInvalidState)
+	}
+	if a.state != AtomCreated && a.state != AtomStopped && a.state != AtomFailed {
+		return fmt.Errorf("remove data %s: %w", name, ErrInvalidState)
+	}
+	if _, ok := a.data[name]; !ok {
+		return fmt.Errorf("remove data %s: %w", name, ErrMissingDependency)
+	}
+	delete(a.data, name)
+	return nil
+}
+
+// RemoveAbility deletes a registered Ability component. The atom must be in
+// AtomCreated, AtomStopped, or AtomFailed state. Returns ErrMissingDependency
+// if the name is not currently registered.
+func (a *Atom) RemoveAbility(name string) error {
+	if a == nil {
+		return ErrNilAtom
+	}
+	if strings.TrimSpace(name) == "" || strings.TrimSpace(name) != name {
+		return fmt.Errorf("remove ability %q: %w", name, ErrInvalidComponentName)
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.transitioning {
+		return fmt.Errorf("remove ability %s: %w", name, ErrInvalidState)
+	}
+	if a.state != AtomCreated && a.state != AtomStopped && a.state != AtomFailed {
+		return fmt.Errorf("remove ability %s: %w", name, ErrInvalidState)
+	}
+	if _, ok := a.abilities[name]; !ok {
+		return fmt.Errorf("remove ability %s: %w", name, ErrMissingDependency)
+	}
+	delete(a.abilities, name)
+	return nil
+}
 func (a *Atom) Data(name string) (Data, bool) {
 	if a == nil {
 		return nil, false
@@ -155,6 +207,72 @@ func (a *Atom) AllAbilities() map[string]Ability {
 // Compatibility names retained while callers migrate.
 func (a *Atom) GetAllData() map[string]Data       { return a.AllData() }
 func (a *Atom) GetAllAbility() map[string]Ability { return a.AllAbilities() }
+
+// AddEventSink appends a sink to the atom's lifecycle observer chain. The
+// first call replaces the single-sink slot; subsequent calls fan out via a
+// MultiEventSink so observers like a logging recorder and a metrics
+// collector can coexist. Returns ErrNilAtom for a nil receiver; a nil sink
+// is a no-op.
+func (a *Atom) AddEventSink(sink EventSink) error {
+	if a == nil {
+		return ErrNilAtom
+	}
+	if sink == nil {
+		return nil
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	switch existing := a.eventSink.(type) {
+	case nil:
+		a.eventSink = sink
+	case *MultiEventSink:
+		existing.Add(sink)
+	default:
+		a.eventSink = NewMultiEventSink(existing, sink)
+	}
+	return nil
+}
+
+// CommandNames returns the canonical command catalogue exposed by every
+// registered component. Components implementing CommandLister contribute
+// their sorted list; components that don't are present with an empty slice
+// (callers can distinguish "didn't declare" from "isn't registered" via the
+// presence of the key). The returned map is owned by the caller.
+func (a *Atom) CommandNames() map[string][]string {
+	out := map[string][]string{}
+	if a == nil {
+		return out
+	}
+	type entry struct {
+		name string
+		lister CommandLister
+	}
+	a.mu.RLock()
+	entries := make([]entry, 0, len(a.data)+len(a.abilities))
+	for n, c := range a.data {
+		if l, ok := c.(CommandLister); ok {
+			entries = append(entries, entry{name: n, lister: l})
+		} else {
+			out[n] = []string{}
+		}
+	}
+	for n, c := range a.abilities {
+		if l, ok := c.(CommandLister); ok {
+			entries = append(entries, entry{name: n, lister: l})
+		} else {
+			out[n] = []string{}
+		}
+	}
+	a.mu.RUnlock()
+	for _, e := range entries {
+		// Call user code outside the lock.
+		cmds := e.lister.ListCommands()
+		cp := append([]string(nil), cmds...)
+		sort.Strings(cp)
+		out[e.name] = cp
+	}
+	return out
+}
 
 func validateComponent(c Component) (name string, err error) {
 	if c == nil || isNilComponent(c) {

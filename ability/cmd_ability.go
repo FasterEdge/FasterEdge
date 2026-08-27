@@ -102,26 +102,32 @@ type CmdJob struct {
 	done      chan struct{}
 }
 
+// cmdClosingError 表示能力已被 Unmount 关闭后再次接收新命令。
+var cmdClosingError = errors.New("CmdAbility is closing")
+
 // CmdAbility 提供受 allowlist 约束的命令执行能力,支持同步运行与异步任务。
 type CmdAbility struct {
 	mu sync.RWMutex
 
-	allowlist map[string]CmdAllowlistEntry
-	jobs      map[string]*CmdJob
-	jobSeq    atomic.Uint64
-	maxOutput int64
-	maxRunTo  time.Duration
-	maxConc   int
-	running   atomic.Int32
+	closing    bool
+	allowlist  map[string]CmdAllowlistEntry
+	jobs       map[string]*CmdJob
+	jobSeq     atomic.Uint64
+	maxOutput  int64
+	maxRunTo   time.Duration
+	maxConc    int
+	running    atomic.Int32
+	cancelGate chan struct{}
 }
 
 func NewCmdAbility() *CmdAbility {
 	return &CmdAbility{
-		allowlist: make(map[string]CmdAllowlistEntry),
-		jobs:      make(map[string]*CmdJob),
-		maxOutput: cmdDefaultMaxOutputBytes,
-		maxRunTo:  cmdDefaultMaxRunTimeout,
-		maxConc:   cmdDefaultMaxConcurrent,
+		allowlist:  make(map[string]CmdAllowlistEntry),
+		jobs:       make(map[string]*CmdJob),
+		maxOutput:  cmdDefaultMaxOutputBytes,
+		maxRunTo:   cmdDefaultMaxRunTimeout,
+		maxConc:    cmdDefaultMaxConcurrent,
+		cancelGate: make(chan struct{}),
 	}
 }
 
@@ -143,6 +149,64 @@ func (c *CmdAbility) Check(atom *types.Atom) error {
 
 func (c *CmdAbility) Mount(atom *types.Atom) error { return c.Check(atom) }
 
+// beginShutdown 把 ability 标记为 closing 并关闭 cancelGate。返回是否成功。
+// 若已 closing,返回 false。
+func (c *CmdAbility) beginShutdown() bool {
+	c.mu.Lock()
+	if c.closing {
+		c.mu.Unlock()
+		return false
+	}
+	c.closing = true
+	select {
+	case <-c.cancelGate:
+		cancelGate := c.cancelGate
+		c.cancelGate = nil
+		c.mu.Unlock()
+		close(cancelGate)
+	default:
+		c.mu.Unlock()
+	}
+	return true
+}
+
+// Unmount cancels every active asynchronous job and waits for completion or
+// context cancellation. Job state is always read and written under c.mu.
+// All job fields are only mutated under c.mu to make `done` / `cancel` reads
+// race-free.
+func (c *CmdAbility) Unmount(ctx context.Context, _ *types.Atom) error {
+	if ctx == nil {
+		return types.ErrNilContext
+	}
+	if !c.beginShutdown() {
+		return nil
+	}
+	c.mu.RLock()
+	jobs := make([]*CmdJob, 0, len(c.jobs))
+	for _, job := range c.jobs {
+		jobs = append(jobs, job)
+	}
+	c.mu.RUnlock()
+	for _, job := range jobs {
+		c.mu.RLock()
+		done := job.Done
+		cancel := job.cancel
+		wait := job.done
+		c.mu.RUnlock()
+		if !done && cancel != nil {
+			cancel()
+		}
+		if wait != nil {
+			select {
+			case <-wait:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+	}
+	return nil
+}
+
 // SetAllowlist 直接覆盖 allowlist(供测试或初始化使用)。
 func (c *CmdAbility) SetAllowlist(entries []CmdAllowlistEntry) {
 	c.mu.Lock()
@@ -156,6 +220,18 @@ func (c *CmdAbility) SetAllowlist(entries []CmdAllowlistEntry) {
 		e.Name = name
 		c.allowlist[name] = e
 	}
+}
+
+// rejectIfClosing 检查 ability 是否处于 closing 状态,用于拒绝新任务。
+func (c *CmdAbility) rejectIfClosing(act string) *types.CommandOutput {
+	c.mu.RLock()
+	closing := c.closing
+	c.mu.RUnlock()
+	if closing {
+		out := types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, cmdClosingError)}
+		return &out
+	}
+	return nil
 }
 
 func (c *CmdAbility) Command(atom *types.Atom, act string, args any) types.CommandOutput {
@@ -180,11 +256,17 @@ func (c *CmdAbility) Command(atom *types.Atom, act string, args any) types.Comma
 		if !ok {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
 		}
+		if out := c.rejectIfClosing(act); out != nil {
+			return *out
+		}
 		return c.runSync(typed)
 	case CmdCommandStart:
 		typed, ok := args.(CmdRunArgs)
 		if !ok {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
+		}
+		if out := c.rejectIfClosing(act); out != nil {
+			return *out
 		}
 		return c.startAsync(typed)
 	case CmdCommandWait:
@@ -281,12 +363,19 @@ func (c *CmdAbility) runSync(a CmdRunArgs) types.CommandOutput {
 	defer cancel()
 
 	jobID := c.nextJobID()
-	job := &CmdJob{JobID: jobID, Name: a.Name, Args: append([]string(nil), a.Args...), Started: time.Now(), done: make(chan struct{})}
+	job := &CmdJob{JobID: jobID, Name: a.Name, Args: append([]string(nil), a.Args...), Started: time.Now(), cancel: cancel, done: make(chan struct{})}
 	c.registerJob(job)
 
-	job.ExitCode, job.Stdout, job.Stderr, job.Truncated = c.execOnce(ctx, a.Name, a.Args, a.Env)
-	job.Done = true
-	close(job.done)
+	exitCode, stdout, stderr, truncated := c.execOnce(ctx, a.Name, a.Args, a.Env)
+	c.mu.Lock()
+	if !job.Done {
+		job.ExitCode = exitCode
+		job.Stdout = stdout
+		job.Stderr = stderr
+		job.Truncated = truncated
+		job.Done = true
+		close(job.done)
+	}
 	result := CmdResult{
 		JobID:     job.JobID,
 		Name:      a.Name,
@@ -298,6 +387,7 @@ func (c *CmdAbility) runSync(a CmdRunArgs) types.CommandOutput {
 		Duration:  time.Since(job.Started),
 		Truncated: job.Truncated,
 	}
+	c.mu.Unlock()
 	return types.CommandOutput{Name: CmdCommandRun, Value: result}
 }
 
@@ -373,9 +463,15 @@ func (c *CmdAbility) startAsync(a CmdRunArgs) types.CommandOutput {
 	c.registerJob(job)
 	go func() {
 		defer c.running.Add(-1)
-		defer close(job.done)
-		job.ExitCode, job.Stdout, job.Stderr, job.Truncated = c.execOnce(ctx, a.Name, a.Args, a.Env)
+		exitCode, stdout, stderr, truncated := c.execOnce(ctx, a.Name, a.Args, a.Env)
+		c.mu.Lock()
+		job.ExitCode = exitCode
+		job.Stdout = stdout
+		job.Stderr = stderr
+		job.Truncated = truncated
 		job.Done = true
+		close(job.done)
+		c.mu.Unlock()
 	}()
 	return types.CommandOutput{Name: CmdCommandStart, Value: jobID}
 }
@@ -387,31 +483,36 @@ func (c *CmdAbility) waitJob(a CmdWaitArgs) types.CommandOutput {
 	}
 	c.mu.RLock()
 	job, ok := c.jobs[jobID]
+	wait := a.Wait
+	closing := c.closing
 	c.mu.RUnlock()
 	if !ok {
 		return types.CommandOutput{Name: CmdCommandWait, Err: fmt.Errorf("%s: job %q not found: %w", CmdCommandWait, jobID, types.ErrInvalidArguments)}
 	}
-	wait := a.Wait
 	if wait < 0 {
 		return types.CommandOutput{Name: CmdCommandWait, Err: fmt.Errorf("%s: wait must be non-negative: %w", CmdCommandWait, types.ErrInvalidArguments)}
 	}
+	jobDone := job.done
 	if wait == 0 {
-		<-job.done
+		<-jobDone
 	} else {
 		t := time.NewTimer(wait)
 		defer t.Stop()
 		select {
-		case <-job.done:
+		case <-jobDone:
 		case <-t.C:
 		}
 	}
+	c.mu.RLock()
 	if !job.Done {
+		c.mu.RUnlock()
+		_ = closing
 		return types.CommandOutput{Name: CmdCommandWait, Err: fmt.Errorf("%s: job %q still running: %w", CmdCommandWait, jobID, types.ErrInvalidArguments)}
 	}
 	result := CmdResult{
 		JobID:     job.JobID,
 		Name:      job.Name,
-		Args:      job.Args,
+		Args:      append([]string(nil), job.Args...),
 		ExitCode:  job.ExitCode,
 		Stdout:    job.Stdout,
 		Stderr:    job.Stderr,
@@ -419,23 +520,28 @@ func (c *CmdAbility) waitJob(a CmdWaitArgs) types.CommandOutput {
 		Duration:  time.Since(job.Started),
 		Truncated: job.Truncated,
 	}
+	c.mu.RUnlock()
 	return types.CommandOutput{Name: CmdCommandWait, Value: result}
 }
 
 func (c *CmdAbility) killJob(jobID string) (found bool, killed bool) {
 	c.mu.RLock()
 	job, ok := c.jobs[jobID]
-	c.mu.RUnlock()
 	if !ok {
+		c.mu.RUnlock()
 		return false, false
 	}
-	if job.Done {
+	done := job.Done
+	cancel := job.cancel
+	wait := job.done
+	c.mu.RUnlock()
+	if done {
 		return true, false
 	}
-	if job.cancel != nil {
-		job.cancel()
+	if cancel != nil {
+		cancel()
 	}
-	<-job.done
+	<-wait
 	return true, true
 }
 
@@ -496,3 +602,6 @@ func (j *CmdJob) publicView() CmdJob {
 		Truncated: j.Truncated,
 	}
 }
+
+// Compile-time guarantee that CmdAbility satisfies Unmounter.
+var _ types.Unmounter = (*CmdAbility)(nil)
