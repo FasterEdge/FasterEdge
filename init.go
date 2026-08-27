@@ -65,5 +65,16 @@ func InitStandardAtom() *types.Atom {
 			panic(fmt.Sprintf("InitStandardAtom register %s %s: %v", r.kind, r.name, err))
 		}
 	}
+	oneKey, ok := atom.Ability("OneKeyAbility")
+	if !ok {
+		panic("InitStandardAtom configure command authentication: OneKeyAbility missing")
+	}
+	auth, ok := oneKey.(types.CommandAuthenticator)
+	if !ok {
+		panic("InitStandardAtom configure command authentication: OneKeyAbility does not implement CommandAuthenticator")
+	}
+	if err := atom.SetCommandAuthenticator(auth); err != nil {
+		panic(fmt.Sprintf("InitStandardAtom configure command authentication: %v", err))
+	}
 	return atom
 }

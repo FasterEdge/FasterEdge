@@ -28,6 +28,13 @@ type ContextCommander interface {
 	CommandContext(context.Context, *Atom, string, any) CommandOutput
 }
 
+// CommandAuthenticator validates a credential before Atom dispatches a
+// command through its authenticated entry point. The target is included so
+// implementations may add authorization policies without changing Atom.
+type CommandAuthenticator interface {
+	AuthenticateCommand(context.Context, *Atom, any, string, string, any) (string, error)
+}
+
 // CommandLister is an optional interface components implement to declare the
 // canonical names of their commands. Atom.CommandNames uses it to surface a
 // machine-readable command catalogue without dispatching each command to

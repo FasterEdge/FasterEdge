@@ -1,6 +1,7 @@
 package FasterEdge
 
 import (
+	"errors"
 	"runtime"
 	"strings"
 	"testing"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/FasterEdge/FasterEdge/ability"
 	"github.com/FasterEdge/FasterEdge/data"
+	"github.com/FasterEdge/FasterEdge/types"
 )
 
 func TestInitStandardAtomRegistersAllCommonComponents(t *testing.T) {
@@ -41,6 +43,39 @@ func TestInitStandardAtomRegistersAllCommonComponents(t *testing.T) {
 		if _, ok := atom.Ability(name); !ok {
 			t.Errorf("missing ability: %s", name)
 		}
+	}
+}
+
+func TestAuthenticatedCommandWithOneKey(t *testing.T) {
+	atom := InitStandardAtom()
+	if err := PreRunAtom(atom); err != nil {
+		t.Fatal(err)
+	}
+	oneKey, _ := atom.Ability("OneKeyAbility")
+	issued := oneKey.Command(atom, ability.OneKeyCommandIssueToken, ability.OneKeyIssueTokenArgs{
+		Subject: "edge-authenticated", TTL: time.Hour,
+	})
+	if issued.Err != nil {
+		t.Fatal(issued.Err)
+	}
+	tok := issued.Value.(ability.OneKeyToken)
+	credential := ability.OneKeyCredential{Subject: tok.Subject, IssuedAt: tok.IssuedAt, ExpiresAt: tok.ExpiresAt, Signature: tok.Signature}
+
+	out := atom.AuthenticatedCommand(credential, "BaseData", data.CommandInfo, nil)
+	if out.Err != nil {
+		t.Fatalf("authenticated command: %v", out.Err)
+	}
+	if _, ok := out.Value.(string); !ok {
+		t.Fatalf("unexpected value: %#v", out.Value)
+	}
+
+	bad := credential
+	bad.Signature += "bad"
+	if out := atom.AuthenticatedCommand(bad, "BaseData", data.CommandInfo, nil); !errors.Is(out.Err, types.ErrAuthenticationFailed) {
+		t.Fatalf("bad credential error = %v", out.Err)
+	}
+	if out := atom.AuthenticatedCommand(credential, "missing", "secret", nil); !errors.Is(out.Err, types.ErrMissingDependency) {
+		t.Fatalf("authenticated missing target error = %v", out.Err)
 	}
 }
 

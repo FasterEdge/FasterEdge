@@ -1,6 +1,7 @@
 package ability
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
 	"strings"
@@ -44,6 +45,10 @@ type OneKeyVerifyTokenArgs struct {
 	Signature string
 }
 
+// OneKeyCredential is the credential accepted by Atom's authenticated command
+// entry point. It is intentionally identical to the verify_token arguments.
+type OneKeyCredential = OneKeyVerifyTokenArgs
+
 // OneKeyRevokeTokenArgs 是 revoke_token 命令的参数。
 type OneKeyRevokeTokenArgs struct {
 	Subject string
@@ -83,6 +88,34 @@ func (o *OneKeyAbility) Check(atom *types.Atom) error {
 }
 
 func (o *OneKeyAbility) Mount(atom *types.Atom) error { return o.Check(atom) }
+
+// AuthenticateCommand implements types.CommandAuthenticator. The current
+// OneKey protocol authenticates node identity globally; component/command/args
+// are accepted for future authorization policies but are not signed today.
+func (o *OneKeyAbility) AuthenticateCommand(ctx context.Context, atom *types.Atom, credential any, component, command string, args any) (string, error) {
+	_ = component
+	_ = command
+	_ = args
+	if ctx == nil {
+		return "", types.ErrNilContext
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	token, ok := credential.(OneKeyVerifyTokenArgs)
+	if !ok {
+		return "", types.ErrAuthenticationFailed
+	}
+	out := o.Command(atom, OneKeyCommandVerifyToken, token)
+	if out.Err != nil {
+		return "", types.ErrAuthenticationFailed
+	}
+	subject, ok := out.Value.(string)
+	if !ok || strings.TrimSpace(subject) == "" {
+		return "", types.ErrAuthenticationFailed
+	}
+	return subject, nil
+}
 
 func (o *OneKeyAbility) Command(atom *types.Atom, act string, args any) types.CommandOutput {
 	if err := o.Check(atom); err != nil {
@@ -130,8 +163,9 @@ func (o *OneKeyAbility) Command(atom *types.Atom, act string, args any) types.Co
 		if subject == "" || strings.TrimSpace(typed.Signature) == "" {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
 		}
-		if typed.ExpiresAt.IsZero() || typed.ExpiresAt.Before(time.Now()) {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: token expired: %w", act, types.ErrInvalidArguments)}
+		now := time.Now()
+		if typed.IssuedAt.IsZero() || typed.ExpiresAt.IsZero() || !typed.ExpiresAt.After(typed.IssuedAt) || typed.ExpiresAt.Before(now) || typed.IssuedAt.After(now.Add(time.Minute)) {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: invalid token lifetime: %w", act, types.ErrInvalidArguments)}
 		}
 		stored, ok := keyring.LookupToken(subject)
 		if !ok {
@@ -139,6 +173,9 @@ func (o *OneKeyAbility) Command(atom *types.Atom, act string, args any) types.Co
 		}
 		if stored.Revoked {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: token revoked: %w", act, types.ErrInvalidArguments)}
+		}
+		if !stored.IssuedAt.Equal(typed.IssuedAt) || !stored.ExpiresAt.Equal(typed.ExpiresAt) {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: token does not match issued credential: %w", act, types.ErrInvalidArguments)}
 		}
 		if !keyring.Verify(subject, typed.IssuedAt, typed.ExpiresAt, typed.Signature) {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: bad signature: %w", act, types.ErrInvalidArguments)}

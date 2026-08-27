@@ -29,6 +29,8 @@ var (
 	ErrDependencyCycle        = errors.New("component dependency cycle")
 	ErrUnhealthy              = errors.New("atom is not healthy")
 	ErrNotMounted             = errors.New("component is not mounted")
+	ErrAuthenticationRequired = errors.New("command authentication is required")
+	ErrAuthenticationFailed   = errors.New("command authentication failed")
 )
 
 // DependencyError identifies an invalid dependency declaration or registration.

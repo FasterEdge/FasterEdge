@@ -1,11 +1,50 @@
 package types
 
 import (
+	"context"
 	"errors"
 	"reflect"
 	"testing"
 	"time"
 )
+
+type testCommandAuthenticator struct {
+	err    error
+	called int
+}
+
+func (a *testCommandAuthenticator) AuthenticateCommand(ctx context.Context, _ *Atom, _ any, _, _ string, _ any) (string, error) {
+	a.called++
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	return "node", a.err
+}
+
+func TestAuthenticatedCommandRequiresAndUsesAuthenticator(t *testing.T) {
+	atom := &Atom{}
+	target := &testComponent{name: "target"}
+	if err := atom.AddAbility(target); err != nil {
+		t.Fatal(err)
+	}
+	if out := atom.AuthenticatedCommand("credential", "target", "ping", nil); !errors.Is(out.Err, ErrAuthenticationRequired) {
+		t.Fatalf("without authenticator: %v", out.Err)
+	}
+	auth := &testCommandAuthenticator{}
+	if err := atom.SetCommandAuthenticator(auth); err != nil {
+		t.Fatal(err)
+	}
+	if out := atom.AuthenticatedCommand("credential", "target", "ping", nil); out.Err != nil {
+		t.Fatalf("authenticated dispatch: %v", out.Err)
+	}
+	if auth.called != 1 {
+		t.Fatalf("auth calls = %d", auth.called)
+	}
+	auth.err = errors.New("denied")
+	if out := atom.AuthenticatedCommand("credential", "missing", "ping", nil); !errors.Is(out.Err, ErrAuthenticationFailed) {
+		t.Fatalf("authentication must precede target lookup: %v", out.Err)
+	}
+}
 
 func TestCommandOutputSuccessReflectsError(t *testing.T) {
 	if !(CommandOutput{Value: "ok"}).Success() {

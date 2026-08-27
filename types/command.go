@@ -15,15 +15,65 @@ type CommandOutput struct {
 // Success reports whether the command completed without an error.
 func (o CommandOutput) Success() bool { return o.Err == nil }
 
-// Command preserves the legacy dispatcher shape while routing through the
-// cancellation-aware implementation.
+// Command preserves the legacy dispatcher shape for trusted in-process calls.
 func (a *Atom) Command(component, command string, args any) CommandOutput {
 	return a.CommandContext(context.Background(), component, command, args)
 }
 
-// CommandContext dispatches to data or ability by name, prefers an optional
-// ContextCommander, and recovers panics without changing Component.Command.
-func (a *Atom) CommandContext(ctx context.Context, component, command string, args any) (out CommandOutput) {
+// CommandContext dispatches a trusted in-process call without authentication.
+// Remote transports should use AuthenticatedCommandContext instead.
+func (a *Atom) CommandContext(ctx context.Context, component, command string, args any) CommandOutput {
+	return a.dispatchContext(ctx, component, command, args)
+}
+
+// AuthenticatedCommand validates credential with the Atom's configured
+// CommandAuthenticator before dispatching the target command.
+func (a *Atom) AuthenticatedCommand(credential any, component, command string, args any) CommandOutput {
+	return a.AuthenticatedCommandContext(context.Background(), credential, component, command, args)
+}
+
+// AuthenticatedCommandContext is the security boundary intended for HTTP,
+// MQTT, RPC, and other remote adapters. Authentication happens before target
+// lookup so failed callers cannot use it to enumerate registered components.
+func (a *Atom) AuthenticatedCommandContext(ctx context.Context, credential any, component, command string, args any) (out CommandOutput) {
+	out.Name = command
+	if a == nil {
+		out.Err = ErrNilAtom
+		return
+	}
+	if ctx == nil {
+		out.Err = ErrNilContext
+		return
+	}
+	a.mu.RLock()
+	auth := a.commandAuthenticator
+	a.mu.RUnlock()
+	if auth == nil || isNilInterface(auth) {
+		out.Err = ErrAuthenticationRequired
+		return
+	}
+	if err := ctx.Err(); err != nil {
+		out.Err = err
+		return
+	}
+	var authErr error
+	func() {
+		defer func() {
+			if v := recover(); v != nil {
+				authErr = NewComponentPanicError("command authenticator", "authenticate", v)
+			}
+		}()
+		_, authErr = auth.AuthenticateCommand(ctx, a, credential, component, command, args)
+	}()
+	if authErr != nil {
+		out.Err = fmt.Errorf("authenticate command: %w", ErrAuthenticationFailed)
+		return
+	}
+	return a.dispatchContext(ctx, component, command, args)
+}
+
+// dispatchContext performs the shared post-authentication routing operation.
+func (a *Atom) dispatchContext(ctx context.Context, component, command string, args any) (out CommandOutput) {
 	out.Name = command
 	if a == nil {
 		out.Err = ErrNilAtom

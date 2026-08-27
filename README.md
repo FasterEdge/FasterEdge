@@ -44,7 +44,7 @@ if err := fasteredge.PreRunAtom(atom); err != nil { return err }
 return fasteredge.RunAtom(ctx, atom, fasteredge.WithShutdownTimeout(5*time.Second))
 ```
 
-Ability 调用统一通过 `Command(atom, act, args)`,例如:
+本地可信代码可直接调用 Ability，例如:
 
 ```go
 ab, _ := atom.Ability("NetMapAbility")
@@ -52,6 +52,20 @@ out := ab.Command(atom, ability.NetMapCommandRegisterPeer, ability.NetMapRegiste
     Name: "edge-2", Address: "10.0.0.2:7000", Role: "edge",
 })
 ```
+
+`InitStandardAtom` 会把 `OneKeyAbility` 安装为 Atom 全局命令认证器。HTTP、MQTT、RPC 等远程入口必须使用鉴权分发接口，不应暴露本地可信的 `Command` / `CommandContext`：
+
+```go
+credential := ability.OneKeyCredential{
+    Subject: token.Subject, IssuedAt: token.IssuedAt,
+    ExpiresAt: token.ExpiresAt, Signature: token.Signature,
+}
+out := atom.AuthenticatedCommandContext(
+    ctx, credential, "NetMapAbility", ability.NetMapCommandGetTopology, nil,
+)
+```
+
+认证会在查找目标组件前完成；过期、吊销、密钥轮换前签发或字段被修改的 token 均会被拒绝。当前 OneKey token 在有效期内可重复使用，因此远程节点应使用较短 TTL，并通过吊销或轮换及时失效。
 
 ### 四、生态系统
 

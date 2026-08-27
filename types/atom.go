@@ -20,15 +20,16 @@ const (
 )
 
 type Atom struct {
-	mu               sync.RWMutex
-	name             string
-	data             map[string]Data
-	abilities        map[string]Ability
-	state            AtomState
-	mounted          []namedComponent
-	mountedAbilities []namedComponent
-	transitioning    bool
-	eventSink        EventSink
+	mu                   sync.RWMutex
+	name                 string
+	data                 map[string]Data
+	abilities            map[string]Ability
+	state                AtomState
+	mounted              []namedComponent
+	mountedAbilities     []namedComponent
+	transitioning        bool
+	eventSink            EventSink
+	commandAuthenticator CommandAuthenticator
 }
 
 func (a *Atom) GetName() string {
@@ -64,6 +65,35 @@ func (a *Atom) State() AtomState {
 	a.mu.RUnlock()
 	return s
 }
+
+// SetCommandAuthenticator installs the security boundary used by
+// AuthenticatedCommandContext. It may only be configured before mounting.
+func (a *Atom) SetCommandAuthenticator(auth CommandAuthenticator) error {
+	if a == nil {
+		return ErrNilAtom
+	}
+	if auth == nil || isNilInterface(auth) {
+		return fmt.Errorf("set command authenticator: %w", ErrInvalidArguments)
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.state != AtomCreated || a.transitioning {
+		return fmt.Errorf("set command authenticator: %w", ErrInvalidState)
+	}
+	a.commandAuthenticator = auth
+	return nil
+}
+
+func isNilInterface(v any) bool {
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return rv.IsNil()
+	default:
+		return false
+	}
+}
+
 func (a *Atom) AddData(d Data) error {
 	if a == nil {
 		return ErrNilAtom
@@ -244,7 +274,7 @@ func (a *Atom) CommandNames() map[string][]string {
 		return out
 	}
 	type entry struct {
-		name string
+		name   string
 		lister CommandLister
 	}
 	a.mu.RLock()
