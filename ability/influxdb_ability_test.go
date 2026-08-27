@@ -54,6 +54,9 @@ func newInfluxAtom(t *testing.T) *types.Atom {
 	if err := a.AddData(&data.BaseData{}); err != nil {
 		t.Fatal(err)
 	}
+	if err := a.AddData(data.NewInfluxDBData()); err != nil {
+		t.Fatal(err)
+	}
 	return a
 }
 
@@ -166,6 +169,7 @@ func TestInfluxAbilityWrite(t *testing.T) {
 	if out := i.Command(atom, InfluxCommandWrite, InfluxWriteArgs{Points: []InfluxPoint{{Measurement: "m", Fields: map[string]any{"v": 1.0}}}}); !errors.Is(out.Err, types.ErrInvalidArguments) {
 		t.Fatalf("missing bucket error = %v", out.Err)
 	}
+	i.Command(atom, InfluxCommandSetEndpoint, InfluxConfigArgs{Value: "https://influx.example.com"})
 	i.Command(atom, InfluxCommandSetBucket, InfluxConfigArgs{Value: "bkt"})
 	// 无 transport
 	i2 := NewInfluxAbility()
@@ -208,6 +212,7 @@ func TestInfluxAbilityQuery(t *testing.T) {
 	atom := newInfluxAtom(t)
 	ft := &fakeInfluxTransport{rows: []map[string]any{{"_value": 1.0}}}
 	i.SetTransport(ft)
+	i.Command(atom, InfluxCommandSetEndpoint, InfluxConfigArgs{Value: "https://influx.example.com"})
 	if out := i.Command(atom, InfluxCommandQuery, "raw-string"); !errors.Is(out.Err, types.ErrInvalidArguments) {
 		t.Fatalf("query wrong type error = %v", out.Err)
 	}
@@ -235,6 +240,7 @@ func TestInfluxAbilityDeleteSeries(t *testing.T) {
 	atom := newInfluxAtom(t)
 	ft := &fakeInfluxTransport{}
 	i.SetTransport(ft)
+	i.Command(atom, InfluxCommandSetEndpoint, InfluxConfigArgs{Value: "https://influx.example.com"})
 	i.Command(atom, InfluxCommandSetBucket, InfluxConfigArgs{Value: "bkt"})
 	i.Command(atom, InfluxCommandWrite, InfluxWriteArgs{Points: []InfluxPoint{
 		{Measurement: "cpu", Fields: map[string]any{"v": 1.0}},

@@ -18,10 +18,16 @@ func TestInitStandardAtomRegistersAllCommonComponents(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantData := map[string]bool{
-		"BaseData":    true,
-		"NetMapData":  true,
-		"KeyringData": true,
-		"ConfigData":  true,
+		"BaseData":       true,
+		"NetMapData":     true,
+		"KeyringData":    true,
+		"ConfigData":     true,
+		"MySQLData":      true,
+		"PostgreSQLData": true,
+		"SQLiteData":     true,
+		"RedisData":      true,
+		"MongoDBData":    true,
+		"InfluxDBData":   true,
 	}
 	for name := range wantData {
 		if _, ok := atom.Data(name); !ok {

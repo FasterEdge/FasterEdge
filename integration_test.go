@@ -121,7 +121,7 @@ func TestSmokeEveryAbility(t *testing.T) {
 	// Smoke the remaining ten abilities on a fully independent atom. Read-only
 	// commands and skeleton-mode commands avoid host services and CGO.
 	extra := &types.Atom{}
-	for _, d := range []types.Data{&data.BaseData{}, data.NewNetMapData()} {
+	for _, d := range []types.Data{&data.BaseData{}, data.NewNetMapData(), data.NewInfluxDBData()} {
 		if err := extra.AddData(d); err != nil {
 			t.Fatal(err)
 		}

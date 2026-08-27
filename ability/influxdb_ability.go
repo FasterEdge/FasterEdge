@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/FasterEdge/FasterEdge/data"
 	"github.com/FasterEdge/FasterEdge/types"
 )
 
@@ -24,151 +25,159 @@ const (
 	InfluxCommandDeleteSeries = "delete_series"
 )
 
-// InfluxConfig 描述 InfluxDB 连接配置。
 type InfluxConfig struct {
 	Endpoint string
-	Token    string
+	Token    string // always redacted when returned by get_config
 	Org      string
 	Bucket   string
 }
-
-// InfluxConfigArgs 是 set_* 命令的通用参数。
-type InfluxConfigArgs struct {
-	Value string
-}
-
-// InfluxPoint 是单条时序数据点。
+type InfluxConfigArgs struct{ Value string }
 type InfluxPoint struct {
 	Measurement string
 	Tags        map[string]string
 	Fields      map[string]any
 	Time        time.Time
 }
+type InfluxWriteArgs struct{ Points []InfluxPoint }
+type InfluxQueryArgs struct{ Query string }
+type InfluxSeriesArgs struct{ Measurement string }
 
-// InfluxWriteArgs 是 write 命令的参数。
-type InfluxWriteArgs struct {
-	Points []InfluxPoint
-}
-
-// InfluxQueryArgs 是 query 命令的参数。
-type InfluxQueryArgs struct {
-	Query string
-}
-
-// InfluxSeriesArgs 是 list_series / delete_series 的参数。
-type InfluxSeriesArgs struct {
-	Measurement string
-}
-
-// InfluxTransport 抽象出真实 InfluxDB 客户端。
 type InfluxTransport interface {
 	Ping() error
-	Write(points []InfluxPoint) error
-	Query(flux string) ([]map[string]any, error)
+	Write([]InfluxPoint) error
+	Query(string) ([]map[string]any, error)
 }
 
-// InfluxAbility 在 Transport 之上提供 InfluxDB 客户端命令,并维护常用 series 元数据。
 type InfluxAbility struct {
 	mu        sync.RWMutex
-	cfg       InfluxConfig
-	series    map[string]struct{} // 已写入的 measurement 集合
+	series    map[string]struct{}
 	transport InfluxTransport
 }
 
-func NewInfluxAbility() *InfluxAbility {
-	return &InfluxAbility{series: make(map[string]struct{})}
-}
-
-func (i *InfluxAbility) SetTransport(t InfluxTransport) {
-	i.mu.Lock()
-	i.transport = t
-	i.mu.Unlock()
-}
-
-func (i *InfluxAbility) GetName() string { return "InfluxDBAbility" }
-
+func NewInfluxAbility() *InfluxAbility                  { return &InfluxAbility{series: map[string]struct{}{}} }
+func (i *InfluxAbility) SetTransport(t InfluxTransport) { i.mu.Lock(); i.transport = t; i.mu.Unlock() }
+func (i *InfluxAbility) GetName() string                { return "InfluxDBAbility" }
 func (i *InfluxAbility) Describe() string {
-	return "InfluxDBAbility提供 InfluxDB 客户端能力:连接配置/ping/写入时序点/Flux 查询/series 元数据维护,字节流通过注入的 Transport 完成。"
+	return "InfluxDBAbility通过InfluxDBData读取连接配置与Token，并执行时序数据库操作。"
 }
-
-func (i *InfluxAbility) Check(atom *types.Atom) error {
+func (i *InfluxAbility) Dependencies() []types.Dependency {
+	return []types.Dependency{{Kind: types.DependencyData, Name: "BaseData"}, {Kind: types.DependencyData, Name: "InfluxDBData"}}
+}
+func (i *InfluxAbility) Check(atom *types.Atom) error { _, err := i.database(atom); return err }
+func (i *InfluxAbility) Mount(atom *types.Atom) error { return i.Check(atom) }
+func (i *InfluxAbility) database(atom *types.Atom) (*data.InfluxDBData, error) {
 	if atom == nil {
-		return types.ErrMissingDependency
+		return nil, types.ErrMissingDependency
 	}
 	if _, ok := atom.Data("BaseData"); !ok {
-		return types.ErrMissingDependency
+		return nil, types.ErrMissingDependency
 	}
-	return nil
+	component, ok := atom.Data("InfluxDBData")
+	if !ok {
+		return nil, types.ErrMissingDependency
+	}
+	db, ok := component.(*data.InfluxDBData)
+	if !ok {
+		return nil, types.ErrWrongDependencyType
+	}
+	return db, nil
 }
-
-func (i *InfluxAbility) Mount(atom *types.Atom) error { return i.Check(atom) }
-
+func (i *InfluxAbility) publicConfig(atom *types.Atom) (data.InfluxDBConfig, error) {
+	db, err := i.database(atom)
+	if err != nil {
+		return data.InfluxDBConfig{}, err
+	}
+	return db.PublicConfig(), nil
+}
 func (i *InfluxAbility) Command(atom *types.Atom, act string, args any) types.CommandOutput {
-	if err := i.Check(atom); err != nil {
+	db, err := i.database(atom)
+	if err != nil {
 		return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, err)}
 	}
 	switch act {
 	case InfluxCommandSetEndpoint:
-		return i.setConfigField(act, args, func(c *InfluxConfig, v string) { c.Endpoint = v }, isAcceptableInfluxURL)
+		v, ok := configValue(args)
+		if !ok {
+			return invalidInflux(act)
+		}
+		if err := db.SetEndpoint(v); err != nil {
+			return invalidInflux(act)
+		}
+		return types.CommandOutput{Name: act, Value: v}
 	case InfluxCommandSetToken:
-		return i.setConfigField(act, args, func(c *InfluxConfig, v string) { c.Token = v }, isAcceptableSecret)
+		v, ok := configValue(args)
+		if !ok || len(v) < 8 {
+			return invalidInflux(act)
+		}
+		if err := db.SetToken([]byte(v)); err != nil {
+			return invalidInflux(act)
+		}
+		return types.CommandOutput{Name: act, Value: true}
 	case InfluxCommandSetOrg:
-		return i.setConfigField(act, args, func(c *InfluxConfig, v string) { c.Org = v }, isAcceptableIdentifier)
+		v, ok := configValue(args)
+		if !ok {
+			return invalidInflux(act)
+		}
+		if err := db.SetOrg(v); err != nil {
+			return invalidInflux(act)
+		}
+		return types.CommandOutput{Name: act, Value: v}
 	case InfluxCommandSetBucket:
-		return i.setConfigField(act, args, func(c *InfluxConfig, v string) { c.Bucket = v }, isAcceptableIdentifier)
+		v, ok := configValue(args)
+		if !ok {
+			return invalidInflux(act)
+		}
+		if err := db.SetBucket(v); err != nil {
+			return invalidInflux(act)
+		}
+		return types.CommandOutput{Name: act, Value: v}
+	case InfluxCommandGetEndpoint:
+		if args != nil {
+			return invalidInflux(act)
+		}
+		cfg := db.PublicConfig()
+		return types.CommandOutput{Name: act, Value: cfg.Endpoint}
 	case InfluxCommandGetConfig:
 		if args != nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
+			return invalidInflux(act)
 		}
-		i.mu.RLock()
-		defer i.mu.RUnlock()
-		return types.CommandOutput{Name: act, Value: i.cfg}
+		cfg := db.PublicConfig()
+		return types.CommandOutput{Name: act, Value: InfluxConfig{Endpoint: cfg.Endpoint, Org: cfg.Org, Bucket: cfg.Bucket}}
 	case InfluxCommandPing:
 		if args != nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
+			return invalidInflux(act)
 		}
-		i.mu.RLock()
-		transport := i.transport
-		endpoint := i.cfg.Endpoint
-		i.mu.RUnlock()
-		if transport == nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: no transport: %w", act, types.ErrInvalidArguments)}
+		if _, err := db.ConnectionMaterial(); err != nil {
+			return invalidInflux(act)
 		}
-		if endpoint == "" {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: endpoint not set: %w", act, types.ErrInvalidArguments)}
+		t := i.getTransport()
+		if t == nil {
+			return invalidInflux(act)
 		}
-		if err := transport.Ping(); err != nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %v", act, types.ErrInvalidArguments, err)}
+		if err := t.Ping(); err != nil {
+			return operationalInfluxError(act, err)
 		}
 		return types.CommandOutput{Name: act, Value: true}
 	case InfluxCommandWrite:
 		typed, ok := args.(InfluxWriteArgs)
-		if !ok {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
+		if !ok || len(typed.Points) == 0 {
+			return invalidInflux(act)
 		}
-		if len(typed.Points) == 0 {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: empty points: %w", act, types.ErrInvalidArguments)}
+		material, err := db.ConnectionMaterial()
+		if err != nil || material.Config.Bucket == "" {
+			return invalidInflux(act)
 		}
-		for idx, p := range typed.Points {
-			if !isAcceptableIdentifier(p.Measurement) {
-				return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: point[%d] invalid measurement: %w", act, idx, types.ErrInvalidArguments)}
-			}
-			if len(p.Fields) == 0 {
-				return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: point[%d] has no fields: %w", act, idx, types.ErrInvalidArguments)}
+		for _, p := range typed.Points {
+			if !isAcceptableIdentifier(p.Measurement) || len(p.Fields) == 0 {
+				return invalidInflux(act)
 			}
 		}
-		i.mu.RLock()
-		transport := i.transport
-		bucket := i.cfg.Bucket
-		i.mu.RUnlock()
-		if transport == nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: no transport: %w", act, types.ErrInvalidArguments)}
+		t := i.getTransport()
+		if t == nil {
+			return invalidInflux(act)
 		}
-		if bucket == "" {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: bucket not set: %w", act, types.ErrInvalidArguments)}
-		}
-		if err := transport.Write(typed.Points); err != nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %v", act, types.ErrInvalidArguments, err)}
+		if err := t.Write(typed.Points); err != nil {
+			return operationalInfluxError(act, err)
 		}
 		i.mu.Lock()
 		for _, p := range typed.Points {
@@ -178,27 +187,24 @@ func (i *InfluxAbility) Command(atom *types.Atom, act string, args any) types.Co
 		return types.CommandOutput{Name: act, Value: len(typed.Points)}
 	case InfluxCommandQuery:
 		typed, ok := args.(InfluxQueryArgs)
-		if !ok {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
+		if !ok || strings.TrimSpace(typed.Query) == "" {
+			return invalidInflux(act)
 		}
-		q := strings.TrimSpace(typed.Query)
-		if q == "" {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: empty query: %w", act, types.ErrInvalidArguments)}
+		if _, err := db.ConnectionMaterial(); err != nil {
+			return invalidInflux(act)
 		}
-		i.mu.RLock()
-		transport := i.transport
-		i.mu.RUnlock()
-		if transport == nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: no transport: %w", act, types.ErrInvalidArguments)}
+		t := i.getTransport()
+		if t == nil {
+			return invalidInflux(act)
 		}
-		rows, err := transport.Query(q)
+		rows, err := t.Query(strings.TrimSpace(typed.Query))
 		if err != nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %v", act, types.ErrInvalidArguments, err)}
+			return operationalInfluxError(act, err)
 		}
 		return types.CommandOutput{Name: act, Value: rows}
 	case InfluxCommandListSeries:
 		if args != nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
+			return invalidInflux(act)
 		}
 		i.mu.RLock()
 		out := make([]string, 0, len(i.series))
@@ -210,80 +216,50 @@ func (i *InfluxAbility) Command(atom *types.Atom, act string, args any) types.Co
 		return types.CommandOutput{Name: act, Value: out}
 	case InfluxCommandDeleteSeries:
 		typed, ok := args.(InfluxSeriesArgs)
-		if !ok {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
-		}
-		name := strings.TrimSpace(typed.Measurement)
-		if !isAcceptableIdentifier(name) {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: invalid measurement: %w", act, types.ErrInvalidArguments)}
+		if !ok || !isAcceptableIdentifier(strings.TrimSpace(typed.Measurement)) {
+			return invalidInflux(act)
 		}
 		i.mu.Lock()
-		_, ok = i.series[name]
-		delete(i.series, name)
+		_, ok = i.series[typed.Measurement]
+		delete(i.series, typed.Measurement)
 		i.mu.Unlock()
 		if !ok {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %q not in local index: %w", act, name, types.ErrInvalidArguments)}
+			return invalidInflux(act)
 		}
-		return types.CommandOutput{Name: act, Value: name}
+		return types.CommandOutput{Name: act, Value: typed.Measurement}
+	default:
+		return types.CommandOutput{Name: act, Err: fmt.Errorf("command %s: %w", act, types.ErrUnsupportedCommand)}
 	}
-	return types.CommandOutput{Name: act, Err: fmt.Errorf("command %s: %w", act, types.ErrUnsupportedCommand)}
 }
-
-func (i *InfluxAbility) setConfigField(act string, args any, setter func(*InfluxConfig, string), validate func(string) bool) types.CommandOutput {
+func (i *InfluxAbility) getTransport() InfluxTransport {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.transport
+}
+func configValue(args any) (string, bool) {
 	typed, ok := args.(InfluxConfigArgs)
 	if !ok {
-		return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
+		return "", false
 	}
 	v := strings.TrimSpace(typed.Value)
-	if !validate(v) {
-		return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: invalid value: %w", act, types.ErrInvalidArguments)}
-	}
-	i.mu.Lock()
-	setter(&i.cfg, v)
-	i.mu.Unlock()
-	return types.CommandOutput{Name: act, Value: v}
+	return v, v != ""
 }
-
-func isAcceptableInfluxURL(u string) bool {
-	if u == "" {
-		return false
-	}
-	lower := strings.ToLower(u)
-	if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
-		return false
-	}
-	rest := u
-	if i := strings.Index(lower, "://"); i >= 0 {
-		rest = u[i+3:]
-	}
-	host := rest
-	if i := strings.IndexAny(rest, "/?#"); i >= 0 {
-		host = rest[:i]
-	}
-	if i := strings.LastIndex(host, ":"); i >= 0 {
-		host = host[:i]
-	}
-	if host == "" || host == "localhost" || host == "127.0.0.1" || host == "0.0.0.0" || host == "::1" {
-		return false
-	}
-	return true
+func invalidInflux(act string) types.CommandOutput {
+	return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
 }
-
-func isAcceptableSecret(s string) bool {
-	return s != "" && len(s) >= 8
+func operationalInfluxError(act string, err error) types.CommandOutput {
+	return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %v", act, types.ErrInvalidArguments, err)}
 }
-
+func isAcceptableSecret(s string) bool { return len(s) >= 8 }
+func isAcceptableInfluxURL(s string) bool {
+	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")
+}
 func isAcceptableIdentifier(s string) bool {
 	if s == "" {
 		return false
 	}
 	for _, r := range s {
-		switch {
-		case r >= 'a' && r <= 'z':
-		case r >= 'A' && r <= 'Z':
-		case r >= '0' && r <= '9':
-		case r == '_' || r == '-' || r == '.':
-		default:
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-' || r == '.') {
 			return false
 		}
 	}

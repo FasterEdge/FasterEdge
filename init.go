@@ -45,6 +45,12 @@ func InitStandardAtom() *types.Atom {
 		{"data", "NetMapData", func() error { return atom.AddData(data.NewNetMapData()) }},
 		{"data", "KeyringData", func() error { return atom.AddData(data.NewKeyringData()) }},
 		{"data", "ConfigData", func() error { return atom.AddData(data.NewConfigData()) }},
+		{"data", "MySQLData", func() error { return atom.AddData(data.NewMySQLData()) }},
+		{"data", "PostgreSQLData", func() error { return atom.AddData(data.NewPostgreSQLData()) }},
+		{"data", "SQLiteData", func() error { return atom.AddData(data.NewSQLiteData()) }},
+		{"data", "RedisData", func() error { return atom.AddData(data.NewRedisData()) }},
+		{"data", "MongoDBData", func() error { return atom.AddData(data.NewMongoDBData()) }},
+		{"data", "InfluxDBData", func() error { return atom.AddData(data.NewInfluxDBData()) }},
 		{"ability", "RoleAbility", func() error { return atom.AddAbility(&ability.RoleAbility{}) }},
 		{"ability", "TimeAbility", func() error {
 			ta, err := ability.NewTimeAbility()

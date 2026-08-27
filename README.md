@@ -77,6 +77,28 @@ out := atom.AuthenticatedCommandContext(
 | `NetMapData` | 本节点网络拓扑(节点名、网卡、默认出网接口)     | `info` / `set_node_name` / `interfaces` / `set_default_iface`     |
 | `KeyringData`| 共享密钥与令牌表                                | `status` / `set_secret` / `rotate` / `issue_token` / `revoke_*`  |
 | `ConfigData` | 扁平点号路径 KV 配置                            | `get` / `set` / `delete` / `list` / `snapshot`                    |
+| `MySQLData` / `PostgreSQLData` | 关系数据库公开连接参数与独立密码 | `configure` / `set_secret` / `clear_secret` / `get_config` / `status` / `snapshot` |
+| `SQLiteData` | SQLite 文件、模式、WAL、超时与连接池参数 | `configure` / `get_config` / `status` / `snapshot` |
+| `RedisData` | Redis 节点列表、DB、TLS、超时、连接池与独立密码 | `configure` / `set_secret` / `clear_secret` / `get_config` / `status` / `snapshot` |
+| `MongoDBData` | MongoDB 节点、认证源、副本集、TLS 与独立密码 | `configure` / `set_secret` / `clear_secret` / `get_config` / `status` / `snapshot` |
+| `InfluxDBData` | InfluxDB Endpoint、Org、Bucket、超时与独立 Token | `configure` / `set_secret` / `clear_secret` / `get_config` / `status` / `snapshot` |
+
+数据库密码和 Token 仅保存在 Data 的私有内存中，`get_config`、`snapshot` 和 `JSONMarshal` 均不会返回明文。配置或密钥每次变化都会递增 `DatabaseStatus.Revision`。例如：
+
+```go
+mysql, _ := atom.Data("MySQLData")
+mysql.Command(atom, data.DatabaseCommandConfigure, data.SQLDatabaseConfigureArgs{
+    Config: data.SQLDatabaseConfig{
+        Host: "db.example.com", Port: 3306, Database: "edge",
+        Username: "edge-node", TLSMode: data.DatabaseTLSRequire,
+    },
+})
+mysql.Command(atom, data.DatabaseCommandSetSecret, data.DatabaseSetSecretArgs{
+    Secret: []byte(os.Getenv("MYSQL_PASSWORD")),
+})
+```
+
+`InfluxDBAbility` 依赖 `InfluxDBData`：旧的 `set_endpoint` / `set_org` / `set_bucket` / `set_token` 命令仍兼容，但配置和 Token 实际存放在 Data 中；`get_config` 返回的 `Token` 始终为空。Ping、写入和查询通过注入的 `InfluxTransport` 完成。
 
 #### 已实现 Ability 组件
 
