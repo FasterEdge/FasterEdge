@@ -1,3 +1,8 @@
+// ─────────────────────────────────────────────────────────────
+// FasterEdge 开源项目
+// Github: https://github.com/FasterEdge
+// Gitee:  https://gitee.com/FasterEdge
+// ─────────────────────────────────────────────────────────────
 // Package main 演示 FasterEdge 框架的最小可运行用法:
 //  1. 启动一个挂载了常用组件的 Atom
 //  2. 通过 NetMap 注册对等节点
