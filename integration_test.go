@@ -88,11 +88,18 @@ func TestSmokeEveryAbility(t *testing.T) {
 
 	// CmdAbility: run 一个 echo(allowlist 设置 + 执行)
 	cm, _ := atom.Ability("CmdAbility")
-	cm.Command(atom, ability.CmdCommandSetAllowlist, ability.CmdSetAllowlistArgs{Entries: []ability.CmdAllowlistEntry{
-		{Name: "echo", ArgsPrefix: []string{"hello"}, MaxArgs: 1},
-	}})
+	cmdName := "echo"
+	cmdArgs := []string{"hello"}
+	allowlist := []ability.CmdAllowlistEntry{{Name: "echo", ArgsPrefix: []string{"hello"}, MaxArgs: 1}}
+	if runtime.GOOS == "windows" {
+		// Windows 没有独立的 echo 可执行文件,改用 cmd.exe /c echo
+		cmdName = "cmd.exe"
+		cmdArgs = []string{"/c", "echo", "hello"}
+		allowlist = []ability.CmdAllowlistEntry{{Name: "cmd.exe", ArgsPrefix: []string{"/c", "echo", "hello"}, MaxArgs: 3}}
+	}
+	cm.Command(atom, ability.CmdCommandSetAllowlist, ability.CmdSetAllowlistArgs{Entries: allowlist})
 	res := mustCommand(t, cm, atom, ability.CmdCommandRun, ability.CmdRunArgs{
-		Name: "echo", Args: []string{"hello"},
+		Name: cmdName, Args: cmdArgs,
 	}).Value.(ability.CmdResult)
 	if res.ExitCode != 0 || res.Stdout == "" {
 		t.Fatalf("cmd run: %+v", res)

@@ -46,6 +46,7 @@ func TestConfigFileAbilitySetGetPath(t *testing.T) {
 	if out := a.Command(atom, ConfigFileCommandSetPath, ConfigFilePathArg{Path: "  "}); !errors.Is(out.Err, types.ErrInvalidArguments) {
 		t.Fatalf("set blank path error = %v", out.Err)
 	}
+	wantPath := filepath.Clean("/tmp/cfg.json")
 	if out := a.Command(atom, ConfigFileCommandSetPath, ConfigFilePathArg{Path: "/tmp/cfg.json"}); out.Err != nil {
 		t.Fatal(out.Err)
 	}
@@ -54,7 +55,7 @@ func TestConfigFileAbilitySetGetPath(t *testing.T) {
 	}
 	if out := a.Command(atom, ConfigFileCommandGetPath, nil); out.Err != nil {
 		t.Fatal(out.Err)
-	} else if out.Value != "/tmp/cfg.json" {
+	} else if out.Value != wantPath {
 		t.Fatalf("get path = %q", out.Value)
 	}
 }
