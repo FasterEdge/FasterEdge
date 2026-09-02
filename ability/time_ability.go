@@ -428,7 +428,7 @@ func (t *TimeAbility) runTicker(ctx context.Context, interval time.Duration) err
 
 // Compile-time interface assertions.
 var (
-	_ types.Runner         = (*TimeAbility)(nil)
-	_ types.CommandLister  = (*TimeAbility)(nil)
-	_ types.HealthChecker  = (*TimeAbility)(nil)
+	_ types.Runner        = (*TimeAbility)(nil)
+	_ types.CommandLister = (*TimeAbility)(nil)
+	_ types.HealthChecker = (*TimeAbility)(nil)
 )

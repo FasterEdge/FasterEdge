@@ -15,10 +15,10 @@ const ringCapacity = 1024
 type MetricsCollector struct {
 	mu        sync.Mutex
 	startedAt time.Time
-	counts    map[string]uint64         // "<phase>:<status>" -> count
+	counts    map[string]uint64          // "<phase>:<status>" -> count
 	durations map[string][]time.Duration // phase -> ring buffer of durations
-	ringPos   map[string]int            // phase -> next write index
-	ringFull  map[string]bool           // phase -> ring buffer filled at least once
+	ringPos   map[string]int             // phase -> next write index
+	ringFull  map[string]bool            // phase -> ring buffer filled at least once
 }
 
 func NewMetricsCollector() *MetricsCollector {

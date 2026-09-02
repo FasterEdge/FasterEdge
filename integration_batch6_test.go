@@ -271,10 +271,10 @@ type unhealthyAbility struct {
 	err  error
 }
 
-func (u *unhealthyAbility) GetName() string                          { return u.name }
-func (u *unhealthyAbility) Describe() string                         { return u.name }
-func (u *unhealthyAbility) Check(*types.Atom) error                  { return nil }
-func (u *unhealthyAbility) Mount(*types.Atom) error                  { return nil }
+func (u *unhealthyAbility) GetName() string         { return u.name }
+func (u *unhealthyAbility) Describe() string        { return u.name }
+func (u *unhealthyAbility) Check(*types.Atom) error { return nil }
+func (u *unhealthyAbility) Mount(*types.Atom) error { return nil }
 func (u *unhealthyAbility) Command(*types.Atom, string, any) types.CommandOutput {
 	return types.CommandOutput{Name: "noop"}
 }
