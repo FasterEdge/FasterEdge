@@ -173,12 +173,12 @@ func (q *mqttQueue) drain(max int, timeout time.Duration) []MQTTMessage {
 		if wait > 50*time.Millisecond {
 			wait = 50 * time.Millisecond
 		}
-		q.cond.L.Lock()
-		q.mu.Unlock()
-		time.AfterFunc(wait, func() { q.cond.Broadcast() })
+		// cond.L 与 q.mu 是同一把锁 (sync.NewCond(&q.mu)), 调用方已持有:
+		// 直接 Wait 会在内部释放并重新获取锁, 切勿再次 Lock, 否则同锁不可重入而死锁。
+		// 用定时广播模拟带超时的条件等待。
+		timer := time.AfterFunc(wait, func() { q.cond.Broadcast() })
 		q.cond.Wait()
-		q.mu.Lock()
-		q.cond.L.Unlock()
+		timer.Stop()
 	}
 	if max <= 0 || max > len(q.buf) {
 		max = len(q.buf)
