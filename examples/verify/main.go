@@ -322,6 +322,8 @@ func main() {
 		{"ability", "TSNAbility", func() error { return extAtom.AddAbility(ability.NewTSNAbility()) }},
 		{"ability", "SerialAbility", func() error { return extAtom.AddAbility(ability.NewSerialAbility()) }},
 		{"ability", "DockerAbility", func() error { return extAtom.AddAbility(ability.NewDockerAbility()) }},
+		{"ability", "EKuiperAbility", func() error { return extAtom.AddAbility(ability.NewEKuiperAbility()) }},
+		{"ability", "KubernetesAbility", func() error { return extAtom.AddAbility(ability.NewK8sAbility()) }},
 	}
 	for _, r := range extRegs {
 		if err := r.fn(); err != nil {
@@ -535,6 +537,211 @@ func main() {
 	if a, ok := extAtom.Ability("SerialAbility"); ok {
 		o := a.Command(extAtom, ability.SerialCommandListPorts, nil)
 		report("Serial/list_ports", fmt.Sprintf("%v", o.Value), o.Err)
+	}
+
+	// --- EKuiperAbility (配置类; 流/规则需注入 transport) ---
+	if a, ok := extAtom.Ability("EKuiperAbility"); ok {
+		// set_endpoint 需域名 (isAcceptableInfluxURL 拒绝 IP/回环)
+		o := a.Command(extAtom, ability.EKuiperCommandSetEndpoint, ability.EKuiperEndpointArgs{URL: "http://ekuiper.internal.example:9081"})
+		report("EKuiper/set_endpoint", "http://ekuiper.internal.example:9081", o.Err)
+		o = a.Command(extAtom, ability.EKuiperCommandGetEndpoint, nil)
+		report("EKuiper/get_endpoint", fmt.Sprintf("%v", o.Value), o.Err)
+		// 无 transport 时 create_stream 应正确报错 (验证拒绝路径)
+		o = a.Command(extAtom, ability.EKuiperCommandCreateStream, ability.EKuiperStreamArgs{Name: "s1", SQL: "SELECT * FROM demo"})
+		if o.Err == nil {
+			report("EKuiper/create_stream-no-transport", "应拒绝但成功", fmt.Errorf("should reject without transport"))
+		} else {
+			report("EKuiper/create_stream-no-transport", "正确拒绝", nil)
+		}
+		// 非法 SQL 应被拒
+		o = a.Command(extAtom, ability.EKuiperCommandCreateStream, ability.EKuiperStreamArgs{Name: "s1", SQL: ""})
+		if o.Err == nil {
+			report("EKuiper/create_stream-empty-sql", "应拒绝但成功", fmt.Errorf("empty sql accepted"))
+		} else {
+			report("EKuiper/create_stream-empty-sql", "正确拒绝", nil)
+		}
+	}
+
+	// --- KubernetesAbility (配置类 set_context/get_context) ---
+	if a, ok := extAtom.Ability("KubernetesAbility"); ok {
+		o := a.Command(extAtom, ability.K8sCommandSetContext, ability.K8sContextArgs{K8sContext: ability.K8sContext{Cluster: "edge-cluster", Namespace: "edge-ns"}})
+		if o.Err != nil {
+			report("K8s/set_context", "", o.Err)
+		} else {
+			report("K8s/set_context", "edge-cluster/edge-ns", nil)
+			o = a.Command(extAtom, ability.K8sCommandGetContext, nil)
+			report("K8s/get_context", fmt.Sprintf("%v", o.Value), o.Err)
+		}
+		// 空 cluster 应被拒
+		o = a.Command(extAtom, ability.K8sCommandSetContext, ability.K8sContextArgs{K8sContext: ability.K8sContext{Cluster: ""}})
+		if o.Err == nil {
+			report("K8s/set_context-empty", "应拒绝但成功", fmt.Errorf("empty cluster accepted"))
+		} else {
+			report("K8s/set_context-empty", "正确拒绝", nil)
+		}
+		// 无 transport 时 apply 应正确报错
+		o = a.Command(extAtom, ability.K8sCommandApply, ability.K8sApplyArgs{Manifest: "apiVersion: v1\nkind: Pod"})
+		if o.Err == nil {
+			report("K8s/apply-no-transport", "应拒绝但成功", fmt.Errorf("should reject without transport"))
+		} else {
+			report("K8s/apply-no-transport", "正确拒绝", nil)
+		}
+	}
+
+	// --- DockerAbility (配置类 set_endpoint; 容器操作需注入 transport) ---
+	if a, ok := extAtom.Ability("DockerAbility"); ok {
+		// unix socket 端点合法
+		o := a.Command(extAtom, ability.DockerCommandSetEndpoint, ability.DockerEndpointArgs{URL: "unix:///var/run/docker.sock"})
+		report("Docker/set_endpoint-unix", "unix:///var/run/docker.sock", o.Err)
+		o = a.Command(extAtom, ability.DockerCommandGetEndpoint, nil)
+		report("Docker/get_endpoint", fmt.Sprintf("%v", o.Value), o.Err)
+		// 回环端点应被拒 (isValidDockerEndpoint 拒绝 localhost)
+		o = a.Command(extAtom, ability.DockerCommandSetEndpoint, ability.DockerEndpointArgs{URL: "tcp://127.0.0.1:2375"})
+		if o.Err == nil {
+			report("Docker/set_endpoint-loopback", "应拒绝但成功", fmt.Errorf("loopback accepted"))
+		} else {
+			report("Docker/set_endpoint-loopback", "正确拒绝", nil)
+		}
+		// 无 transport 时 list_containers 应正确报错
+		o = a.Command(extAtom, ability.DockerCommandListContainers, nil)
+		if o.Err == nil {
+			report("Docker/list-no-transport", "应拒绝但成功", fmt.Errorf("should reject without transport"))
+		} else {
+			report("Docker/list-no-transport", "正确拒绝", nil)
+		}
+	}
+
+	// === 数据库 data 组件 (配置/秘钥存储, 无需真实数据库) ===	fmt.Println("\n=== 数据库 Data 组件: MySQL / PostgreSQL / SQLite / Redis / MongoDB / InfluxDB ===")
+	dbVerify := func(name string, configure, setSecret, clearSecret, getConfig, status, snapshot func() error) {
+		if err := configure(); err != nil {
+			report(name+"/configure", "", err)
+			return
+		}
+		report(name+"/configure", "ok", nil)
+		if err := getConfig(); err != nil {
+			report(name+"/get_config", "", err)
+		} else {
+			report(name+"/get_config", "ok", nil)
+		}
+		if err := status(); err != nil {
+			report(name+"/status", "", err)
+		} else {
+			report(name+"/status", "ok", nil)
+		}
+		if err := setSecret(); err != nil {
+			report(name+"/set_secret", "", err)
+		} else {
+			report(name+"/set_secret", "ok", nil)
+		}
+		if err := snapshot(); err != nil {
+			report(name+"/snapshot", "", err)
+		} else {
+			report(name+"/snapshot", "ok", nil)
+		}
+		if err := clearSecret(); err != nil {
+			report(name+"/clear_secret", "", err)
+		} else {
+			report(name+"/clear_secret", "ok", nil)
+		}
+	}
+	// MySQLData
+	if d, ok := extAtom.Data("MySQLData"); ok {
+		cfg := data.SQLDatabaseConfig{Host: "db.internal.example", Port: 3306, Database: "appdb", Username: "app", TLSMode: data.DatabaseTLSDisable, ConnectTimeout: 3 * time.Second, MaxOpenConns: 10, MaxIdleConns: 5, ConnMaxLifetime: time.Hour}
+		dbVerify("MySQLData",
+			func() error {
+				return d.Command(extAtom, data.DatabaseCommandConfigure, data.SQLDatabaseConfigureArgs{Config: cfg}).Err
+			},
+			func() error {
+				return d.Command(extAtom, data.DatabaseCommandSetSecret, data.DatabaseSetSecretArgs{Secret: []byte("mysql-secret-0123456789")}).Err
+			},
+			func() error { return d.Command(extAtom, data.DatabaseCommandClearSecret, nil).Err },
+			func() error { return d.Command(extAtom, data.DatabaseCommandGetConfig, nil).Err },
+			func() error { return d.Command(extAtom, data.DatabaseCommandStatus, nil).Err },
+			func() error { return d.Command(extAtom, data.DatabaseCommandSnapshot, nil).Err })
+	}
+	// PostgreSQLData
+	if d, ok := extAtom.Data("PostgreSQLData"); ok {
+		cfg := data.SQLDatabaseConfig{Host: "pg.internal.example", Port: 5432, Database: "appdb", Username: "app", TLSMode: data.DatabaseTLSPrefer, ConnectTimeout: 3 * time.Second, MaxOpenConns: 10, MaxIdleConns: 5, ConnMaxLifetime: time.Hour}
+		dbVerify("PostgreSQLData",
+			func() error {
+				return d.Command(extAtom, data.DatabaseCommandConfigure, data.SQLDatabaseConfigureArgs{Config: cfg}).Err
+			},
+			func() error {
+				return d.Command(extAtom, data.DatabaseCommandSetSecret, data.DatabaseSetSecretArgs{Secret: []byte("pg-secret-0123456789")}).Err
+			},
+			func() error { return d.Command(extAtom, data.DatabaseCommandClearSecret, nil).Err },
+			func() error { return d.Command(extAtom, data.DatabaseCommandGetConfig, nil).Err },
+			func() error { return d.Command(extAtom, data.DatabaseCommandStatus, nil).Err },
+			func() error { return d.Command(extAtom, data.DatabaseCommandSnapshot, nil).Err })
+	}
+	// SQLiteData (本地文件, 无秘钥: ListCommands 不含 set_secret/clear_secret)
+	if d, ok := extAtom.Data("SQLiteData"); ok {
+		cfg := data.SQLiteConfig{Path: "/tmp/fe-verify.db", Mode: "rwc", BusyTimeout: time.Second, WAL: true, ForeignKeys: true, MaxOpenConns: 4}
+		if err := d.Command(extAtom, data.DatabaseCommandConfigure, data.SQLiteConfigureArgs{Config: cfg}).Err; err != nil {
+			report("SQLiteData/configure", "", err)
+		} else {
+			report("SQLiteData/configure", "ok", nil)
+			if err := d.Command(extAtom, data.DatabaseCommandGetConfig, nil).Err; err != nil {
+				report("SQLiteData/get_config", "", err)
+			} else {
+				report("SQLiteData/get_config", "ok", nil)
+			}
+			if err := d.Command(extAtom, data.DatabaseCommandStatus, nil).Err; err != nil {
+				report("SQLiteData/status", "", err)
+			} else {
+				report("SQLiteData/status", "ok", nil)
+			}
+			if err := d.Command(extAtom, data.DatabaseCommandSnapshot, nil).Err; err != nil {
+				report("SQLiteData/snapshot", "", err)
+			} else {
+				report("SQLiteData/snapshot", "ok", nil)
+			}
+		}
+	}
+	// RedisData
+	if d, ok := extAtom.Data("RedisData"); ok {
+		cfg := data.RedisConfig{Addresses: []string{"redis.internal.example:6379"}, DB: 0, DialTimeout: 3 * time.Second, ReadTimeout: 3 * time.Second, WriteTimeout: 3 * time.Second, PoolSize: 8}
+		dbVerify("RedisData",
+			func() error {
+				return d.Command(extAtom, data.DatabaseCommandConfigure, data.RedisConfigureArgs{Config: cfg}).Err
+			},
+			func() error {
+				return d.Command(extAtom, data.DatabaseCommandSetSecret, data.DatabaseSetSecretArgs{Secret: []byte("redis-secret-0123456789")}).Err
+			},
+			func() error { return d.Command(extAtom, data.DatabaseCommandClearSecret, nil).Err },
+			func() error { return d.Command(extAtom, data.DatabaseCommandGetConfig, nil).Err },
+			func() error { return d.Command(extAtom, data.DatabaseCommandStatus, nil).Err },
+			func() error { return d.Command(extAtom, data.DatabaseCommandSnapshot, nil).Err })
+	}
+	// MongoDBData
+	if d, ok := extAtom.Data("MongoDBData"); ok {
+		cfg := data.MongoDBConfig{Hosts: []string{"mongo.internal.example:27017"}, Database: "appdb", Username: "app", ConnectTimeout: 3 * time.Second, ServerSelectionTimeout: 3 * time.Second}
+		dbVerify("MongoDBData",
+			func() error {
+				return d.Command(extAtom, data.DatabaseCommandConfigure, data.MongoDBConfigureArgs{Config: cfg}).Err
+			},
+			func() error {
+				return d.Command(extAtom, data.DatabaseCommandSetSecret, data.DatabaseSetSecretArgs{Secret: []byte("mongo-secret-0123456789")}).Err
+			},
+			func() error { return d.Command(extAtom, data.DatabaseCommandClearSecret, nil).Err },
+			func() error { return d.Command(extAtom, data.DatabaseCommandGetConfig, nil).Err },
+			func() error { return d.Command(extAtom, data.DatabaseCommandStatus, nil).Err },
+			func() error { return d.Command(extAtom, data.DatabaseCommandSnapshot, nil).Err })
+	}
+	// InfluxDBData (endpoint 拒绝 IP/回环, 用域名)
+	if d, ok := extAtom.Data("InfluxDBData"); ok {
+		cfg := data.InfluxDBConfig{Endpoint: "http://influx.internal.example:8086", Org: "feorg", Bucket: "telemetry", Timeout: 3 * time.Second}
+		dbVerify("InfluxDBData",
+			func() error {
+				return d.Command(extAtom, data.DatabaseCommandConfigure, data.InfluxDBConfigureArgs{Config: cfg}).Err
+			},
+			func() error {
+				return d.Command(extAtom, data.DatabaseCommandSetSecret, data.DatabaseSetSecretArgs{Secret: []byte("influx-token-0123456789")}).Err
+			},
+			func() error { return d.Command(extAtom, data.DatabaseCommandClearSecret, nil).Err },
+			func() error { return d.Command(extAtom, data.DatabaseCommandGetConfig, nil).Err },
+			func() error { return d.Command(extAtom, data.DatabaseCommandStatus, nil).Err },
+			func() error { return d.Command(extAtom, data.DatabaseCommandSnapshot, nil).Err })
 	}
 
 	// 3. 命令鉴权: 未配置认证时应拒绝
