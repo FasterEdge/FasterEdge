@@ -171,6 +171,29 @@ func main() {
 		report("KeyringData/list_tokens", fmt.Sprintf("%v", o.Value), o.Err)
 	}
 
+	// --- data: NetMapData (本机拓扑快照) ---
+	if d, ok := atom.Data("NetMapData"); ok {
+		o := d.Command(atom, data.NetMapCommandInfo, nil)
+		if o.Err != nil {
+			report("NetMapData/info", "", o.Err)
+		} else if info, ok := o.Value.(data.NetMapLocalInfo); ok {
+			report("NetMapData/info", fmt.Sprintf("node=%q ifaces=%d", info.NodeName, len(info.Interfaces)), nil)
+		} else {
+			report("NetMapData/info", fmt.Sprintf("%v", o.Value), o.Err)
+		}
+		o = d.Command(atom, data.NetMapCommandSetNodeName, data.NetMapSetNodeNameArgs{Name: "verify-node"})
+		report("NetMapData/set_node_name", "verify-node", o.Err)
+		o = d.Command(atom, data.NetMapCommandInterfaces, nil)
+		if ifaces, ok := o.Value.([]data.NetMapInterface); ok && len(ifaces) > 0 {
+			report("NetMapData/interfaces", fmt.Sprintf("count=%d first=%s", len(ifaces), ifaces[0].Name), o.Err)
+			// 用真实接口名设置默认出网接口
+			o = d.Command(atom, data.NetMapCommandSetDefaultIface, data.NetMapSetDefaultIfaceArgs{Name: ifaces[0].Name})
+			report("NetMapData/set_default_iface", ifaces[0].Name, o.Err)
+		} else {
+			report("NetMapData/interfaces", fmt.Sprintf("%v", o.Value), o.Err)
+		}
+	}
+
 	// --- ability: BaseAbility ---
 	if a, ok := atom.Ability("BaseAbility"); ok {
 		o := a.Command(atom, ability.CommandListDataNames, nil)
@@ -198,6 +221,23 @@ func main() {
 			report("TimeAbility/get_time", fmt.Sprintf("now=%s src=%s", snap.Time.Format(time.RFC3339), snap.Source), o.Err)
 		} else {
 			report("TimeAbility/get_time", fmt.Sprintf("%v", o.Value), o.Err)
+		}
+		// sync_manual: 手工校时 (RFC3339Nano), 校验后 get_time 应反映该值
+		manual := time.Now().Add(-2 * time.Hour).Format(time.RFC3339Nano)
+		o = a.Command(atom, ability.TimeCommandSyncManual, ability.TimeSyncManualArgs{Value: manual})
+		report("TimeAbility/sync_manual", manual, o.Err)
+		o = a.Command(atom, ability.TimeCommandGetTime, nil)
+		if snap, ok := o.Value.(ability.TimeSnapshot); ok {
+			report("TimeAbility/get_time-after-manual", fmt.Sprintf("now=%s src=%s", snap.Time.Format(time.RFC3339), snap.Source), o.Err)
+		} else {
+			report("TimeAbility/get_time-after-manual", fmt.Sprintf("%v", o.Value), o.Err)
+		}
+		// 非法时间格式应被拒绝
+		o = a.Command(atom, ability.TimeCommandSyncManual, ability.TimeSyncManualArgs{Value: "not-a-time"})
+		if o.Err == nil {
+			report("TimeAbility/sync_manual-bad", "应拒绝但成功", fmt.Errorf("bad time format accepted"))
+		} else {
+			report("TimeAbility/sync_manual-bad", "正确拒绝", nil)
 		}
 	}
 
