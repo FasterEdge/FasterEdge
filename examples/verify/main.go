@@ -764,7 +764,8 @@ func main() {
 		}
 	}
 
-	// === 数据库 data 组件 (配置/秘钥存储, 无需真实数据库) ===	fmt.Println("\n=== 数据库 Data 组件: MySQL / PostgreSQL / SQLite / Redis / MongoDB / InfluxDB ===")
+	// === 数据库 data 组件 (配置/秘钥存储, 无需真实数据库) ===
+	fmt.Println("\n=== 数据库 Data 组件: MySQL / PostgreSQL / SQLite / Redis / MongoDB / InfluxDB ===")
 	dbVerify := func(name string, configure, setSecret, clearSecret, getConfig, status, snapshot func() error) {
 		if err := configure(); err != nil {
 			report(name+"/configure", "", err)
