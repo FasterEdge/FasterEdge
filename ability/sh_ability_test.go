@@ -66,6 +66,39 @@ func TestShAbilityRejectsNotAllowed(t *testing.T) {
 	}
 }
 
+// TestShAbilityRejectsChainingBypass 验证首词白名单不能被 shell 链接元字符绕过。
+func TestShAbilityRejectsChainingBypass(t *testing.T) {
+	s := NewShAbility()
+	atom := newShAtom(t)
+	s.SetAllowed([]string{"printf", "echo"})
+	bypassCases := []string{
+		"printf 'x'; touch /tmp/sh-bypass-1",
+		"echo hi && rm -rf /tmp/sh-bypass-2",
+		"echo hi | wc -l",
+		"echo hi > /tmp/sh-bypass-3",
+		"echo hi $(rm -rf /tmp/sh-bypass-4)",
+		"echo hi `touch /tmp/sh-bypass-5`",
+		"printf 'x'\ntouch /tmp/sh-bypass-6",
+		"echo \"$(touch /tmp/sh-bypass-7)\"",
+	}
+	for _, c := range bypassCases {
+		if out := s.Command(atom, ShCommandRun, ShRunArgs{Command: c, Timeout: 2 * time.Second}); !errors.Is(out.Err, types.ErrInvalidArguments) {
+			t.Fatalf("bypass case %q should be rejected, err=%v", c, out.Err)
+		}
+	}
+	// 合法单命令仍可通过 (单引号内 \n 是字面量)
+	okCases := []string{
+		"printf 'sh-ok\\n'",
+		"echo hello",
+		"printf 'semi;colon'",
+	}
+	for _, c := range okCases {
+		if out := s.Command(atom, ShCommandRun, ShRunArgs{Command: c, Timeout: 2 * time.Second}); out.Err != nil {
+			t.Fatalf("legit case %q should pass, err=%v", c, out.Err)
+		}
+	}
+}
+
 func TestShAbilityRunEcho(t *testing.T) {
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
 		t.Skip("no standard shell on this platform")

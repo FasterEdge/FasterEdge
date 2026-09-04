@@ -143,6 +143,53 @@ func (s *ShAbility) refreshUnderlyingAllowlist() {
 	_ = hasAllow
 }
 
+// hasShellChaining 检测命令中"引号外"是否含 shell 链接/重定向/替换元字符。
+// allowlist 非空时用于拒绝复合命令: 首词白名单可被 "printf x; touch f" 之类
+// 的分号/管道/重定向绕过, 必须整体拒绝以保持白名单语义。
+// 单引号内一切为字面量; 双引号内除 \$ ` \ 外的字符为字面量, 而这三者
+// 可构成命令替换/转义, 故同样拦截。
+func hasShellChaining(cmd string) string {
+	quoted := byte(0)
+	esc := false
+	for i := 0; i < len(cmd); i++ {
+		c := cmd[i]
+		if esc {
+			esc = false
+			continue
+		}
+		if quoted == '\'' {
+			if c == '\'' {
+				quoted = 0
+			}
+			continue
+		}
+		if quoted == '"' {
+			switch c {
+			case '\\':
+				esc = true
+			case '"':
+				quoted = 0
+			case '$', '`':
+				return string(c)
+			}
+			continue
+		}
+		switch c {
+		case '\'', '"':
+			quoted = c
+		case ';', '&', '|', '<', '>', '`', '$', '(', ')', '{', '}':
+			return string(c)
+		case '\\':
+			// 引号外的 \x 是字面量转义 (如 '\'' 序列、转义的分号/空格),
+			// 并不构成命令链接; 跳过下一个字符避免误报。
+			i++
+		case '\n':
+			return "newline"
+		}
+	}
+	return ""
+}
+
 func (s *ShAbility) matchInner(cmd string) error {
 	cmd = strings.TrimSpace(cmd)
 	if cmd == "" {
@@ -160,6 +207,10 @@ func (s *ShAbility) matchInner(cmd string) error {
 	}
 	head := fields[0]
 	if _, ok := s.allowlist[head]; ok {
+		// 首词命中白名单还不够: 命令其余部分含 shell 链接元字符即可绕过白名单
+		if ch := hasShellChaining(cmd); ch != "" {
+			return fmt.Errorf("command contains shell metacharacter %q after allowlisted subcommand: %w", ch, types.ErrInvalidArguments)
+		}
 		return nil
 	}
 	return fmt.Errorf("subcommand %q not allowed: %w", head, types.ErrInvalidArguments)

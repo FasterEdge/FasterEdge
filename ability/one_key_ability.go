@@ -236,27 +236,31 @@ func EncodeForTransmission(t OneKeyToken) string {
 
 // DecodeFromTransmission 解析 EncodeForTransmission 的输出。
 // 返回 (OneKeyToken, error);签名解析失败时返回 types.ErrInvalidArguments 包裹的错误。
+// 布局为 subject.issuedNanos.expiresNanos.signature; 从尾部解析时间戳与签名,
+// 因此 subject 可安全包含 "." (如主机名 edge-1.local)。signature 为
+// RawURL base64 (不含 "."), 时间戳为纯数字, 尾部三段无歧义。
 func DecodeFromTransmission(s string) (OneKeyToken, error) {
 	parts := strings.Split(s, ".")
-	if len(parts) != 4 {
+	if len(parts) < 4 {
 		return OneKeyToken{}, fmt.Errorf("malformed token: %w", types.ErrInvalidArguments)
 	}
-	issued, err := parseUnixNanos(parts[1])
+	issued, err := parseUnixNanos(parts[len(parts)-3])
 	if err != nil {
 		return OneKeyToken{}, err
 	}
-	expires, err := parseUnixNanos(parts[2])
+	expires, err := parseUnixNanos(parts[len(parts)-2])
 	if err != nil {
 		return OneKeyToken{}, err
 	}
-	if _, err := base64.RawURLEncoding.DecodeString(parts[3]); err != nil {
+	signature := parts[len(parts)-1]
+	if _, err := base64.RawURLEncoding.DecodeString(signature); err != nil {
 		return OneKeyToken{}, fmt.Errorf("bad signature encoding: %w", types.ErrInvalidArguments)
 	}
 	return OneKeyToken{
-		Subject:   parts[0],
+		Subject:   strings.Join(parts[:len(parts)-3], "."),
 		IssuedAt:  issued,
 		ExpiresAt: expires,
-		Signature: parts[3],
+		Signature: signature,
 	}, nil
 }
 

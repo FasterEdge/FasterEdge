@@ -262,4 +262,18 @@ func TestOneKeyAbilityEncodeDecode(t *testing.T) {
 	if _, err := DecodeFromTransmission("a.bb.c.zzz"); err == nil {
 		t.Fatal("bad timestamp should error")
 	}
+	// subject 可安全包含 "." (如主机名 edge-1.local): 从尾部解析, 前缀整体为 subject
+	dotted := OneKeyToken{
+		Subject:   "edge-1.local",
+		IssuedAt:  now,
+		ExpiresAt: now.Add(30 * time.Minute),
+		Signature: "aBcDeF-_9xYz",
+	}
+	dec2, err := DecodeFromTransmission(EncodeForTransmission(dotted))
+	if err != nil {
+		t.Fatalf("dotted subject round-trip: %v", err)
+	}
+	if dec2.Subject != "edge-1.local" || dec2.Signature != dotted.Signature {
+		t.Fatalf("dotted decoded = %#v", dec2)
+	}
 }

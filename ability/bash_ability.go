@@ -94,6 +94,10 @@ func (b *BashAbility) checkInner(cmd string) error {
 	if _, ok := b.allowlist[fields[0]]; !ok {
 		return fmt.Errorf("subcommand %q not allowed: %w", fields[0], types.ErrInvalidArguments)
 	}
+	// 与 ShAbility 同理: 首词命中后仍须拒绝 shell 链接元字符, 防白名单绕过
+	if ch := hasShellChaining(cmd); ch != "" {
+		return fmt.Errorf("command contains shell metacharacter %q after allowlisted subcommand: %w", ch, types.ErrInvalidArguments)
+	}
 	return nil
 }
 

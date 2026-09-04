@@ -57,6 +57,33 @@ func TestBashAbilityRejectsWrongArgs(t *testing.T) {
 	}
 }
 
+// TestBashAbilityRejectsChainingBypass 验证首词白名单不能被 shell 链接元字符绕过。
+func TestBashAbilityRejectsChainingBypass(t *testing.T) {
+	b := NewBashAbility()
+	atom := newBashAtom(t)
+	b.SetAllowed([]string{"printf", "echo"})
+	bypassCases := []string{
+		"printf 'x'; touch /tmp/bash-bypass-1",
+		"echo hi && rm -rf /tmp/bash-bypass-2",
+		"echo hi | wc -l",
+		"echo hi > /tmp/bash-bypass-3",
+		"echo hi $(rm -rf /tmp/bash-bypass-4)",
+		"echo hi `touch /tmp/bash-bypass-5`",
+		"printf 'x'\ntouch /tmp/bash-bypass-6",
+	}
+	for _, c := range bypassCases {
+		if out := b.Command(atom, BashCommandRun, ShRunArgs{Command: c, Timeout: 2 * time.Second}); !errors.Is(out.Err, types.ErrInvalidArguments) {
+			t.Fatalf("bypass case %q should be rejected, err=%v", c, out.Err)
+		}
+	}
+	// 合法单命令仍可通过
+	for _, c := range []string{"printf 'sh-ok\\n'", "echo hello"} {
+		if out := b.Command(atom, BashCommandRun, ShRunArgs{Command: c, Timeout: 2 * time.Second}); out.Err != nil {
+			t.Fatalf("legit case %q should pass, err=%v", c, out.Err)
+		}
+	}
+}
+
 func TestBashAbilityRunEcho(t *testing.T) {
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
 		t.Skip("requires POSIX sh/bash")
@@ -83,8 +110,8 @@ func TestBashAbilityStartWaitKill(t *testing.T) {
 	}
 	b := NewBashAbility()
 	atom := newBashAtom(t)
-	b.SetAllowed([]string{"sleep", "printf"})
-	startOut := b.Command(atom, BashCommandStart, ShRunArgs{Command: "sleep 0.1; printf bash-done"})
+	b.SetAllowed([]string{"printf"})
+	startOut := b.Command(atom, BashCommandStart, ShRunArgs{Command: "printf bash-done"})
 	if startOut.Err != nil {
 		t.Fatal(startOut.Err)
 	}
