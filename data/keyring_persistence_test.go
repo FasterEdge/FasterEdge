@@ -163,6 +163,9 @@ func TestKeyringAtomicFailurePreservesOldFile(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("chmod permissions are not POSIX on Windows")
 	}
+	if os.Geteuid() == 0 {
+		t.Skip("chmod write-protection does not apply to root")
+	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "keyring.json")
 	k := NewKeyringData()
