@@ -649,6 +649,65 @@ func main() {
 		} else {
 			report("Docker/list-no-transport", "正确拒绝", nil)
 		}
+		// ---- 真实 daemon 联调 (经 FE_DOCKER_SOCK 挂载的宿主 unix socket) ----
+		sock := os.Getenv("FE_DOCKER_SOCK")
+		if sock == "" {
+			sock = "unix:///var/run/docker.sock"
+		}
+		o = a.Command(extAtom, ability.DockerCommandSetEndpoint, ability.DockerEndpointArgs{URL: sock})
+		if o.Err != nil {
+			report("Docker/real-set_endpoint", "", o.Err)
+		} else {
+			report("Docker/real-set_endpoint", sock, nil)
+			dtr, err := newDockerTransport(sock)
+			if err != nil {
+				report("Docker/real-transport", "", err)
+			} else {
+				ok := true
+				if ca, ok2 := a.(*ability.DockerAbility); ok2 {
+					ca.SetTransport(dtr)
+				} else {
+					ok = false
+					report("Docker/real-inject", "类型断言失败", fmt.Errorf("cannot inject transport"))
+				}
+				if ok {
+					o = a.Command(extAtom, ability.DockerCommandListContainers, nil)
+					if o.Err != nil {
+						report("Docker/real-list", "", o.Err)
+					} else if cons, ok := o.Value.([]ability.DockerContainer); ok {
+						report("Docker/real-list", fmt.Sprintf("count=%d", len(cons)), nil)
+						// 生命周期: pull 镜像 → create → start → inspect → logs → stop → remove
+						o = a.Command(extAtom, ability.DockerCommandPullImage, ability.DockerPullImageArgs{Reference: "alpine:3.20"})
+						report("Docker/real-pull", "alpine:3.20", o.Err)
+						if o.Err == nil {
+							o = a.Command(extAtom, ability.DockerCommandCreate, ability.DockerCreateArgs{
+								Name:    "fe-verify-ctr",
+								Image:   "alpine:3.20",
+								Command: []string{"sh", "-c", "echo docker-ability-ok; sleep 2"},
+							})
+							id := fmt.Sprintf("%v", o.Value)
+							report("Docker/real-create", "id="+id, o.Err)
+							if o.Err == nil {
+								o = a.Command(extAtom, ability.DockerCommandStart, ability.DockerContainerArgs{IDOrName: id, Timeout: 5 * time.Second})
+								report("Docker/real-start", id, o.Err)
+								time.Sleep(4 * time.Second) // 等命令跑完再取日志
+								o = a.Command(extAtom, ability.DockerCommandGetLogs, ability.DockerContainerArgs{IDOrName: id, Timeout: 5 * time.Second})
+								logs := fmt.Sprintf("%v", o.Value)
+								report("Docker/real-logs", fmt.Sprintf("logs=%q", strings.TrimSpace(logs)), o.Err)
+								o = a.Command(extAtom, ability.DockerCommandInspect, ability.DockerContainerArgs{IDOrName: id, Timeout: 5 * time.Second})
+								report("Docker/real-inspect", fmt.Sprintf("%v", o.Value), o.Err)
+								o = a.Command(extAtom, ability.DockerCommandStop, ability.DockerContainerArgs{IDOrName: id, Timeout: 5 * time.Second})
+								report("Docker/real-stop", id, o.Err)
+								o = a.Command(extAtom, ability.DockerCommandRemove, ability.DockerContainerArgs{IDOrName: id, Timeout: 5 * time.Second})
+								report("Docker/real-remove", id, o.Err)
+							}
+						}
+					} else {
+						report("Docker/real-list", fmt.Sprintf("type=%T", o.Value), o.Err)
+					}
+				}
+			}
+		}
 	}
 
 	// === 数据库 data 组件 (配置/秘钥存储, 无需真实数据库) ===	fmt.Println("\n=== 数据库 Data 组件: MySQL / PostgreSQL / SQLite / Redis / MongoDB / InfluxDB ===")
