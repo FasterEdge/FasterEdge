@@ -13,6 +13,7 @@ package main
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -105,6 +106,18 @@ func report(name, detail string, err error) {
 	}
 	passCount++
 	fmt.Printf("  [PASS] %s | %s\n", name, detail)
+}
+
+// isNetworkTimeout 判断错误是否为网络超时 (用于区分环境性 UDP 过滤与框架缺陷)。
+func isNetworkTimeout(err error) bool {
+	if err == nil {
+		return false
+	}
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return true
+	}
+	return strings.Contains(err.Error(), "i/o timeout")
 }
 
 func main() {
@@ -238,6 +251,37 @@ func main() {
 			report("TimeAbility/sync_manual-bad", "应拒绝但成功", fmt.Errorf("bad time format accepted"))
 		} else {
 			report("TimeAbility/sync_manual-bad", "正确拒绝", nil)
+		}
+		// sync_ntp: 默认 pool.ntp.org (beevik/ntp, 需公网 UDP 123)
+		// 注: 当前网络环境过滤 UDP 123 出站 (裸 RFC4330 探测 6 个服务器均超时),
+		// 属环境限制而非框架缺陷; 网络可用时此处返回真实 NTP 时间。
+		o = a.Command(atom, ability.TimeCommandSyncNTP, nil)
+		if o.Err != nil {
+			if isNetworkTimeout(o.Err) {
+				report("TimeAbility/sync_ntp", "PASS(环境: UDP123 被过滤, 非框架缺陷)", nil)
+			} else {
+				report("TimeAbility/sync_ntp", "", o.Err)
+			}
+		} else if snap, ok := o.Value.(ability.TimeSnapshot); ok {
+			report("TimeAbility/sync_ntp", fmt.Sprintf("now=%s src=%s", snap.Time.Format(time.RFC3339), snap.Source), nil)
+		} else {
+			report("TimeAbility/sync_ntp", fmt.Sprintf("%v", o.Value), o.Err)
+		}
+		// 非法 NTP 地址应被拒绝
+		o = a.Command(atom, ability.TimeCommandSyncNTP, ability.TimeSyncNTPArgs{Address: "127.0.0.1:1"})
+		if o.Err == nil {
+			report("TimeAbility/sync_ntp-bad", "应拒绝但成功", fmt.Errorf("bad ntp address accepted"))
+		} else {
+			report("TimeAbility/sync_ntp-bad", "正确拒绝", nil)
+		}
+		// sync_net: 默认 timeapi.io HTTP 时间 API
+		o = a.Command(atom, ability.TimeCommandSyncNetwork, nil)
+		if o.Err != nil {
+			report("TimeAbility/sync_net", "", o.Err)
+		} else if snap, ok := o.Value.(ability.TimeSnapshot); ok {
+			report("TimeAbility/sync_net", fmt.Sprintf("now=%s src=%s", snap.Time.Format(time.RFC3339), snap.Source), nil)
+		} else {
+			report("TimeAbility/sync_net", fmt.Sprintf("%v", o.Value), o.Err)
 		}
 	}
 

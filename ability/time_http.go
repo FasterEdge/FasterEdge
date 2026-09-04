@@ -76,6 +76,12 @@ func (t *TimeAbility) fetchNetworkTime(ctx context.Context, rawURL string) (time
 	}
 	ts, err := time.Parse(time.RFC3339Nano, pld.DateTime)
 	if err != nil {
+		// timeapi.io 等来源返回无时区后缀的 UTC datetime
+		// (如 "2026-09-04T12:28:07.3240057"), RFC3339 解析失败;
+		// 回退按无时区格式解析并视为 UTC。
+		if tsNoZone, err2 := time.Parse("2006-01-02T15:04:05.999999999", pld.DateTime); err2 == nil {
+			return tsNoZone.UTC(), nil
+		}
 		return time.Time{}, fmt.Errorf("datetime parse: %w", err)
 	}
 	return ts, nil

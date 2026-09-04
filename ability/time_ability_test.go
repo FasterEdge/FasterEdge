@@ -3,6 +3,9 @@ package ability
 import (
 	"context"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
@@ -158,5 +161,46 @@ func TestTimeAbilityListCommandsExactMatch(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("at %d: %s vs %s", i, got[i], want[i])
 		}
+	}
+}
+
+// TestTimeAbilityFetchNetworkTimeAcceptsNoZoneDatetime 回归测试:
+// timeapi.io 返回无时区后缀的 UTC datetime (如 "2026-09-04T12:28:07.3240057"),
+// RFC3339Nano 解析失败, 修复前 sync_net 永远报 "datetime parse" 错误。
+func TestTimeAbilityFetchNetworkTimeAcceptsNoZoneDatetime(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// timeapi.io 实际格式: 无时区后缀
+		io.WriteString(w, `{"dateTime":"2026-09-04T12:28:07.3240057"}`)
+	}))
+	defer srv.Close()
+
+	// allowPrivate 以允许访问本地测试服务器 (生产默认拒绝私网, 属安全设计)
+	a := &TimeAbility{
+		httpTimeout:      5 * time.Second,
+		maxResponseBytes: 64 << 10,
+		networkPolicy:    addressPolicy{allowPrivate: true},
+	}
+	ts, err := a.fetchNetworkTime(context.Background(), srv.URL)
+	if err != nil {
+		t.Fatalf("fetchNetworkTime(no-zone): %v", err)
+	}
+	want := time.Date(2026, 9, 4, 12, 28, 7, 324005700, time.UTC)
+	if !ts.Equal(want) {
+		t.Fatalf("got %s want %s", ts, want)
+	}
+
+	// 带时区后缀的 RFC3339 格式仍应正常解析
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"dateTime":"2026-09-04T12:28:07.3240057Z"}`)
+	}))
+	defer srv2.Close()
+	ts2, err := a.fetchNetworkTime(context.Background(), srv2.URL)
+	if err != nil {
+		t.Fatalf("fetchNetworkTime(with-zone): %v", err)
+	}
+	if !ts2.Equal(want) {
+		t.Fatalf("got %s want %s", ts2, want)
 	}
 }
