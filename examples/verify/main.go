@@ -283,6 +283,16 @@ func main() {
 		} else {
 			report("TimeAbility/sync_net", fmt.Sprintf("%v", o.Value), o.Err)
 		}
+		// sync_net 网络策略: 私网时间源 (如容器内 SimpleTimeService) 应被拒绝 —
+		// 与 broker 回环拒绝同理的安全设计; FE_STS_URL 由脚本注入实测。
+		if stsURL := os.Getenv("FE_STS_URL"); stsURL != "" {
+			o = a.Command(atom, ability.TimeCommandSyncNetwork, ability.TimeSyncNetworkArgs{URL: stsURL})
+			if o.Err == nil {
+				report("TimeAbility/sync_net-private-source", "应拒绝但成功", fmt.Errorf("private time source accepted"))
+			} else {
+				report("TimeAbility/sync_net-private-source", fmt.Sprintf("正确拒绝: %v", o.Err), nil)
+			}
+		}
 	}
 
 	// --- ability: OneKeyAbility (签发 → 传输编码 → 验证 → 篡改拒绝 → 注销) ---
