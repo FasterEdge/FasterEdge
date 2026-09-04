@@ -230,6 +230,28 @@ func TestOneKeyAbilityListAndStatus(t *testing.T) {
 	}
 }
 
+func TestParseUnixNanosRejectsOverflow(t *testing.T) {
+	// 20 位数字: n*10+d 会回绕 int64, 必须显式拒绝而非接受为负纳秒时间
+	over := "99999999999999999999"
+	if _, err := parseUnixNanos(over); !errors.Is(err, types.ErrInvalidArguments) {
+		t.Fatalf("overflow timestamp %q: err = %v, want ErrInvalidArguments", over, err)
+	}
+	// MaxInt64 纳秒本身合法
+	maxNanos := "9223372036854775807"
+	tm, err := parseUnixNanos(maxNanos)
+	if err != nil || tm.UnixNano() != int64(^uint64(0)>>1) {
+		t.Fatalf("max nanos: tm=%v err=%v", tm, err)
+	}
+	// 非数字拒绝
+	if _, err := parseUnixNanos("12a34"); !errors.Is(err, types.ErrInvalidArguments) {
+		t.Fatalf("non-digit: err = %v", err)
+	}
+	// 空拒绝
+	if _, err := parseUnixNanos(""); !errors.Is(err, types.ErrInvalidArguments) {
+		t.Fatalf("empty: err = %v", err)
+	}
+}
+
 func TestOneKeyAbilityEncodeDecode(t *testing.T) {
 	now := time.Now()
 	tok := OneKeyToken{

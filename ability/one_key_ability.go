@@ -273,7 +273,13 @@ func parseUnixNanos(s string) (time.Time, error) {
 		if r < '0' || r > '9' {
 			return time.Time{}, fmt.Errorf("bad timestamp: %w", types.ErrInvalidArguments)
 		}
-		n = n*10 + int64(r-'0')
+		d := int64(r - '0')
+		// 溢出防护: 超长数字 (如 20 位 "999...9") 会使 n*10+d 回绕成
+		// 负数并被接受为合法纳秒时间, 需显式拒绝。
+		if n > (int64(^uint64(0)>>1)-d)/10 {
+			return time.Time{}, fmt.Errorf("timestamp overflow: %w", types.ErrInvalidArguments)
+		}
+		n = n*10 + d
 	}
 	return time.Unix(0, n), nil
 }
