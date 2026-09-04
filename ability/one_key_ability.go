@@ -265,6 +265,9 @@ func DecodeFromTransmission(s string) (OneKeyToken, error) {
 }
 
 func parseUnixNanos(s string) (time.Time, error) {
+	if s == "" {
+		return time.Time{}, fmt.Errorf("empty timestamp: %w", types.ErrInvalidArguments)
+	}
 	var n int64
 	for _, r := range s {
 		if r < '0' || r > '9' {

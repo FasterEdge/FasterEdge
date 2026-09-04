@@ -496,8 +496,8 @@ func (m *MQTTAbility) Command(atom *types.Atom, act string, args any) types.Comm
 	return types.CommandOutput{Name: act, Err: fmt.Errorf("command %s: %w", act, types.ErrUnsupportedCommand)}
 }
 
-// isAcceptableBrokerURL 限制 MQTT URL 必须是 tcp/tls/ssl/ws/wss 协议,且 host 不为本地回环/私网。
-// 这与 TimeAbility / CloudRoleAbility 的网络策略一致。
+// isAcceptableBrokerURL 限制 MQTT URL 必须是 tcp/tls/ssl/ws/wss 协议,且 host 不为本地回环。
+// 这与 TimeAbility / CloudRoleAbility 的网络策略一致(私网 broker 允许, 回环拒绝)。
 func isAcceptableBrokerURL(u string) bool {
 	if u == "" {
 		return false
@@ -512,6 +512,10 @@ func isAcceptableBrokerURL(u string) bool {
 			}
 			if i := strings.LastIndex(host, ":"); i >= 0 {
 				host = host[:i]
+			}
+			// IPv6 字面量带方括号, 先剥掉再比较回环 (如 tcp://[::1]:1883)
+			if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") && len(host) >= 2 {
+				host = host[1 : len(host)-1]
 			}
 			if host == "" || host == "localhost" || host == "127.0.0.1" || host == "0.0.0.0" || host == "::1" {
 				return false

@@ -130,7 +130,7 @@ func TestDockerAbilitySetGetEndpoint(t *testing.T) {
 	if out := d.Command(atom, DockerCommandSetEndpoint, "raw-string"); !errors.Is(out.Err, types.ErrInvalidArguments) {
 		t.Fatalf("set wrong type error = %v", out.Err)
 	}
-	for _, bad := range []string{"", "ftp://x", "tcp://localhost:2375", "tcp://127.0.0.1:2375", "http://host:2375"} {
+	for _, bad := range []string{"", "ftp://x", "tcp://localhost:2375", "tcp://127.0.0.1:2375", "tcp://[::1]:2375", "tcp://0.0.0.0:2375", "tcp://::1:2375", "http://host:2375"} {
 		if out := d.Command(atom, DockerCommandSetEndpoint, DockerEndpointArgs{URL: bad}); !errors.Is(out.Err, types.ErrInvalidArguments) {
 			t.Errorf("bad endpoint %q should reject, got %v", bad, out.Err)
 		}

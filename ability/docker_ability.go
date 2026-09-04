@@ -267,7 +267,14 @@ func isValidDockerEndpoint(u string) bool {
 		if i := strings.LastIndex(host, ":"); i >= 0 {
 			host = host[:i]
 		}
-		if host == "" || host == "localhost" || host == "127.0.0.1" || host == "0.0.0.0" || host == "::1" {
+		if host == "" {
+			return false
+		}
+		// IPv6 字面量带方括号, 先剥掉再比较回环 (如 tcp://[::1]:2375)
+		if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") && len(host) >= 2 {
+			host = host[1 : len(host)-1]
+		}
+		if host == "localhost" || host == "127.0.0.1" || host == "0.0.0.0" || host == "::1" {
 			return false
 		}
 		return true

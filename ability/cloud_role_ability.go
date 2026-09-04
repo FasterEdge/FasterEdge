@@ -303,6 +303,10 @@ func isAcceptableControllerURL(u string) bool {
 	if host == "" {
 		return false
 	}
+	// IPv6 字面量带方括号, 先剥掉再比较回环 (如 http://[::1]:8080)
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") && len(host) >= 2 {
+		host = host[1 : len(host)-1]
+	}
 	if host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "0.0.0.0" {
 		return false
 	}
