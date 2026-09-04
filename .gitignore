@@ -30,6 +30,9 @@ go.work.sum
 /examples/*/example
 /examples/*/example.exe
 
+# Examples verify tool build output
+/verify
+
 # ============================================
 # OS / Editor / IDE 噪音屏蔽
 # ============================================
