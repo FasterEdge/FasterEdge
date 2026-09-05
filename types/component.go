@@ -14,6 +14,8 @@ type Component interface {
 }
 
 // Runner marks a component that has a supervised, long-running operation.
+// 注意: RunAll 只监督 Ability 组件——Data 组件实现 Runner 时其 Run 永不被
+// 调用(挂载数据泵请以 Ability 形态注册, 或自行起 goroutine)。
 type Runner interface {
 	Run(context.Context, *Atom) error
 }
@@ -49,4 +51,12 @@ type CommandLister interface {
 // per-component health into a single report.
 type HealthChecker interface {
 	HealthCheck(context.Context, *Atom) error
+}
+
+// Describer is implemented by the Atom itself (see Atom.Descriptions); it is
+// declared here only to keep the Describe contract discoverable next to the
+// Component interface. Atom.Descriptions aggregates Describe() across all
+// registered data and abilities.
+type Describer interface {
+	Descriptions() map[string]string
 }

@@ -3,6 +3,7 @@ package types
 import (
 	"context"
 	"errors"
+	"fmt"
 	"runtime/debug"
 	"sort"
 	"strings"
@@ -57,7 +58,22 @@ func dependencyOrder(items []namedComponent) ([]namedComponent, error) {
 		if !ok {
 			continue
 		}
-		decls := append([]Dependency(nil), provider.Dependencies()...)
+		// Dependencies 与 ListCommands 是仅有两个无框架级 panic 兜底的组件
+		// 回调——组件 panic 会让 dependencyOrder 冒泡, 且 MountAll 的
+		// transitioning 无 defer 复位, Atom 从此永久 ErrInvalidState 锁死。
+		var decls []Dependency
+		panicked := false
+		func() {
+			defer func() {
+				if v := recover(); v != nil {
+					panicked = true
+				}
+			}()
+			decls = append([]Dependency(nil), provider.Dependencies()...)
+		}()
+		if panicked {
+			return nil, &DependencyError{Component: item.name, Dependency: Dependency{Kind: item.kind.dependencyKind(), Name: item.name}, Err: fmt.Errorf("Dependencies() panicked")}
+		}
 		sort.Slice(decls, func(i, j int) bool {
 			if decls[i].Kind != decls[j].Kind {
 				return decls[i].Kind < decls[j].Kind
@@ -176,6 +192,15 @@ func (a *Atom) MountAll() error {
 		return ErrInvalidAtomState
 	}
 	a.transitioning = true
+	// 双保险: dependencyOrder 内的 Dependencies() 已加 recover, 此处兜底
+	// 其余未覆盖的组件回调 panic——transitioning 不复位会永久锁死 Atom。
+	defer func() {
+		if v := recover(); v != nil {
+			a.mu.Lock()
+			a.transitioning = false
+			a.mu.Unlock()
+		}
+	}()
 	items := make([]namedComponent, 0, len(a.data)+len(a.abilities))
 	for n, c := range a.data {
 		items = append(items, namedComponent{name: n, component: c, kind: componentData})

@@ -26,6 +26,15 @@ const (
 	InfluxCommandDeleteSeries = "delete_series"
 )
 
+const (
+	// influxMaxPoints/influxMaxSeries/influxMaxFields 是写路径的资源上限:
+	// 旧实现 points/fields/measurement 均无约束, series map 无界增长——
+	// 认证边界内的 DoS/内存膨胀面。
+	influxMaxPoints        = 1024
+	influxMaxSeries        = 1024
+	influxMaxFieldsPerPoint = 256
+)
+
 type InfluxConfig struct {
 	Endpoint string
 	Token    string // always redacted when returned by get_config
@@ -53,10 +62,15 @@ type InfluxAbility struct {
 	mu        sync.RWMutex
 	series    map[string]struct{}
 	transport InfluxTransport
+	// lastRevision 是最近一次操作交付给 transport 的配置版本。set_token/
+	// set_endpoint 后 revision 变化而 transport 仍持旧凭据——继续操作会把
+	// 数据写往废弃 endpoint/旧 token(凭据轮换被静默架空)。检测到不一致时
+	// 报错并要求重建 transport。
+	lastRevision uint64
 }
 
 func NewInfluxAbility() *InfluxAbility                  { return &InfluxAbility{series: map[string]struct{}{}} }
-func (i *InfluxAbility) SetTransport(t InfluxTransport) { i.mu.Lock(); i.transport = t; i.mu.Unlock() }
+func (i *InfluxAbility) SetTransport(t InfluxTransport) { i.mu.Lock(); i.transport = t; i.lastRevision = 0; i.mu.Unlock() }
 func (i *InfluxAbility) GetName() string                { return "InfluxDBAbility" }
 func (i *InfluxAbility) Describe() string {
 	return "InfluxDBAbility通过InfluxDBData读取连接配置与Token，并执行时序数据库操作。"
@@ -148,8 +162,12 @@ func (i *InfluxAbility) Command(atom *types.Atom, act string, args any) types.Co
 		if args != nil {
 			return invalidInflux(act)
 		}
-		if _, err := db.ConnectionMaterial(); err != nil {
+		material, err := db.ConnectionMaterial()
+		if err != nil {
 			return invalidInflux(act)
+		}
+		if out := i.staleCredentials(act, material.Revision); out.Err != nil {
+			return out
 		}
 		t := i.getTransport()
 		if t == nil {
@@ -158,18 +176,23 @@ func (i *InfluxAbility) Command(atom *types.Atom, act string, args any) types.Co
 		if err := t.Ping(); err != nil {
 			return operationalInfluxError(act, err)
 		}
+		i.noteRevision(material.Revision)
 		return types.CommandOutput{Name: act, Value: true}
 	case InfluxCommandWrite:
 		typed, ok := args.(InfluxWriteArgs)
-		if !ok || len(typed.Points) == 0 {
+		if !ok || len(typed.Points) == 0 || len(typed.Points) > influxMaxPoints {
 			return invalidInflux(act)
 		}
 		material, err := db.ConnectionMaterial()
 		if err != nil || material.Config.Bucket == "" {
 			return invalidInflux(act)
 		}
+		if out := i.staleCredentials(act, material.Revision); out.Err != nil {
+			return out
+		}
 		for _, p := range typed.Points {
-			if !isAcceptableIdentifier(p.Measurement) || len(p.Fields) == 0 {
+			if !isAcceptableIdentifier(p.Measurement) || len(p.Measurement) > 128 ||
+				len(p.Fields) == 0 || len(p.Fields) > influxMaxFieldsPerPoint {
 				return invalidInflux(act)
 			}
 		}
@@ -182,8 +205,12 @@ func (i *InfluxAbility) Command(atom *types.Atom, act string, args any) types.Co
 		}
 		i.mu.Lock()
 		for _, p := range typed.Points {
+			if _, exists := i.series[p.Measurement]; !exists && len(i.series) >= influxMaxSeries {
+				continue // 超上限的新 measurement 不记入本地目录, 不影响写入
+			}
 			i.series[p.Measurement] = struct{}{}
 		}
+		i.lastRevision = material.Revision
 		i.mu.Unlock()
 		return types.CommandOutput{Name: act, Value: len(typed.Points)}
 	case InfluxCommandQuery:
@@ -191,8 +218,12 @@ func (i *InfluxAbility) Command(atom *types.Atom, act string, args any) types.Co
 		if !ok || strings.TrimSpace(typed.Query) == "" {
 			return invalidInflux(act)
 		}
-		if _, err := db.ConnectionMaterial(); err != nil {
+		material, err := db.ConnectionMaterial()
+		if err != nil {
 			return invalidInflux(act)
+		}
+		if out := i.staleCredentials(act, material.Revision); out.Err != nil {
+			return out
 		}
 		t := i.getTransport()
 		if t == nil {
@@ -202,6 +233,7 @@ func (i *InfluxAbility) Command(atom *types.Atom, act string, args any) types.Co
 		if err != nil {
 			return operationalInfluxError(act, err)
 		}
+		i.noteRevision(material.Revision)
 		return types.CommandOutput{Name: act, Value: rows}
 	case InfluxCommandListSeries:
 		if args != nil {
@@ -217,17 +249,23 @@ func (i *InfluxAbility) Command(atom *types.Atom, act string, args any) types.Co
 		return types.CommandOutput{Name: act, Value: out}
 	case InfluxCommandDeleteSeries:
 		typed, ok := args.(InfluxSeriesArgs)
-		if !ok || !isAcceptableIdentifier(strings.TrimSpace(typed.Measurement)) {
+		if !ok {
+			return invalidInflux(act)
+		}
+		name := strings.TrimSpace(typed.Measurement)
+		// 旧实现校验用 TrimSpace 后的名、map 查找用原文——" cpu " 永远
+		// "not found" 且错误文本回显原文。统一用 trim 后的名。
+		if !isAcceptableIdentifier(name) {
 			return invalidInflux(act)
 		}
 		i.mu.Lock()
-		_, ok = i.series[typed.Measurement]
-		delete(i.series, typed.Measurement)
+		_, ok = i.series[name]
+		delete(i.series, name)
 		i.mu.Unlock()
 		if !ok {
 			return invalidInflux(act)
 		}
-		return types.CommandOutput{Name: act, Value: typed.Measurement}
+		return types.CommandOutput{Name: act, Value: name}
 	default:
 		return types.CommandOutput{Name: act, Err: fmt.Errorf("command %s: %w", act, types.ErrUnsupportedCommand)}
 	}
@@ -236,6 +274,25 @@ func (i *InfluxAbility) getTransport() InfluxTransport {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	return i.transport
+}
+
+// staleCredentials 检查 transport 持有的配置版本与当前是否一致
+// (lastRevision==0 表示 SetTransport 后尚未操作——放行)。
+func (i *InfluxAbility) staleCredentials(act string, revision uint64) types.CommandOutput {
+	i.mu.RLock()
+	last := i.lastRevision
+	i.mu.RUnlock()
+	if last != 0 && revision != last {
+		return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: transport holds stale credentials (revision %d != %d), rebuild transport", act, types.ErrOperationFailed, last, revision)}
+	}
+	return types.CommandOutput{}
+}
+
+// noteRevision 记录最近一次成功操作使用的配置版本。
+func (i *InfluxAbility) noteRevision(rev uint64) {
+	i.mu.Lock()
+	i.lastRevision = rev
+	i.mu.Unlock()
 }
 func configValue(args any) (string, bool) {
 	typed, ok := args.(InfluxConfigArgs)
@@ -249,12 +306,11 @@ func invalidInflux(act string) types.CommandOutput {
 	return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
 }
 func operationalInfluxError(act string, err error) types.CommandOutput {
-	return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %v", act, types.ErrInvalidArguments, err)}
+	// 运行期故障(网络/远端)用 ErrOperationFailed 哨兵并以 %w 保留底层错误链:
+	// 旧实现包进 ErrInvalidArguments, 故障被误分类为参数错误, 底层链被 %v 截断。
+	return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %w", act, types.ErrOperationFailed, err)}
 }
 func isAcceptableSecret(s string) bool { return len(s) >= 8 }
-func isAcceptableInfluxURL(s string) bool {
-	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")
-}
 func isAcceptableIdentifier(s string) bool {
 	if s == "" {
 		return false

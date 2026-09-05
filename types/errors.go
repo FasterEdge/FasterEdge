@@ -32,6 +32,10 @@ var (
 	ErrNotMounted             = errors.New("component is not mounted")
 	ErrAuthenticationRequired = errors.New("command authentication is required")
 	ErrAuthenticationFailed   = errors.New("command authentication failed")
+	// ErrOperationFailed 标识"命令已通过参数校验, 但运行期操作失败"
+	// (网络超时/连接拒绝/远端 5xx 等基础设施故障)。旧实现把这类错误包进
+	// ErrInvalidArguments——调用方把 DB 故障当参数错误重试, 哨兵语义被污染。
+	ErrOperationFailed = errors.New("operation failed")
 )
 
 // DependencyError identifies an invalid dependency declaration or registration.

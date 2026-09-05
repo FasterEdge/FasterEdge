@@ -311,8 +311,14 @@ func (m *ModbusAbility) executeWrite(act string, funcCode ModbusFunctionCode, pd
 	// 写回显校验: FC05/06/10 回显均为 5 字节(功能码+地址+值/数量),
 	// 必须与请求的 pdu[1:5] 一致(FC10 的 resp[3:5] 是数量, 由 pdu[3:5] 定义)。
 	// 旧实现只查首字节功能码, {0x06,0x00,...} 之类的伪造/损坏响应会误报"成功"。
+	// 注意: len<5 时错误消息里的 resp[:5] 会先于消息构造被执行——越界 panic,
+	// 短响应(截断半包/伪造设备)从"优雅报错"退化为"进程崩溃"。按最小长度截取。
 	if len(resp) < 5 || resp[1] != pdu[1] || resp[2] != pdu[2] || resp[3] != pdu[3] || resp[4] != pdu[4] {
-		return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: write echo mismatch (got % x, want % x): %w", act, resp[:5], pdu[1:5], types.ErrInvalidArguments)}
+		got := resp
+		if len(got) > 5 {
+			got = got[:5]
+		}
+		return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: write echo mismatch (got % x, want % x): %w", act, got, pdu[1:5], types.ErrInvalidArguments)}
 	}
 	return types.CommandOutput{Name: act, Value: true}
 }

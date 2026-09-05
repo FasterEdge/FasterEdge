@@ -3,6 +3,9 @@ package ability
 
 import (
 	"fmt"
+	"net"
+	"net/netip"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -141,14 +144,32 @@ func (e *EKuiperAbility) Command(atom *types.Atom, act string, args any) types.C
 		if !ok {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
 		}
-		url := strings.TrimSpace(typed.URL)
-		if !isAcceptableInfluxURL(url) {
+		endpoint := strings.TrimSpace(typed.URL)
+		// URL 校验与数据层 validateInfluxEndpoint 对齐(旧实现仅查 http/https
+		// 前缀——"http://"(无 host)/内嵌 userinfo/回环 IPv6/畸形端口全放行,
+		// 凭据随每次 REST 调用重放且 get_endpoint 原样回显)。
+		parsed, perr := url.Parse(endpoint)
+		if perr != nil || parsed.User != nil || parsed.Fragment != "" ||
+			(parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: invalid url: %w", act, types.ErrInvalidArguments)}
 		}
+		if ip := net.ParseIP(parsed.Hostname()); ip != nil {
+			addr, ok := netip.AddrFromSlice(ip)
+			if !ok {
+				return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: invalid url host: %w", act, types.ErrInvalidArguments)}
+			}
+			addr = addr.Unmap()
+			// 与 InfluxDBData 一致拒绝回环/未指定/私网/链路本地/组播;
+			// 域名留待拨号层二次校验(存储期不解析, TOCTOU)。
+			if addr.IsLoopback() || addr.IsUnspecified() || addr.IsPrivate() ||
+				addr.IsLinkLocalUnicast() || addr.IsMulticast() {
+				return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: url host not allowed: %w", act, types.ErrInvalidArguments)}
+			}
+		}
 		e.mu.Lock()
-		e.endpoint = url
+		e.endpoint = endpoint
 		e.mu.Unlock()
-		return types.CommandOutput{Name: act, Value: url}
+		return types.CommandOutput{Name: act, Value: endpoint}
 	case EKuiperCommandGetEndpoint:
 		if args != nil {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
@@ -177,7 +198,7 @@ func (e *EKuiperAbility) Command(atom *types.Atom, act string, args any) types.C
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: no transport: %w", act, types.ErrInvalidArguments)}
 		}
 		if err := transport.CreateStream(name, sql); err != nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %v", act, types.ErrInvalidArguments, err)}
+			return ekuperOpError(act, err)
 		}
 		e.mu.Lock()
 		e.streams[name] = &EKuiperStream{Name: name, SQL: sql, CreatedAt: time.Now()}
@@ -196,10 +217,13 @@ func (e *EKuiperAbility) Command(atom *types.Atom, act string, args any) types.C
 		if !ok {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %q not found: %w", act, name, types.ErrInvalidArguments)}
 		}
-		if transport != nil {
-			if err := transport.DropStream(name); err != nil {
-				return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %v", act, types.ErrInvalidArguments, err)}
-			}
+		// transport 为 nil 时不得静默"成功": 旧实现跳过远端调用直接删本地 map
+		// 返回成功——远端 eKuiper 的 stream/rule 原样保留, 调用方收到假"删除成功"。
+		if transport == nil {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: no transport: %w", act, types.ErrInvalidArguments)}
+		}
+		if err := transport.DropStream(name); err != nil {
+			return ekuperOpError(act, err)
 		}
 		e.mu.Lock()
 		delete(e.streams, name)
@@ -250,7 +274,7 @@ func (e *EKuiperAbility) Command(atom *types.Atom, act string, args any) types.C
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: no transport: %w", act, types.ErrInvalidArguments)}
 		}
 		if err := transport.CreateRule(id, sql, typed.Actions); err != nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %v", act, types.ErrInvalidArguments, err)}
+			return ekuperOpError(act, err)
 		}
 		e.mu.Lock()
 		e.rules[id] = &EKuiperRule{
@@ -272,10 +296,11 @@ func (e *EKuiperAbility) Command(atom *types.Atom, act string, args any) types.C
 		if !ok {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %q not found: %w", act, id, types.ErrInvalidArguments)}
 		}
-		if transport != nil {
-			if err := transport.DropRule(id); err != nil {
-				return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %v", act, types.ErrInvalidArguments, err)}
-			}
+		if transport == nil {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: no transport: %w", act, types.ErrInvalidArguments)}
+		}
+		if err := transport.DropRule(id); err != nil {
+			return ekuperOpError(act, err)
 		}
 		e.mu.Lock()
 		delete(e.rules, id)
@@ -304,7 +329,7 @@ func (e *EKuiperAbility) Command(atom *types.Atom, act string, args any) types.C
 			runErr = transport.StopRule(id)
 		}
 		if runErr != nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %v", act, types.ErrInvalidArguments, runErr)}
+			return ekuperOpError(act, runErr)
 		}
 		e.mu.Lock()
 		if act == EKuiperCommandStartRule {
@@ -341,4 +366,10 @@ func (e *EKuiperAbility) Command(atom *types.Atom, act string, args any) types.C
 		return types.CommandOutput{Name: act, Value: rule.Status}
 	}
 	return types.CommandOutput{Name: act, Err: fmt.Errorf("command %s: %w", act, types.ErrUnsupportedCommand)}
+}
+
+func ekuperOpError(act string, err error) types.CommandOutput {
+	// 运行期故障(远端 REST 调用失败)用 ErrOperationFailed 哨兵并以 %w
+	// 保留底层链——旧实现包进 ErrInvalidArguments 且用 %v 截断链。
+	return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %w", act, types.ErrOperationFailed, err)}
 }

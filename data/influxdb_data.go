@@ -2,11 +2,19 @@ package data
 
 import (
 	"strings"
+	"sync"
 
 	"github.com/FasterEdge/FasterEdge/types"
 )
 
-type InfluxDBData struct{ store databaseStore[InfluxDBConfig] }
+// InfluxDBData 的 setter(set_endpoint/set_org/set_bucket)是 read-modify-write:
+// 旧实现先 public() 读整份 config 再 configure() 整块覆盖, 并发配置命令会
+// 互相覆盖(先落盘的字段被后落盘的整份替换)。mu 把字段级 RMW 串行化,
+// store 内部锁在 mu 内嵌套(顺序固定, 无死锁)。
+type InfluxDBData struct {
+	store databaseStore[InfluxDBConfig]
+	mu    sync.Mutex
+}
 type InfluxDBConfigureArgs struct{ Config InfluxDBConfig }
 type InfluxDBSnapshot struct {
 	Version string         `json:"version"`
@@ -70,11 +78,13 @@ func (d *InfluxDBData) PublicConfig() InfluxDBConfig {
 }
 
 func (d *InfluxDBData) SetEndpoint(value string) error {
-	cfg, _ := d.store.public()
-	cfg.Endpoint = value
 	if err := validateInfluxEndpoint(value); err != nil {
 		return err
 	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	cfg, _ := d.store.public()
+	cfg.Endpoint = value
 	d.store.configure(cfg)
 	return nil
 }
@@ -82,6 +92,8 @@ func (d *InfluxDBData) SetOrg(value string) error {
 	if validateName(value) != nil {
 		return types.ErrInvalidArguments
 	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	cfg, _ := d.store.public()
 	cfg.Org = value
 	d.store.configure(cfg)
@@ -91,6 +103,8 @@ func (d *InfluxDBData) SetBucket(value string) error {
 	if validateName(value) != nil {
 		return types.ErrInvalidArguments
 	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	cfg, _ := d.store.public()
 	cfg.Bucket = value
 	d.store.configure(cfg)

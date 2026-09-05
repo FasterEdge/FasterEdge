@@ -36,6 +36,14 @@ const (
 	CloudRoleStatusOffline  CloudRoleStatus = "offline"
 )
 
+// 服务注册的资源上限(防持令牌对端无界灌入 map/字符串导致 OOM)。
+const (
+	cloudMaxServiceNameLen     = 128
+	cloudMaxServiceVersionLen  = 64
+	cloudMaxServiceEndpointLen = 512
+	cloudMaxServiceCount       = 512
+)
+
 // CloudRoleService 描述本云端节点对外提供的服务。
 type CloudRoleService struct {
 	Name      string
@@ -166,16 +174,28 @@ func (c *CloudRoleAbility) Command(atom *types.Atom, act string, args any) types
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
 		}
 		name := strings.TrimSpace(typed.Name)
-		if name == "" || strings.TrimSpace(typed.Name) != typed.Name {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
+		if name == "" || len(name) > cloudMaxServiceNameLen ||
+			strings.TrimSpace(typed.Name) != typed.Name {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: service name must be 1-%d chars: %w", act, cloudMaxServiceNameLen, types.ErrInvalidArguments)}
+		}
+		version := strings.TrimSpace(typed.Version)
+		endpoint := strings.TrimSpace(typed.Endpoint)
+		// 与 edge 能力条目一致设硬上限: 旧实现无界增长, 持令牌对端可灌入
+		// 任意大字符串/无限条目导致 OOM。
+		if len(version) > cloudMaxServiceVersionLen || len(endpoint) > cloudMaxServiceEndpointLen {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: service version/endpoint too long: %w", act, types.ErrInvalidArguments)}
 		}
 		svc := CloudRoleService{
 			Name:      name,
-			Version:   strings.TrimSpace(typed.Version),
-			Endpoint:  strings.TrimSpace(typed.Endpoint),
+			Version:   version,
+			Endpoint:  endpoint,
 			UpdatedAt: time.Now(),
 		}
 		c.mu.Lock()
+		if _, exists := c.services[name]; !exists && len(c.services) >= cloudMaxServiceCount {
+			c.mu.Unlock()
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: service limit %d reached: %w", act, cloudMaxServiceCount, types.ErrInvalidArguments)}
+		}
 		c.services[name] = svc
 		c.mu.Unlock()
 		return types.CommandOutput{Name: act, Value: svc}

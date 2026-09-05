@@ -69,7 +69,10 @@ func run() error {
 	if issueOut.Err != nil {
 		return fmt.Errorf("issue token: %w", issueOut.Err)
 	}
-	tok, _ := issueOut.Value.(ability.OneKeyToken)
+	tok, okTok := issueOut.Value.(ability.OneKeyToken)
+	if !okTok || len(tok.Signature) < 12 {
+		return fmt.Errorf("issue token: unexpected value %v", issueOut.Value)
+	}
 	fmt.Printf("[demo] onekey: issued token for edge-2 (sig=%s...)\n", tok.Signature[:12])
 
 	// 把签名后的 token 编码后跨节点传输,然后在远端用 verify 校验
@@ -109,7 +112,16 @@ func run() error {
 		return fmt.Errorf("config set: %w", out.Err)
 	}
 	cfa, _ := atom.Ability("ConfigFileAbility")
-	cfgPath := filepath.Join(os.TempDir(), "FasterEdge-demo-config.json")
+	// 私有临时目录 + 唯一文件名: 固定公开路径(如共享 /tmp 下的常量名)可被
+	// 预置符号链接劫持(Overwrite:true 会覆写链接目标)——模板示范安全写法。
+	demoDir, err := os.MkdirTemp("", "FasterEdge-demo-*")
+	if err != nil {
+		return fmt.Errorf("demo dir: %w", err)
+	}
+	if s, ok := cfa.(interface{ SetRoot(string) }); ok {
+		s.SetRoot(demoDir)
+	}
+	cfgPath := filepath.Join(demoDir, "config.json")
 	if out := cfa.Command(atom, ability.ConfigFileCommandSave, ability.ConfigFileSaveArgs{
 		Path:      cfgPath,
 		Overwrite: true,

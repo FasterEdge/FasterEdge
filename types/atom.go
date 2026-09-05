@@ -117,6 +117,12 @@ func (a *Atom) addData(d Data) error {
 	if _, ok := a.data[name]; ok {
 		return fmt.Errorf("add data %s: %w", name, ErrDuplicateComponent)
 	}
+	// 跨注册表同名分裂: CommandNames 的目录(ability 覆盖 data)与 component()
+	// 分发(data 优先)对同名组件得出相反结果——目录声称可用的命令实际路由
+	// 到另一个组件并返回 ErrUnsupportedCommand。注册期直接拒绝。
+	if _, ok := a.abilities[name]; ok {
+		return fmt.Errorf("add data %s: %w (name conflicts with registered ability)", name, ErrDuplicateComponent)
+	}
 	a.data[name] = d
 	return nil
 }
@@ -138,6 +144,10 @@ func (a *Atom) AddAbility(ab Ability) error {
 	}
 	if _, ok := a.abilities[name]; ok {
 		return fmt.Errorf("add ability %s: %w", name, ErrDuplicateComponent)
+	}
+	// 跨注册表同名分裂(见 addData 注释)。
+	if _, ok := a.data[name]; ok {
+		return fmt.Errorf("add ability %s: %w (name conflicts with registered data)", name, ErrDuplicateComponent)
 	}
 	a.abilities[name] = ab
 	return nil
@@ -296,13 +306,70 @@ func (a *Atom) CommandNames() map[string][]string {
 	}
 	a.mu.RUnlock()
 	for _, e := range entries {
-		// Call user code outside the lock.
-		cmds := e.lister.ListCommands()
+		// Call user code outside the lock. ListCommands 是唯一没有框架级
+		// panic 兜底的组件回调之一——组件 panic 会让 CommandNames 冒泡
+		// 造成进程级崩溃, 与其余回调(GetName/Check/Mount/Command)对齐。
+		var cmds []string
+		func() {
+			defer func() {
+				if v := recover(); v != nil {
+					cmds = nil
+				}
+			}()
+			cmds = e.lister.ListCommands()
+		}()
 		cp := append([]string(nil), cmds...)
 		sort.Strings(cp)
 		out[e.name] = cp
 	}
 	return out
+}
+
+// Descriptions aggregates Describe() across all registered data and abilities.
+// Describe 是 Component 的必需成员但框架长期没有调用点(死契约)——这是唯一
+// 的公开聚合入口, 让平台可以只读地展示组件描述。调用方持有返回 map 的所有权。
+func (a *Atom) Descriptions() map[string]string {
+	out := map[string]string{}
+	if a == nil {
+		return out
+	}
+	a.mu.RLock()
+	entries := make([]Component, 0, len(a.data)+len(a.abilities))
+	for _, c := range a.data {
+		entries = append(entries, c)
+	}
+	for _, c := range a.abilities {
+		entries = append(entries, c)
+	}
+	a.mu.RUnlock()
+	for _, c := range entries {
+		name := safeDescribeName(c)
+		if name == "" {
+			continue
+		}
+		out[name] = safeDescribeText(c)
+	}
+	return out
+}
+
+// safeDescribeName/safeDescribeText 与其余组件回调一致做 panic 兜底。
+func safeDescribeName(c Component) (name string) {
+	defer func() {
+		if v := recover(); v != nil {
+			name = ""
+		}
+	}()
+	name = c.GetName()
+	return name
+}
+
+func safeDescribeText(c Component) (desc string) {
+	defer func() {
+		if v := recover(); v != nil {
+			desc = fmt.Sprintf("<panic: %v>", v)
+		}
+	}()
+	return c.Describe()
 }
 
 func validateComponent(c Component) (name string, err error) {
