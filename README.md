@@ -183,4 +183,4 @@ go test -race ./...     # 含竞态检测
 go test ./... -v -run Integration   # 跨能力集成测试
 ```
 
-当前覆盖:**~135 个测试,全部通过,`go vet` 无警告。**
+当前覆盖:**315 个测试函数(另有 8 个 Benchmark 与 8 个 Fuzz 目标),全部通过,`go vet` 无警告。**

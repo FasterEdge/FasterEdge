@@ -183,4 +183,4 @@ go test -race ./...     # With race detection
 go test ./... -v -run Integration   # Cross-capability integration tests
 ```
 
-Current coverage: **~135 tests, all passing, `go vet` with no warnings.**
+Current coverage: **315 test functions (plus 8 benchmarks and 8 fuzz targets), all passing, `go vet` with no warnings.**
