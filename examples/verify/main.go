@@ -1143,6 +1143,13 @@ func main() {
 		}
 	}
 
+	// 第十三轮覆盖补强: 全仓命令枚举 mapping 的盲区命令级验证
+	// (骨架能力/核心能力/扩展能力三段, 定义见 verify_skeleton.go /
+	// verify_core.go / verify_powered.go)。
+	verifySkeletonExtras(atom, extAtom)
+	verifyCoreExtras(atom, extAtom)
+	verifyPoweredExtras(atom, extAtom)
+
 	// === 数据库 data 组件 (配置/秘钥存储, 无需真实数据库) ===
 	fmt.Println("\n=== 数据库 Data 组件: MySQL / PostgreSQL / SQLite / Redis / MongoDB / InfluxDB ===")
 	// dbVerify 对各 DB 组件的 configure→get_config→status→set_secret→
