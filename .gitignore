@@ -6,6 +6,9 @@
 *.so
 *.dylib
 
+# Credential files (tokens for push workflows must never be committed)
+.cred*
+
 # Test binary, build with `go test -c`
 *.test
 
