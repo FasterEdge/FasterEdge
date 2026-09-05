@@ -284,9 +284,9 @@ func TestSerialAbilityListPorts(t *testing.T) {
 	} else if ports, _ := out.Value.([]string); len(ports) != 2 {
 		t.Fatalf("custom list = %v", ports)
 	}
-	// 注入错误的 lister
+	// 注入错误的 lister(运行期 lister 故障——ErrOperationFailed)
 	s.SetLister(errorLister{})
-	if out := s.Command(atom, SerialCommandListPorts, nil); !errors.Is(out.Err, types.ErrInvalidArguments) {
+	if out := s.Command(atom, SerialCommandListPorts, nil); !errors.Is(out.Err, types.ErrOperationFailed) {
 		t.Fatalf("lister error = %v", out.Err)
 	}
 }

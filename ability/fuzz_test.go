@@ -2,6 +2,7 @@ package ability
 
 import (
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -24,10 +25,13 @@ func FuzzShellQuote(f *testing.F) {
 		if out[0] != '\'' || out[len(out)-1] != '\'' {
 			t.Fatalf("quote of %q not single-quoted: %q", s, out)
 		}
-		// 不应包含连续两个以上的单引号(即 "" 的假想表示)
-		// 不应出现裸 '' 段(可能表示空字符串补丁)
-		// 核心不变量:shellQuote(x) 的结果在 POSIX sh 中应展开为 x(功能等价)
-		// 这里仅做不崩溃检查,不再检查内部单引号,因为 '\'' 序列是合法的。
+		// 转义完整性(旧实现只断言包裹符与不崩溃): 剥掉全部 '\'' 转义序列后
+		// 内部不得残留裸单引号——否则 POSIX sh 无法把结果展开回原值,
+		// shell 注入面(shellQuote 漏转义)回归可被立刻抓到。
+		stripped := strings.ReplaceAll(out[1:len(out)-1], `'\''`, "")
+		if strings.Contains(stripped, "'") {
+			t.Fatalf("unquoted single quote survived quoting: %q (from %q)", out, s)
+		}
 	})
 }
 

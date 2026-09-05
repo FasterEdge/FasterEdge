@@ -392,9 +392,12 @@ func (t *TimeAbility) checkSyncOffset(ts time.Time) error {
 	return nil
 }
 func (t *TimeAbility) currentTime() (time.Time, string, error) {
-	mono := t.clock.Monotonic()
 	t.mu.RLock()
 	defer t.mu.RUnlock()
+	// mono 读必须在锁内: 旧实现在 RLock 之前读, 与并发 setSync(锁内更新
+	// baseMono)交错时 elapsed<0, get_time 偶发报错 "monotonic clock moved
+	// backwards"(与 setSync 的对称位置修复一致)。
+	mono := t.clock.Monotonic()
 	if t.lastSynced.IsZero() {
 		return time.Time{}, "", types.ErrInvalidArguments
 	}

@@ -136,7 +136,10 @@ func (a *Atom) AddAbility(ab Ability) error {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.state != AtomCreated {
+	// transitioning 守卫与 addData/RemoveData/RemoveAbility 对称: MountAll
+	// 期间(挂载循环在锁外执行)并发 AddAbility 可在 items 快照之后注册——
+	// "已注册但从未 Check/Mount"地进入 Mounted 状态。
+	if a.state != AtomCreated || a.transitioning {
 		return fmt.Errorf("add ability %s: %w", name, ErrInvalidState)
 	}
 	if a.abilities == nil {

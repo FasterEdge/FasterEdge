@@ -88,3 +88,32 @@ func TestNetMapDataDefaultIfaceValidation(t *testing.T) {
 		t.Fatalf("unknown command error = %v", out.Err)
 	}
 }
+
+// TestNetMapDataInterfacesDeepCopy 回归: interfaces 命令旧实现浅拷贝
+// slice 头——返回的 IPv4 与内部共享底层数组, 调用方改写会与并发
+// Snapshot() 数据竞争; 现与 snapshot() 一致深拷贝。
+func TestNetMapDataInterfacesDeepCopy(t *testing.T) {
+	d := NewNetMapData()
+	if err := d.Mount(nil); err != nil {
+		t.Fatal(err)
+	}
+	out1 := d.Command(nil, NetMapCommandInterfaces, nil)
+	if out1.Err != nil {
+		t.Fatal(out1.Err)
+	}
+	ifaces1, ok := out1.Value.([]NetMapInterface)
+	if !ok || len(ifaces1) == 0 || len(ifaces1[0].IPv4) == 0 {
+		t.Skip("no IPv4 interface in this test environment")
+	}
+	orig := ifaces1[0].IPv4[0]
+	// 改写返回值: 不应影响内部(旧实现共享底层数组——这里会改内部)
+	ifaces1[0].IPv4[0] = "10.99.99.99"
+	out2 := d.Command(nil, NetMapCommandInterfaces, nil)
+	if out2.Err != nil {
+		t.Fatal(out2.Err)
+	}
+	ifaces2, _ := out2.Value.([]NetMapInterface)
+	if len(ifaces2) == 0 || ifaces2[0].IPv4[0] != orig {
+		t.Fatalf("mutating interfaces result leaked into internal state: got %v want %v", ifaces2[0].IPv4, orig)
+	}
+}

@@ -118,6 +118,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("demo dir: %w", err)
 	}
+	defer os.RemoveAll(demoDir)
 	if s, ok := cfa.(interface{ SetRoot(string) }); ok {
 		s.SetRoot(demoDir)
 	}
@@ -142,11 +143,22 @@ func run() error {
 		Timeout: 3 * time.Second,
 	}); out.Err != nil {
 		return fmt.Errorf("sh run: %w", out.Err)
-	} else if res, ok := out.Value.(ability.CmdResult); ok && res.ExitCode == 0 {
-		fmt.Printf("[demo] sh: stdout = %q\n", res.Stdout)
+	} else if res, ok := out.Value.(ability.CmdResult); ok {
+		if res.ExitCode == 0 {
+			fmt.Printf("[demo] sh: stdout = %q\n", res.Stdout)
+		} else {
+			// Windows 无 sh 时 exec 启动失败返回 ExitCode -1 + nil Err(契约):
+			// 旧实现静默跳过且 demo 以 0 退出、步骤 7 从未真正执行——明确提示。
+			fmt.Printf("[demo] sh: skipped (exit code %d, stderr=%q)——本环境无 sh 或命令被拒\n", res.ExitCode, res.Stderr)
+		}
+	} else {
+		fmt.Printf("[demo] sh: skipped (unexpected result %v)\n", out.Value)
 	}
 
-	// 8. 优雅退出:100ms 后取消上下文,RunAtom 在没有 Runner 的情况下会立刻返回
+	// 8. 优雅退出:100ms 后取消上下文。RunAll 无 Runner 时阻塞于 ctx.Done
+	// (不会"立刻返回"——旧注释与行为不符, types/lifecycle.go:500); 本 atom
+	// 含 TimeAbility 这个 Runner, 取消后各组件 Unmount, RunAll 返回
+	// context.Canceled, 与下方容错匹配。
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	go func() {

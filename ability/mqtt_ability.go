@@ -384,6 +384,16 @@ func (m *MQTTAbility) Command(atom *types.Atom, act string, args any) types.Comm
 		}
 		m.mu.RUnlock()
 		for _, t := range topics {
+			// 逐个重订阅前锁内复查队列仍在: 并发 Unsubscribe 已删队列并完成
+			// wire 退订时, 对同一 topic 重新 Subscribe 会在 broker 端产生
+			// "幽灵订阅"(消息持续投递但本地无队列、也无法再退订)——与
+			// subscribe 命令的占位+复查二次校验同型, 队列已删则跳过。
+			m.mu.RLock()
+			_, stillThere := m.queues[t]
+			m.mu.RUnlock()
+			if !stillThere {
+				continue
+			}
 			_ = transport.Subscribe(t, 0)
 		}
 		return types.CommandOutput{Name: act, Value: true}

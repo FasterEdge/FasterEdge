@@ -12,7 +12,9 @@
 package main
 
 import (
+	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -251,7 +253,10 @@ func main() {
 			o = d.Command(atom, data.NetMapCommandSetDefaultIface, data.NetMapSetDefaultIfaceArgs{Name: ifaces[0].Name})
 			report("NetMapData/set_default_iface", ifaces[0].Name, o.Err)
 		} else {
-			report("NetMapData/interfaces", fmt.Sprintf("%v", o.Value), o.Err)
+			// 旧实现: 类型断言失败或空结果时把 o.Err 传给 report——o.Err 为
+			// nil(返回垃圾类型/空结果)时假 PASS, set_default_iface 随之消失。
+			// 真实主机必有 ≥1 接口——断言失败即 FAIL。
+			report("NetMapData/interfaces", "type/empty mismatch", fmt.Errorf("interfaces returned %T (want []data.NetMapInterface with len>0)", o.Value))
 		}
 	}
 
@@ -268,7 +273,12 @@ func main() {
 		o := a.Command(atom, ability.CommandSetRole, ability.RoleAbilityArgs{Role: "edge"})
 		report("RoleAbility/set_role", "edge", o.Err)
 		o = a.Command(atom, ability.CommandGetRole, nil)
-		report("RoleAbility/get_role", fmt.Sprintf("%v", o.Value), o.Err)
+		// 断言 get_role 反映 set_role(旧实现只打印——set 变 no-op 也 PASS)
+		if v, _ := o.Value.(string); v != "edge" {
+			report("RoleAbility/get_role", fmt.Sprintf("%v", o.Value), fmt.Errorf("get_role mismatch: want %q", "edge"))
+		} else {
+			report("RoleAbility/get_role", fmt.Sprintf("%v", o.Value), o.Err)
+		}
 		o = a.Command(atom, ability.CommandDescribe, nil)
 		report("RoleAbility/describe", fmt.Sprintf("%v", o.Value), o.Err)
 	}
@@ -527,29 +537,37 @@ func main() {
 
 	// --- ability: ConfigFileAbility (ConfigData → JSON 落盘 → 新 atom 重载) ---
 	if a, ok := atom.Ability("ConfigFileAbility"); ok {
-		// confine 以 cwd 为根: 绝对 Temp 路径会逃逸被拒——显式 SetRoot
-		// 到系统临时目录(与 config_file_ability_test 同模式)。
-		if s, ok := a.(interface{ SetRoot(string) }); ok {
-			s.SetRoot(os.TempDir())
-		}
-		cfgPath := filepath.Join(os.TempDir(), "fe-verify-config.json")
-		o := a.Command(atom, ability.ConfigFileCommandSave, ability.ConfigFileSaveArgs{Path: cfgPath, Overwrite: true})
-		report("ConfigFileAbility/save", cfgPath, o.Err)
-		atom2 := fasteredge.InitStandardAtom()
-		_ = fasteredge.PreRunAtom(atom2)
-		o = a.Command(atom2, ability.ConfigFileCommandLoad, ability.ConfigFileLoadArgs{Path: cfgPath, Strict: false})
-		if o.Err != nil {
-			report("ConfigFileAbility/load", "", o.Err)
-		} else if d, ok := atom2.Data("ConfigData"); ok {
-			g := d.Command(atom2, data.ConfigCommandGet, data.ConfigGetArgs{Key: "node.role"})
-			// 断言落盘→重载后值真实恢复(而非只查 Err): save/load 为 no-op
-			// 往返时 value 恒空, 只查 Err==nil 是假 PASS。
-			if g.Err != nil {
-				report("ConfigFileAbility/load-reload", "node.role", g.Err)
-			} else if v, _ := g.Value.(string); v != "edge" {
-				report("ConfigFileAbility/load-reload", fmt.Sprintf("node.role=%q", v), fmt.Errorf("reloaded value mismatch"))
-			} else {
-				report("ConfigFileAbility/load-reload", fmt.Sprintf("node.role=%v", v), nil)
+		// 私有临时目录 + 唯一文件名: 旧实现用共享 os.TempDir()+固定名
+		// fe-verify-config.json+Overwrite:true——共享 /tmp 下的预置符号链接
+		// 会被框架 os.WriteFile 跟随覆写任意可写目标(demo 已示范 MkdirTemp
+		// 安全写法); 目录唯一则链接劫持面不存在。
+		cfgDir, err := os.MkdirTemp("", "fe-verify-config-*")
+		if err != nil {
+			report("ConfigFileAbility/save", "tempdir", err)
+		} else {
+			defer os.RemoveAll(cfgDir)
+			if s, ok := a.(interface{ SetRoot(string) }); ok {
+				s.SetRoot(cfgDir)
+			}
+			cfgPath := filepath.Join(cfgDir, "fe-verify-config.json")
+			o := a.Command(atom, ability.ConfigFileCommandSave, ability.ConfigFileSaveArgs{Path: cfgPath, Overwrite: true})
+			report("ConfigFileAbility/save", cfgPath, o.Err)
+			atom2 := fasteredge.InitStandardAtom()
+			_ = fasteredge.PreRunAtom(atom2)
+			o = a.Command(atom2, ability.ConfigFileCommandLoad, ability.ConfigFileLoadArgs{Path: cfgPath, Strict: false})
+			if o.Err != nil {
+				report("ConfigFileAbility/load", "", o.Err)
+			} else if d, ok := atom2.Data("ConfigData"); ok {
+				g := d.Command(atom2, data.ConfigCommandGet, data.ConfigGetArgs{Key: "node.role"})
+				// 断言落盘→重载后值真实恢复(而非只查 Err): save/load 为 no-op
+				// 往返时 value 恒空, 只查 Err==nil 是假 PASS。
+				if g.Err != nil {
+					report("ConfigFileAbility/load-reload", "node.role", g.Err)
+				} else if v, _ := g.Value.(string); v != "edge" {
+					report("ConfigFileAbility/load-reload", fmt.Sprintf("node.role=%q", v), fmt.Errorf("reloaded value mismatch"))
+				} else {
+					report("ConfigFileAbility/load-reload", fmt.Sprintf("node.role=%v", v), nil)
+				}
 			}
 		}
 	}
@@ -581,19 +599,47 @@ func main() {
 			fmt.Printf("  [SKIP] register %s %s: %v\n", r.kind, r.name, err)
 		}
 	}
-	if err := fasteredge.PreRunAtom(extAtom); err != nil {
-		// EdgeRoleAbility(要求 role=edge) 与 CloudRoleAbility(要求 role=cloud)
-		// 在同一 atom 上必然有一个 Check 失败 —— 设计使然, 命令执行不依赖 PreRun.
-		fmt.Printf("  [NOTE] extAtom PreRun (edge+cloud 混合): %v\n", err)
-	} else {
-		ecmds := extAtom.CommandNames()
-		var ecomp []string
-		for n := range ecmds {
-			ecomp = append(ecomp, n)
-		}
-		sort.Strings(ecomp)
-		fmt.Printf("扩展后组件: %s\n", strings.Join(ecomp, ", "))
+	// ext 组件存在性清单: 与 expectedMain 同理——删掉任一扩展注册项或对应
+	// 验证段会无声消失仍 ALL PASS(旧实现只对基础 atom 有清单, 12 个扩展
+	// 能力 + 6 个 DB data 缺失无人知晓)。
+	extExpected := []string{
+		"MQTTAbility", "ModbusAbility", "EdgeRoleAbility", "CloudRoleAbility",
+		"FileTransferAbility", "AlgorithmDistributionAbility", "InfluxDBAbility", "TSNAbility",
+		"SerialAbility", "DockerAbility", "EKuiperAbility", "KubernetesAbility",
+		"InfluxDBData", "MongoDBData", "MySQLData", "PostgreSQLData", "RedisData", "SQLiteData",
 	}
+	for _, want := range extExpected {
+		if _, ok := extAtom.Ability(want); ok {
+			continue
+		}
+		if _, ok := extAtom.Data(want); ok {
+			continue
+		}
+		msg := "期望扩展组件缺失(verify 漏测面): " + want
+		fmt.Printf("  [FAIL] %s\n", msg)
+		failCount++
+		failDetails = append(failDetails, msg)
+	}
+	// extAtom 恒含 EdgeRoleAbility(要求 role=edge) 与 CloudRoleAbility
+	// (要求 role=cloud), 默认 role="" 使挂载期 Check 必有一侧失败。
+	// 旧实现只打印 [NOTE]——PreRun 意外成功时 verify 照常 ALL PASS;
+	// 该角色互斥负路径与集成 TestRoleChain 的断言对齐, 显式 FAIL 守护。
+	if err := fasteredge.PreRunAtom(extAtom); err == nil {
+		msg := "extAtom PreRun 意外成功(edge+cloud 角色互斥应失败)"
+		fmt.Printf("  [FAIL] %s\n", msg)
+		failCount++
+		failDetails = append(failDetails, msg)
+	} else {
+		fmt.Printf("  [NOTE] extAtom PreRun (edge+cloud 混合角色互斥, 预期失败): %v\n", err)
+	}
+	// 组件清单不依赖挂载——旧实现放在恒不可达的 else 分支, 移出打印。
+	ecmds := extAtom.CommandNames()
+	var ecomp []string
+	for n := range ecmds {
+		ecomp = append(ecomp, n)
+	}
+	sort.Strings(ecomp)
+	fmt.Printf("扩展后组件: %s\n", strings.Join(ecomp, ", "))
 
 	// 前置: 设 role=edge (EdgeRole 依赖), 注册 NetMap peer (FileTransfer 依赖)
 	if ra, ok := extAtom.Ability("RoleAbility"); ok {
@@ -618,7 +664,13 @@ func main() {
 		} else {
 			// broker 地址经 FE_MQTT_BROKER 注入 (容器 eth0 IP); isAcceptableBrokerURL 拒绝回环, 属安全设计
 			mqttURL := "tcp://" + brokerAddr()
-			_ = ab.Command(extAtom, ability.MQTTCommandSetBroker, ability.MQTTBrokerArgs{URL: mqttURL})
+			// set_broker 在默认回环地址下恒被拒(安全设计)——旧实现 _ = 吞错,
+			// set_broker 自身回归同样被掩盖; 无注入地址时明确 SKIP。
+			if os.Getenv("FE_MQTT_BROKER") != "" {
+				report("MQTT/set_broker", mqttURL, ab.Command(extAtom, ability.MQTTCommandSetBroker, ability.MQTTBrokerArgs{URL: mqttURL}).Err)
+			} else {
+				fmt.Printf("  [SKIP] MQTT/set_broker (默认回环地址被 isAcceptableBrokerURL 拒绝——需 FE_MQTT_BROKER)\n")
+			}
 			// 注入最小 MQTT 3.1.1 客户端 transport; 收到消息后回调 PushMessage
 			mt := newMQTTClientTransport("fe-verify-mqtt", func(msg ability.MQTTMessage) {
 				ma.PushMessage(msg)
@@ -681,7 +733,12 @@ func main() {
 				}
 				o = ab.Command(extAtom, ability.ModbusCommandReadHolding, ability.ModbusReadArgs{Address: 10, Quantity: 1})
 				if res, ok := o.Value.(ability.ModbusReadResult); ok {
-					report("Modbus/read_holding", fmt.Sprintf("regs=%v", res.Regs), o.Err)
+					// 写→读值级往返(旧实现只打印 regs——从站静默忽略写入也 PASS)
+					if len(res.Regs) != 1 || res.Regs[0] != 1234 {
+						report("Modbus/read_holding", fmt.Sprintf("regs=%v", res.Regs), fmt.Errorf("write→read mismatch: want regs[0]=1234"))
+					} else {
+						report("Modbus/read_holding", fmt.Sprintf("regs=%v", res.Regs), o.Err)
+					}
 				} else {
 					report("Modbus/read_holding", fmt.Sprintf("%v", o.Value), o.Err)
 				}
@@ -695,7 +752,11 @@ func main() {
 				}
 				o = ab.Command(extAtom, ability.ModbusCommandReadCoils, ability.ModbusReadArgs{Address: 5, Quantity: 1})
 				if res, ok := o.Value.(ability.ModbusReadResult); ok {
-					report("Modbus/read_coils", fmt.Sprintf("coils=%v", res.Coils), o.Err)
+					if len(res.Coils) != 1 || !res.Coils[0] {
+						report("Modbus/read_coils", fmt.Sprintf("coils=%v", res.Coils), fmt.Errorf("write→read mismatch: want coils[0]=true"))
+					} else {
+						report("Modbus/read_coils", fmt.Sprintf("coils=%v", res.Coils), o.Err)
+					}
 				} else {
 					report("Modbus/read_coils", fmt.Sprintf("%v", o.Value), o.Err)
 				}
@@ -708,7 +769,12 @@ func main() {
 		o := a.Command(extAtom, ability.EdgeRoleCommandSetZone, ability.EdgeRoleSetZoneArgs{Zone: "factory-a"})
 		report("EdgeRole/set_zone", "factory-a", o.Err)
 		o = a.Command(extAtom, ability.EdgeRoleCommandGetZone, nil)
-		report("EdgeRole/get_zone", fmt.Sprintf("%v", o.Value), o.Err)
+		// 断言 get_zone 反映 set_zone(旧实现只打印——set 变 no-op 也 PASS)
+		if v, _ := o.Value.(string); v != "factory-a" {
+			report("EdgeRole/get_zone", fmt.Sprintf("%v", o.Value), fmt.Errorf("get_zone mismatch: want %q", "factory-a"))
+		} else {
+			report("EdgeRole/get_zone", fmt.Sprintf("%v", o.Value), o.Err)
+		}
 		o = a.Command(extAtom, ability.EdgeRoleCommandAddCap, ability.EdgeRoleCapabilityArg{Name: "modbus"})
 		report("EdgeRole/add_capability", "modbus", o.Err)
 		o = a.Command(extAtom, ability.EdgeRoleCommandListCaps, nil)
@@ -731,7 +797,12 @@ func main() {
 		o := a.Command(extAtom, ability.CloudRoleCommandSetController, ability.CloudRoleSetControllerArgs{URL: "https://cloud-a.example.com"})
 		report("CloudRole/set_controller", "cloud-a", o.Err)
 		o = a.Command(extAtom, ability.CloudRoleCommandGetController, nil)
-		report("CloudRole/get_controller", fmt.Sprintf("%v", o.Value), o.Err)
+		// 断言 get_controller 反映 set_controller(旧实现只打印)
+		if v, _ := o.Value.(string); v != "https://cloud-a.example.com" {
+			report("CloudRole/get_controller", fmt.Sprintf("%v", o.Value), fmt.Errorf("get_controller mismatch: want %q", "https://cloud-a.example.com"))
+		} else {
+			report("CloudRole/get_controller", fmt.Sprintf("%v", o.Value), o.Err)
+		}
 		o = a.Command(extAtom, ability.CloudRoleCommandRegister, ability.CloudRoleRegisterServiceArgs{Name: "svc-1", Version: "1.0", Endpoint: "10.0.0.9:8080"})
 		report("CloudRole/register_service", "svc-1", o.Err)
 		o = a.Command(extAtom, ability.CloudRoleCommandListServices, nil)
@@ -744,8 +815,10 @@ func main() {
 
 	// FileTransferAbility (本地上传/下载; 框架不内置传输实现, 无 transport 时上传返回错误是预期)
 	if a, ok := extAtom.Ability("FileTransferAbility"); ok {
-		src := filepath.Join(os.TempDir(), "fe-src.bin")
+		// 唯一文件名: 固定名 fe-src.bin 在共享临时目录可被预置(低影响但同类)
+		src := filepath.Join(os.TempDir(), fmt.Sprintf("fe-src-%d.bin", time.Now().UnixNano()))
 		_ = os.WriteFile(src, []byte("file-transfer-payload-0123456789"), 0o644)
+		defer os.Remove(src)
 		o := a.Command(extAtom, ability.FileTransferCommandSetTarget, ability.FileTransferTargetArgs{PeerName: "peer-b"})
 		report("FileTransfer/set_target", "peer-b", o.Err)
 		o = a.Command(extAtom, ability.FileTransferCommandUpload, ability.FileTransferUploadArgs{LocalPath: src, RemotePath: "/incoming/fe-src.bin"})
@@ -754,7 +827,6 @@ func main() {
 		} else {
 			report("FileTransfer/upload", "incoming/fe-src.bin", nil)
 		}
-		_ = os.Remove(src)
 	}
 
 	// AlgDistAbility
@@ -936,12 +1008,19 @@ func main() {
 
 	// === 数据库 data 组件 (配置/秘钥存储, 无需真实数据库) ===
 	fmt.Println("\n=== 数据库 Data 组件: MySQL / PostgreSQL / SQLite / Redis / MongoDB / InfluxDB ===")
+	// dbVerify 对各 DB 组件的 configure→get_config→status→set_secret→
+	// snapshot→clear_secret 生命周期做真值验证。旧实现 6 个命令只查
+	// Err==nil——configure 丢字段、set_secret 后 SecretConfigured 不变、
+	// snapshot 泄露 secret 全部 PASS——真值断言由各调用段闭包内嵌:
+	//   - configure 闭包: configure + get_config 关键字段往返
+	//   - setSecret/clearSecret 闭包: status.SecretConfigured 迁移断言
+	//   - snapshot 闭包: JSON 序列化后不含 secret 明文
 	dbVerify := func(name string, configure, setSecret, clearSecret, getConfig, status, snapshot func() error) {
 		if err := configure(); err != nil {
-			report(name+"/configure", "", err)
+			report(name+"/configure+roundtrip", "", err)
 			return
 		}
-		report(name+"/configure", "ok", nil)
+		report(name+"/configure+roundtrip", "ok", nil)
 		if err := getConfig(); err != nil {
 			report(name+"/get_config", "", err)
 		} else {
@@ -953,50 +1032,151 @@ func main() {
 			report(name+"/status", "ok", nil)
 		}
 		if err := setSecret(); err != nil {
-			report(name+"/set_secret", "", err)
+			report(name+"/set_secret+migrate", "", err)
 		} else {
-			report(name+"/set_secret", "ok", nil)
+			report(name+"/set_secret+migrate", "ok", nil)
 		}
 		if err := snapshot(); err != nil {
-			report(name+"/snapshot", "", err)
+			report(name+"/snapshot+no-leak", "", err)
 		} else {
-			report(name+"/snapshot", "ok", nil)
+			report(name+"/snapshot+no-leak", "ok", nil)
 		}
 		if err := clearSecret(); err != nil {
-			report(name+"/clear_secret", "", err)
+			report(name+"/clear_secret+migrate", "", err)
 		} else {
-			report(name+"/clear_secret", "ok", nil)
+			report(name+"/clear_secret+migrate", "ok", nil)
 		}
 	}
 	// MySQLData
 	if d, ok := extAtom.Data("MySQLData"); ok {
 		cfg := data.SQLDatabaseConfig{Host: "db.internal.example", Port: 3306, Database: "appdb", Username: "app", TLSMode: data.DatabaseTLSDisable, ConnectTimeout: 3 * time.Second, MaxOpenConns: 10, MaxIdleConns: 5, ConnMaxLifetime: time.Hour}
+		const mySQLSecret = "mysql-secret-0123456789"
 		dbVerify("MySQLData",
 			func() error {
-				return d.Command(extAtom, data.DatabaseCommandConfigure, data.SQLDatabaseConfigureArgs{Config: cfg}).Err
+				if err := d.Command(extAtom, data.DatabaseCommandConfigure, data.SQLDatabaseConfigureArgs{Config: cfg}).Err; err != nil {
+					return err
+				}
+				// configure 后 get_config 关键字段往返(旧实现只查 Err==nil)
+				gc := d.Command(extAtom, data.DatabaseCommandGetConfig, nil)
+				if gc.Err != nil {
+					return gc.Err
+				}
+				got, ok := gc.Value.(data.SQLDatabaseConfig)
+				if !ok {
+					return fmt.Errorf("get_config returned %T (want SQLDatabaseConfig)", gc.Value)
+				}
+				if got.Host != cfg.Host || got.Port != cfg.Port || got.Database != cfg.Database || got.Username != cfg.Username {
+					return fmt.Errorf("get_config round-trip mismatch: %+v", got)
+				}
+				return nil
 			},
 			func() error {
-				return d.Command(extAtom, data.DatabaseCommandSetSecret, data.DatabaseSetSecretArgs{Secret: []byte("mysql-secret-0123456789")}).Err
+				if err := d.Command(extAtom, data.DatabaseCommandSetSecret, data.DatabaseSetSecretArgs{Secret: []byte(mySQLSecret)}).Err; err != nil {
+					return err
+				}
+				st := d.Command(extAtom, data.DatabaseCommandStatus, nil)
+				if st.Err != nil {
+					return st.Err
+				}
+				if s, ok := st.Value.(data.DatabaseStatus); !ok || !s.SecretConfigured {
+					return fmt.Errorf("status.SecretConfigured != true after set_secret (%v)", st.Value)
+				}
+				return nil
 			},
-			func() error { return d.Command(extAtom, data.DatabaseCommandClearSecret, nil).Err },
+			func() error {
+				if err := d.Command(extAtom, data.DatabaseCommandClearSecret, nil).Err; err != nil {
+					return err
+				}
+				st := d.Command(extAtom, data.DatabaseCommandStatus, nil)
+				if st.Err != nil {
+					return st.Err
+				}
+				if s, ok := st.Value.(data.DatabaseStatus); !ok || s.SecretConfigured {
+					return fmt.Errorf("status.SecretConfigured != false after clear_secret (%v)", st.Value)
+				}
+				return nil
+			},
 			func() error { return d.Command(extAtom, data.DatabaseCommandGetConfig, nil).Err },
 			func() error { return d.Command(extAtom, data.DatabaseCommandStatus, nil).Err },
-			func() error { return d.Command(extAtom, data.DatabaseCommandSnapshot, nil).Err })
+			func() error {
+				snapOut := d.Command(extAtom, data.DatabaseCommandSnapshot, nil)
+				if snapOut.Err != nil {
+					return snapOut.Err
+				}
+				raw, err := json.Marshal(snapOut.Value)
+				if err != nil {
+					return err
+				}
+				if bytes.Contains(raw, []byte(mySQLSecret)) {
+					return fmt.Errorf("snapshot JSON leaks secret")
+				}
+				return nil
+			})
 	}
 	// PostgreSQLData
 	if d, ok := extAtom.Data("PostgreSQLData"); ok {
 		cfg := data.SQLDatabaseConfig{Host: "pg.internal.example", Port: 5432, Database: "appdb", Username: "app", TLSMode: data.DatabaseTLSPrefer, ConnectTimeout: 3 * time.Second, MaxOpenConns: 10, MaxIdleConns: 5, ConnMaxLifetime: time.Hour}
+		const pgSecret = "pg-secret-0123456789"
 		dbVerify("PostgreSQLData",
 			func() error {
-				return d.Command(extAtom, data.DatabaseCommandConfigure, data.SQLDatabaseConfigureArgs{Config: cfg}).Err
+				if err := d.Command(extAtom, data.DatabaseCommandConfigure, data.SQLDatabaseConfigureArgs{Config: cfg}).Err; err != nil {
+					return err
+				}
+				gc := d.Command(extAtom, data.DatabaseCommandGetConfig, nil)
+				if gc.Err != nil {
+					return gc.Err
+				}
+				got, ok := gc.Value.(data.SQLDatabaseConfig)
+				if !ok {
+					return fmt.Errorf("get_config returned %T (want SQLDatabaseConfig)", gc.Value)
+				}
+				if got.Host != cfg.Host || got.Port != cfg.Port || got.Database != cfg.Database || got.Username != cfg.Username {
+					return fmt.Errorf("get_config round-trip mismatch: %+v", got)
+				}
+				return nil
 			},
 			func() error {
-				return d.Command(extAtom, data.DatabaseCommandSetSecret, data.DatabaseSetSecretArgs{Secret: []byte("pg-secret-0123456789")}).Err
+				if err := d.Command(extAtom, data.DatabaseCommandSetSecret, data.DatabaseSetSecretArgs{Secret: []byte(pgSecret)}).Err; err != nil {
+					return err
+				}
+				st := d.Command(extAtom, data.DatabaseCommandStatus, nil)
+				if st.Err != nil {
+					return st.Err
+				}
+				if s, ok := st.Value.(data.DatabaseStatus); !ok || !s.SecretConfigured {
+					return fmt.Errorf("status.SecretConfigured != true after set_secret (%v)", st.Value)
+				}
+				return nil
 			},
-			func() error { return d.Command(extAtom, data.DatabaseCommandClearSecret, nil).Err },
+			func() error {
+				if err := d.Command(extAtom, data.DatabaseCommandClearSecret, nil).Err; err != nil {
+					return err
+				}
+				st := d.Command(extAtom, data.DatabaseCommandStatus, nil)
+				if st.Err != nil {
+					return st.Err
+				}
+				if s, ok := st.Value.(data.DatabaseStatus); !ok || s.SecretConfigured {
+					return fmt.Errorf("status.SecretConfigured != false after clear_secret (%v)", st.Value)
+				}
+				return nil
+			},
 			func() error { return d.Command(extAtom, data.DatabaseCommandGetConfig, nil).Err },
 			func() error { return d.Command(extAtom, data.DatabaseCommandStatus, nil).Err },
-			func() error { return d.Command(extAtom, data.DatabaseCommandSnapshot, nil).Err })
+			func() error {
+				snapOut := d.Command(extAtom, data.DatabaseCommandSnapshot, nil)
+				if snapOut.Err != nil {
+					return snapOut.Err
+				}
+				raw, err := json.Marshal(snapOut.Value)
+				if err != nil {
+					return err
+				}
+				if bytes.Contains(raw, []byte(pgSecret)) {
+					return fmt.Errorf("snapshot JSON leaks secret")
+				}
+				return nil
+			})
 	}
 	// SQLiteData (本地文件, 无秘钥: ListCommands 不含 set_secret/clear_secret)
 	if d, ok := extAtom.Data("SQLiteData"); ok {
@@ -1025,47 +1205,197 @@ func main() {
 	// RedisData
 	if d, ok := extAtom.Data("RedisData"); ok {
 		cfg := data.RedisConfig{Addresses: []string{"redis.internal.example:6379"}, DB: 0, DialTimeout: 3 * time.Second, ReadTimeout: 3 * time.Second, WriteTimeout: 3 * time.Second, PoolSize: 8}
+		const redisSecret = "redis-secret-0123456789"
 		dbVerify("RedisData",
 			func() error {
-				return d.Command(extAtom, data.DatabaseCommandConfigure, data.RedisConfigureArgs{Config: cfg}).Err
+				if err := d.Command(extAtom, data.DatabaseCommandConfigure, data.RedisConfigureArgs{Config: cfg}).Err; err != nil {
+					return err
+				}
+				gc := d.Command(extAtom, data.DatabaseCommandGetConfig, nil)
+				if gc.Err != nil {
+					return gc.Err
+				}
+				got, ok := gc.Value.(data.RedisConfig)
+				if !ok {
+					return fmt.Errorf("get_config returned %T (want RedisConfig)", gc.Value)
+				}
+				if len(got.Addresses) != len(cfg.Addresses) || got.Addresses[0] != cfg.Addresses[0] || got.DB != cfg.DB {
+					return fmt.Errorf("get_config round-trip mismatch: %+v", got)
+				}
+				return nil
 			},
 			func() error {
-				return d.Command(extAtom, data.DatabaseCommandSetSecret, data.DatabaseSetSecretArgs{Secret: []byte("redis-secret-0123456789")}).Err
+				if err := d.Command(extAtom, data.DatabaseCommandSetSecret, data.DatabaseSetSecretArgs{Secret: []byte(redisSecret)}).Err; err != nil {
+					return err
+				}
+				st := d.Command(extAtom, data.DatabaseCommandStatus, nil)
+				if st.Err != nil {
+					return st.Err
+				}
+				if s, ok := st.Value.(data.DatabaseStatus); !ok || !s.SecretConfigured {
+					return fmt.Errorf("status.SecretConfigured != true after set_secret (%v)", st.Value)
+				}
+				return nil
 			},
-			func() error { return d.Command(extAtom, data.DatabaseCommandClearSecret, nil).Err },
+			func() error {
+				if err := d.Command(extAtom, data.DatabaseCommandClearSecret, nil).Err; err != nil {
+					return err
+				}
+				st := d.Command(extAtom, data.DatabaseCommandStatus, nil)
+				if st.Err != nil {
+					return st.Err
+				}
+				if s, ok := st.Value.(data.DatabaseStatus); !ok || s.SecretConfigured {
+					return fmt.Errorf("status.SecretConfigured != false after clear_secret (%v)", st.Value)
+				}
+				return nil
+			},
 			func() error { return d.Command(extAtom, data.DatabaseCommandGetConfig, nil).Err },
 			func() error { return d.Command(extAtom, data.DatabaseCommandStatus, nil).Err },
-			func() error { return d.Command(extAtom, data.DatabaseCommandSnapshot, nil).Err })
+			func() error {
+				snapOut := d.Command(extAtom, data.DatabaseCommandSnapshot, nil)
+				if snapOut.Err != nil {
+					return snapOut.Err
+				}
+				raw, err := json.Marshal(snapOut.Value)
+				if err != nil {
+					return err
+				}
+				if bytes.Contains(raw, []byte(redisSecret)) {
+					return fmt.Errorf("snapshot JSON leaks secret")
+				}
+				return nil
+			})
 	}
 	// MongoDBData
 	if d, ok := extAtom.Data("MongoDBData"); ok {
 		cfg := data.MongoDBConfig{Hosts: []string{"mongo.internal.example:27017"}, Database: "appdb", Username: "app", ConnectTimeout: 3 * time.Second, ServerSelectionTimeout: 3 * time.Second}
+		const mongoSecret = "mongo-secret-0123456789"
 		dbVerify("MongoDBData",
 			func() error {
-				return d.Command(extAtom, data.DatabaseCommandConfigure, data.MongoDBConfigureArgs{Config: cfg}).Err
+				if err := d.Command(extAtom, data.DatabaseCommandConfigure, data.MongoDBConfigureArgs{Config: cfg}).Err; err != nil {
+					return err
+				}
+				gc := d.Command(extAtom, data.DatabaseCommandGetConfig, nil)
+				if gc.Err != nil {
+					return gc.Err
+				}
+				got, ok := gc.Value.(data.MongoDBConfig)
+				if !ok {
+					return fmt.Errorf("get_config returned %T (want MongoDBConfig)", gc.Value)
+				}
+				if len(got.Hosts) != len(cfg.Hosts) || got.Hosts[0] != cfg.Hosts[0] || got.Database != cfg.Database {
+					return fmt.Errorf("get_config round-trip mismatch: %+v", got)
+				}
+				return nil
 			},
 			func() error {
-				return d.Command(extAtom, data.DatabaseCommandSetSecret, data.DatabaseSetSecretArgs{Secret: []byte("mongo-secret-0123456789")}).Err
+				if err := d.Command(extAtom, data.DatabaseCommandSetSecret, data.DatabaseSetSecretArgs{Secret: []byte(mongoSecret)}).Err; err != nil {
+					return err
+				}
+				st := d.Command(extAtom, data.DatabaseCommandStatus, nil)
+				if st.Err != nil {
+					return st.Err
+				}
+				if s, ok := st.Value.(data.DatabaseStatus); !ok || !s.SecretConfigured {
+					return fmt.Errorf("status.SecretConfigured != true after set_secret (%v)", st.Value)
+				}
+				return nil
 			},
-			func() error { return d.Command(extAtom, data.DatabaseCommandClearSecret, nil).Err },
+			func() error {
+				if err := d.Command(extAtom, data.DatabaseCommandClearSecret, nil).Err; err != nil {
+					return err
+				}
+				st := d.Command(extAtom, data.DatabaseCommandStatus, nil)
+				if st.Err != nil {
+					return st.Err
+				}
+				if s, ok := st.Value.(data.DatabaseStatus); !ok || s.SecretConfigured {
+					return fmt.Errorf("status.SecretConfigured != false after clear_secret (%v)", st.Value)
+				}
+				return nil
+			},
 			func() error { return d.Command(extAtom, data.DatabaseCommandGetConfig, nil).Err },
 			func() error { return d.Command(extAtom, data.DatabaseCommandStatus, nil).Err },
-			func() error { return d.Command(extAtom, data.DatabaseCommandSnapshot, nil).Err })
+			func() error {
+				snapOut := d.Command(extAtom, data.DatabaseCommandSnapshot, nil)
+				if snapOut.Err != nil {
+					return snapOut.Err
+				}
+				raw, err := json.Marshal(snapOut.Value)
+				if err != nil {
+					return err
+				}
+				if bytes.Contains(raw, []byte(mongoSecret)) {
+					return fmt.Errorf("snapshot JSON leaks secret")
+				}
+				return nil
+			})
 	}
 	// InfluxDBData (endpoint 拒绝 IP/回环, 用域名)
 	if d, ok := extAtom.Data("InfluxDBData"); ok {
 		cfg := data.InfluxDBConfig{Endpoint: "http://influx.internal.example:8086", Org: "feorg", Bucket: "telemetry", Timeout: 3 * time.Second}
+		const influxSecret = "influx-token-0123456789"
 		dbVerify("InfluxDBData",
 			func() error {
-				return d.Command(extAtom, data.DatabaseCommandConfigure, data.InfluxDBConfigureArgs{Config: cfg}).Err
+				if err := d.Command(extAtom, data.DatabaseCommandConfigure, data.InfluxDBConfigureArgs{Config: cfg}).Err; err != nil {
+					return err
+				}
+				gc := d.Command(extAtom, data.DatabaseCommandGetConfig, nil)
+				if gc.Err != nil {
+					return gc.Err
+				}
+				got, ok := gc.Value.(data.InfluxDBConfig)
+				if !ok {
+					return fmt.Errorf("get_config returned %T (want InfluxDBConfig)", gc.Value)
+				}
+				if got.Endpoint != cfg.Endpoint || got.Org != cfg.Org || got.Bucket != cfg.Bucket {
+					return fmt.Errorf("get_config round-trip mismatch: %+v", got)
+				}
+				return nil
 			},
 			func() error {
-				return d.Command(extAtom, data.DatabaseCommandSetSecret, data.DatabaseSetSecretArgs{Secret: []byte("influx-token-0123456789")}).Err
+				if err := d.Command(extAtom, data.DatabaseCommandSetSecret, data.DatabaseSetSecretArgs{Secret: []byte(influxSecret)}).Err; err != nil {
+					return err
+				}
+				st := d.Command(extAtom, data.DatabaseCommandStatus, nil)
+				if st.Err != nil {
+					return st.Err
+				}
+				if s, ok := st.Value.(data.DatabaseStatus); !ok || !s.SecretConfigured {
+					return fmt.Errorf("status.SecretConfigured != true after set_secret (%v)", st.Value)
+				}
+				return nil
 			},
-			func() error { return d.Command(extAtom, data.DatabaseCommandClearSecret, nil).Err },
+			func() error {
+				if err := d.Command(extAtom, data.DatabaseCommandClearSecret, nil).Err; err != nil {
+					return err
+				}
+				st := d.Command(extAtom, data.DatabaseCommandStatus, nil)
+				if st.Err != nil {
+					return st.Err
+				}
+				if s, ok := st.Value.(data.DatabaseStatus); !ok || s.SecretConfigured {
+					return fmt.Errorf("status.SecretConfigured != false after clear_secret (%v)", st.Value)
+				}
+				return nil
+			},
 			func() error { return d.Command(extAtom, data.DatabaseCommandGetConfig, nil).Err },
 			func() error { return d.Command(extAtom, data.DatabaseCommandStatus, nil).Err },
-			func() error { return d.Command(extAtom, data.DatabaseCommandSnapshot, nil).Err })
+			func() error {
+				snapOut := d.Command(extAtom, data.DatabaseCommandSnapshot, nil)
+				if snapOut.Err != nil {
+					return snapOut.Err
+				}
+				raw, err := json.Marshal(snapOut.Value)
+				if err != nil {
+					return err
+				}
+				if bytes.Contains(raw, []byte(influxSecret)) {
+					return fmt.Errorf("snapshot JSON leaks secret")
+				}
+				return nil
+			})
 	}
 
 	// --- data: KeyringData (OneKeyAbility 依赖的基础; 直接验证 set_secret/rotate/状态) ---
@@ -1076,13 +1406,22 @@ func main() {
 		report("KeyringData/status", fmt.Sprintf("%v", o.Value), o.Err)
 		o = d.Command(atom, data.KeyringCommandListTokens, nil)
 		report("KeyringData/list_tokens", fmt.Sprintf("%v", o.Value), o.Err)
+		// 记录轮换前的令牌四元组, 供 rotate 后断言旧签名失效
+		issueOut := d.Command(atom, data.KeyringCommandIssueToken, data.KeyringIssueTokenArgs{Subject: "pre-rotate", TTL: time.Hour})
+		report("KeyringData/issue_token", "pre-rotate", issueOut.Err)
 		o = d.Command(atom, data.KeyringCommandRotate, nil)
 		report("KeyringData/rotate", "rotate", o.Err)
-		// 轮换后旧令牌应失效(verify 应拒绝)
-		o = d.Command(atom, data.KeyringCommandIssueToken, data.KeyringIssueTokenArgs{Subject: "pre-rotate", TTL: time.Hour})
-		report("KeyringData/issue_token", "pre-rotate", o.Err)
-		o = d.Command(atom, data.KeyringCommandRotate, nil)
-		report("KeyringData/rotate-after-issue", "rotate", o.Err)
+		kr := d.(*data.KeyringData)
+		if preRotate, ok := issueOut.Value.(*data.KeyringToken); ok {
+			// 轮换后旧令牌签名必须失效(旧实现是空头注释——只有 rotate→issue→
+			// rotate→revoke_all 四个 Err-only 调用, 无任何校验; 且 rotate 清空
+			// 令牌表后 revoke_all 恒吊销 0 个, 恒 PASS)。
+			if kr.Verify(preRotate.Subject, preRotate.IssuedAt, preRotate.ExpiresAt, kr.Sign(preRotate)) {
+				report("KeyringData/rotate-invalidates-old", "old token must be rejected", fmt.Errorf("old token still verifies after rotate"))
+			} else {
+				report("KeyringData/rotate-invalidates-old", "old token rejected after rotate", nil)
+			}
+		}
 		o = d.Command(atom, data.KeyringCommandRevokeAll, nil)
 		report("KeyringData/revoke_all", "revoke_all", o.Err)
 	}

@@ -150,7 +150,17 @@ func (n *NetMapData) Command(_ *types.Atom, act string, args any) types.CommandO
 		}
 		n.mu.Lock()
 		n.refreshInterfacesLocked()
-		ifaces := append([]NetMapInterface(nil), n.interfaces...)
+		// 旧实现浅拷贝 slice 头(append([]NetMapInterface(nil), ...)): IPv4
+		// 与内部共享底层数组, 调用方改写返回值会与并发 Snapshot() 构成数据
+		// 竞争——与 snapshot() 的深拷贝纪律保持一致。
+		ifaces := make([]NetMapInterface, len(n.interfaces))
+		for i, iface := range n.interfaces {
+			ifaces[i] = NetMapInterface{
+				Name: iface.Name,
+				MAC:  iface.MAC,
+				IPv4: append([]string(nil), iface.IPv4...),
+			}
+		}
 		n.mu.Unlock()
 		return types.CommandOutput{Name: act, Value: ifaces}
 	case NetMapCommandSetDefaultIface:

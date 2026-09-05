@@ -35,6 +35,27 @@ func TestAtomRejectsInvalidAndDuplicateComponents(t *testing.T) {
 	}
 }
 
+// TestAddAbilityRejectedDuringTransition 回归: AddAbility 旧实现只查
+// state != AtomCreated, 缺 transitioning 守卫(与 addData/RemoveData/
+// RemoveAbility 不对称)——MountAll 挂载循环(锁外, transitioning=true)
+// 期间并发 AddAbility 可成功改写 abilities map, "已注册但从未 Check/Mount"
+// 地进入 AtomMounted 状态。
+func TestAddAbilityRejectedDuringTransition(t *testing.T) {
+	a := &Atom{}
+	if err := a.AddData(&testComponent{name: "base"}); err != nil {
+		t.Fatal(err)
+	}
+	a.transitioning = true
+	if err := a.AddAbility(&testComponent{name: "late"}); !errors.Is(err, ErrInvalidState) {
+		t.Fatalf("add ability during transition = %v, want ErrInvalidState", err)
+	}
+	a.transitioning = false
+	// 转移结束后恢复正常注册
+	if err := a.AddAbility(&testComponent{name: "late"}); err != nil {
+		t.Fatalf("add ability after transition: %v", err)
+	}
+}
+
 func TestAtomSnapshotsAndConcurrentAdd(t *testing.T) {
 	a := &Atom{}
 	var wg sync.WaitGroup

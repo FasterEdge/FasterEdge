@@ -277,3 +277,28 @@ func TestCmdAbilityRejectsMissingDependency(t *testing.T) {
 		t.Fatalf("missing deps error = %v", out.Err)
 	}
 }
+
+// TestCmdAllowlistArgsPrefixIsolation 回归: SetAllowlist/allowlistSnapshot
+// 旧实现与调用方切片共享 ArgsPrefix 底层数组——调用方 set 后改切片元素会
+// 无锁改写白名单(数据竞争 + 可绕过参数前缀约束), 返回值同样可污染内部。
+func TestCmdAllowlistArgsPrefixIsolation(t *testing.T) {
+	c := NewCmdAbility()
+	prefix := []string{"--input"}
+	// set 后改入参: 不应影响内部条目(旧实现共享底层数组, 此处会改写)
+	c.SetAllowlist([]CmdAllowlistEntry{{Name: "tool", ArgsPrefix: prefix}})
+	prefix[0] = "--output"
+	snap := c.allowlistSnapshot()
+	if len(snap) != 1 || len(snap[0].ArgsPrefix) != 1 || snap[0].ArgsPrefix[0] != "--input" {
+		t.Fatalf("set-then-mutate leaked into internal allowlist: %+v", snap)
+	}
+	// snapshot 返回值改元素: 不应影响内部(并发 matchAllowlist 安全)
+	snap[0].ArgsPrefix[0] = "EVIL"
+	snap2 := c.allowlistSnapshot()
+	if snap2[0].ArgsPrefix[0] != "--input" {
+		t.Fatalf("mutating snapshot leaked into internal allowlist: %+v", snap2)
+	}
+	// 匹配面仍按内部值工作
+	if _, ok := c.matchAllowlist("tool", []string{"--input"}); !ok {
+		t.Fatalf("matchAllowlist should still accept --input")
+	}
+}

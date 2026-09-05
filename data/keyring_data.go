@@ -24,6 +24,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/FasterEdge/FasterEdge/types"
 )
@@ -201,6 +202,12 @@ func (k *KeyringData) IssueToken(subject string, ttl time.Duration) (*KeyringTok
 	subject = strings.TrimSpace(subject)
 	if subject == "" {
 		return nil, fmt.Errorf("issue token: %w", types.ErrInvalidArguments)
+	}
+	// 非 UTF-8 subject 经快照 JSON 落盘会静默腐蚀为 U+FFFD, 往返后
+	// LookupToken/Verify 失效、腐蚀重合还会触发 duplicate subject 整盘拒载
+	// ——签发即拒绝(与 ConfigData 值校验一致)。
+	if !utf8.ValidString(subject) {
+		return nil, fmt.Errorf("issue token: subject is not valid UTF-8: %w", types.ErrInvalidArguments)
 	}
 	if ttl <= 0 {
 		ttl = k.defaultTokenTTL
@@ -548,19 +555,24 @@ func (k *KeyringData) LoadSnapshot(path string) error {
 		return fmt.Errorf("keyring snapshot: secret too short (%d bytes, need >= 16)", len(secret))
 	}
 	tokens := make(map[string]*KeyringToken, len(snap.Tokens))
-	now := time.Now()
 	for i := range snap.Tokens {
 		tok := snap.Tokens[i]
 		if strings.TrimSpace(tok.Subject) == "" {
 			return fmt.Errorf("keyring snapshot: tokens[%d] has empty subject", i)
 		}
-		// 时间窗校验: 签发时间非零、过期晚于签发、且不超未来 maxTokenTTL
-		// (旧实现接受 9999 年的"永久"令牌, 绕过签发路径的 TTL 上限)。
+		if !utf8.ValidString(tok.Subject) {
+			return fmt.Errorf("keyring snapshot: tokens[%d] subject is not valid UTF-8", i)
+		}
+		// 时间窗校验: 签发时间非零、过期晚于签发、且 TTL 窗不超 maxTokenTTL。
+		// 旧实现锚定加载时刻墙上时钟(now.Add(maxTokenTTL)): RTC 回拨(边缘
+		// 设备时钟复位/NTP 向后纠正)后, 自身 SaveSnapshot 产出的合法快照
+		// (如 30 天 TTL 的新令牌)会因"过期时间晚于 now+30d"被整体拒载——
+		// 含 secret, 节点拒启。TTL 窗与时钟无关, 同样能挡伪永久令牌。
 		if tok.IssuedAt.IsZero() || !tok.ExpiresAt.After(tok.IssuedAt) {
 			return fmt.Errorf("keyring snapshot: tokens[%d] has invalid time window", i)
 		}
-		if tok.ExpiresAt.After(now.Add(maxTokenTTL)) {
-			return fmt.Errorf("keyring snapshot: tokens[%d] expires beyond max ttl", i)
+		if tok.ExpiresAt.Sub(tok.IssuedAt) > maxTokenTTL {
+			return fmt.Errorf("keyring snapshot: tokens[%d] ttl exceeds max %s", i, maxTokenTTL)
 		}
 		if _, exists := tokens[tok.Subject]; exists {
 			return fmt.Errorf("keyring snapshot: duplicate subject %q", tok.Subject)

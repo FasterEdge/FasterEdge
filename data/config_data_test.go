@@ -163,3 +163,22 @@ func TestConfigDataLimits(t *testing.T) {
 		t.Fatalf("overflow key error = %v", err)
 	}
 }
+
+// TestConfigDataRejectsNonUTF8Value 回归: 非 UTF-8 值经 ConfigFileAbility
+// save(JSON 落盘)会静默腐蚀为 U+FFFD, 往返丢数据——Set/ReplaceAll 即拒绝。
+func TestConfigDataRejectsNonUTF8Value(t *testing.T) {
+	c := NewConfigData()
+	if err := c.Set("k", string([]byte{0xff, 0xfe})); !errors.Is(err, types.ErrInvalidArguments) {
+		t.Fatalf("non-utf8 set error = %v", err)
+	}
+	if err := c.ReplaceAll(map[string]string{"k": string([]byte{0xc3, 0x28})}); !errors.Is(err, types.ErrInvalidArguments) {
+		t.Fatalf("non-utf8 replace error = %v", err)
+	}
+	// 合法 UTF-8(含多字节)正常
+	if err := c.Set("k", "值-1"); err != nil {
+		t.Fatalf("utf-8 set: %v", err)
+	}
+	if v, _ := c.Get("k"); v != "值-1" {
+		t.Fatalf("get = %q", v)
+	}
+}

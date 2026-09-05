@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/FasterEdge/FasterEdge/types"
 )
@@ -62,6 +63,11 @@ func (c *ConfigData) Set(key, value string) error {
 	if len(value) > maxConfigValueBytes {
 		return fmt.Errorf("config: value for %q exceeds %d bytes: %w", key, maxConfigValueBytes, types.ErrInvalidArguments)
 	}
+	// 非 UTF-8 值经 ConfigFileAbility save(JSON 落盘)会静默腐蚀为 U+FFFD,
+	// 往返丢数据——Set 即拒绝, 与键字符集校验一致。
+	if !utf8.ValidString(value) {
+		return fmt.Errorf("config: value for %q is not valid UTF-8: %w", key, types.ErrInvalidArguments)
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if _, exists := c.values[key]; !exists && len(c.values) >= maxConfigKeys {
@@ -107,6 +113,9 @@ func (c *ConfigData) ReplaceAll(values map[string]string) error {
 		}
 		if len(v) > maxConfigValueBytes {
 			return fmt.Errorf("config: value for %q exceeds %d bytes: %w", k, maxConfigValueBytes, types.ErrInvalidArguments)
+		}
+		if !utf8.ValidString(v) {
+			return fmt.Errorf("config: value for %q is not valid UTF-8: %w", k, types.ErrInvalidArguments)
 		}
 		normalized[k] = v
 	}

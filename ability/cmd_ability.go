@@ -221,6 +221,9 @@ func (c *CmdAbility) SetAllowlist(entries []CmdAllowlistEntry) {
 			continue
 		}
 		e.Name = name
+		// 深拷贝 ArgsPrefix: 旧实现与调用方切片共享底层数组——调用方 set 后
+		// 修改切片元素会无锁改写白名单(数据竞争 + 可绕过参数前缀约束)。
+		e.ArgsPrefix = append([]string(nil), e.ArgsPrefix...)
 		c.allowlist[name] = e
 	}
 }
@@ -317,6 +320,9 @@ func (c *CmdAbility) allowlistSnapshot() []CmdAllowlistEntry {
 	c.mu.RLock()
 	out := make([]CmdAllowlistEntry, 0, len(c.allowlist))
 	for _, e := range c.allowlist {
+		// 深拷贝 ArgsPrefix(与 SetAllowlist 对称): 返回值不得与内部 map
+		// 共享底层数组, 否则调用方改写会与并发 matchAllowlist 数据竞争。
+		e.ArgsPrefix = append([]string(nil), e.ArgsPrefix...)
 		out = append(out, e)
 	}
 	c.mu.RUnlock()
@@ -367,7 +373,9 @@ func (c *CmdAbility) runSync(a CmdRunArgs) types.CommandOutput {
 
 	jobID := c.nextJobID()
 	job := &CmdJob{JobID: jobID, Name: a.Name, Args: append([]string(nil), a.Args...), Started: time.Now(), cancel: cancel, done: make(chan struct{})}
-	c.registerJob(job)
+	if err := c.registerJob(job); err != nil {
+		return types.CommandOutput{Name: CmdCommandRun, Err: fmt.Errorf("%s: %w", CmdCommandRun, err)}
+	}
 
 	exitCode, stdout, stderr, truncated := c.execOnce(ctx, a.Name, a.Args, a.Env)
 	c.mu.Lock()
@@ -463,7 +471,11 @@ func (c *CmdAbility) startAsync(a CmdRunArgs) types.CommandOutput {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	jobID := c.nextJobID()
 	job := &CmdJob{JobID: jobID, Name: a.Name, Args: append([]string(nil), a.Args...), Started: time.Now(), cancel: cancel, done: make(chan struct{})}
-	c.registerJob(job)
+	if err := c.registerJob(job); err != nil {
+		// 登记被 closing 拒绝: goroutine 不会启动, 手动回滚并发计数
+		c.running.Add(-1)
+		return types.CommandOutput{Name: CmdCommandStart, Err: fmt.Errorf("%s: %w", CmdCommandStart, err)}
+	}
 	go func() {
 		defer c.running.Add(-1)
 		exitCode, stdout, stderr, truncated := c.execOnce(ctx, a.Name, a.Args, a.Env)
@@ -586,10 +598,17 @@ func (c *CmdAbility) nextJobID() string {
 	return fmt.Sprintf("job-%d", c.jobSeq.Add(1))
 }
 
-func (c *CmdAbility) registerJob(j *CmdJob) {
+// registerJob 在锁内复查 closing 并登记。旧实现由调用方先 rejectIfClosing
+// (放锁)再登记——并发 Unmount 可夹在中间完成 beginShutdown+快照, 新 job
+// 不在快照内、不被 cancel/等待, 子进程逃逸关闭。closing 判定与登记必须原子。
+func (c *CmdAbility) registerJob(j *CmdJob) error {
 	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closing {
+		return cmdClosingError
+	}
 	c.jobs[j.JobID] = j
-	c.mu.Unlock()
+	return nil
 }
 
 func (j *CmdJob) publicView() CmdJob {

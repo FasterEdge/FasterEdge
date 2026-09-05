@@ -195,7 +195,7 @@ func (s *SerialAbility) Command(atom *types.Atom, act string, args any) types.Co
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: no transport set: %w", act, types.ErrInvalidArguments)}
 		}
 		if err := transport.Open(port, typed.Config); err != nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: open: %w: %v", act, types.ErrInvalidArguments, err)}
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: open: %w: %w", act, types.ErrOperationFailed, err)}
 		}
 		s.mu.Lock()
 		// 双开防护: 两个并发 open 同端口时 transport.Open 可双双成功,
@@ -218,23 +218,27 @@ func (s *SerialAbility) Command(atom *types.Atom, act string, args any) types.Co
 		transport := s.transport
 		_, open := s.openPorts[port]
 		closing := s.closing
-		s.mu.Unlock()
 		if !open {
+			s.mu.Unlock()
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: port %q not open: %w", act, port, types.ErrInvalidArguments)}
 		}
 		if closing {
+			s.mu.Unlock()
 			// Unmount 已接管清理, 拒绝并发 close(避免与 Unmount 的
 			// 快照后 Close 竞态)。
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: ability is closing: %w", act, types.ErrInvalidArguments)}
 		}
-		if transport != nil {
-			if err := transport.Close(port); err != nil {
-				return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: close: %w: %v", act, types.ErrInvalidArguments, err)}
-			}
-		}
-		s.mu.Lock()
+		// 锁内先删除记录再锁外 Close: 保证同一端口在能力内只被 Close 一次
+		// ——Unmount 的快照(锁内置 closing 后)不再包含本端口, 命令侧 Close
+		// 与 Unmount 不会并发双 Close(旧实现先放锁再 Close, Unmount 可夹在
+		// 中间对同一端口双 Close, 串口驱动行为未定义)。
 		delete(s.openPorts, port)
 		s.mu.Unlock()
+		if transport != nil {
+			if err := transport.Close(port); err != nil {
+				return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: close: %w: %w", act, types.ErrOperationFailed, err)}
+			}
+		}
 		return types.CommandOutput{Name: act, Value: port}
 	case SerialCommandIsOpen:
 		typed, ok := args.(SerialPortArg)
@@ -270,7 +274,7 @@ func (s *SerialAbility) Command(atom *types.Atom, act string, args any) types.Co
 		}
 		n, err := transport.Write(port, data)
 		if err != nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: write: %w: %v", act, types.ErrInvalidArguments, err)}
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: write: %w: %w", act, types.ErrOperationFailed, err)}
 		}
 		return types.CommandOutput{Name: act, Value: n}
 	case SerialCommandRead:
@@ -303,7 +307,7 @@ func (s *SerialAbility) Command(atom *types.Atom, act string, args any) types.Co
 		}
 		buf, err := transport.Read(port, typed.Length, typed.Timeout)
 		if err != nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: read: %w: %v", act, types.ErrInvalidArguments, err)}
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: read: %w: %w", act, types.ErrOperationFailed, err)}
 		}
 		return types.CommandOutput{Name: act, Value: buf}
 	case SerialCommandSetConfig:
@@ -330,10 +334,17 @@ func (s *SerialAbility) Command(atom *types.Atom, act string, args any) types.Co
 		// (旧实现只更新本地记录, 硬件仍按旧配置运行)。
 		if transport != nil {
 			if err := transport.ApplyConfig(port, typed.Config); err != nil {
-				return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: apply config: %w: %v", act, types.ErrInvalidArguments, err)}
+				return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: apply config: %w: %w", act, types.ErrOperationFailed, err)}
 			}
 		}
 		s.mu.Lock()
+		// 复查端口仍打开且未 closing: 旧实现 ApplyConfig(锁外)后直接回写——
+		// 并发 Unmount 关端口后会把已关闭端口重新登记进 openPorts, 陈旧条目
+		// 导致后续 write 全部失败、端口记录泄漏。
+		if _, stillOpen := s.openPorts[port]; !stillOpen || s.closing {
+			s.mu.Unlock()
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: port %q closed while applying config: %w", act, port, types.ErrOperationFailed)}
+		}
 		s.openPorts[port] = typed.Config
 		s.mu.Unlock()
 		return types.CommandOutput{Name: act, Value: typed.Config}
@@ -362,7 +373,7 @@ func (s *SerialAbility) Command(atom *types.Atom, act string, args any) types.Co
 		}
 		ports, err := lister.ListPorts()
 		if err != nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: list: %w: %v", act, types.ErrInvalidArguments, err)}
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: list: %w: %w", act, types.ErrOperationFailed, err)}
 		}
 		return types.CommandOutput{Name: act, Value: ports}
 	}
