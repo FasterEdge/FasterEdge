@@ -30,8 +30,8 @@ const (
 	// influxMaxPoints/influxMaxSeries/influxMaxFields 是写路径的资源上限:
 	// 旧实现 points/fields/measurement 均无约束, series map 无界增长——
 	// 认证边界内的 DoS/内存膨胀面。
-	influxMaxPoints        = 1024
-	influxMaxSeries        = 1024
+	influxMaxPoints         = 1024
+	influxMaxSeries         = 1024
 	influxMaxFieldsPerPoint = 256
 )
 
@@ -69,9 +69,14 @@ type InfluxAbility struct {
 	lastRevision uint64
 }
 
-func NewInfluxAbility() *InfluxAbility                  { return &InfluxAbility{series: map[string]struct{}{}} }
-func (i *InfluxAbility) SetTransport(t InfluxTransport) { i.mu.Lock(); i.transport = t; i.lastRevision = 0; i.mu.Unlock() }
-func (i *InfluxAbility) GetName() string                { return "InfluxDBAbility" }
+func NewInfluxAbility() *InfluxAbility { return &InfluxAbility{series: map[string]struct{}{}} }
+func (i *InfluxAbility) SetTransport(t InfluxTransport) {
+	i.mu.Lock()
+	i.transport = t
+	i.lastRevision = 0
+	i.mu.Unlock()
+}
+func (i *InfluxAbility) GetName() string { return "InfluxDBAbility" }
 func (i *InfluxAbility) Describe() string {
 	return "InfluxDBAbility通过InfluxDBData读取连接配置与Token，并执行时序数据库操作。"
 }

@@ -449,11 +449,11 @@ func main() {
 			} else {
 				report("CmdAbility/run", fmt.Sprintf("exit=%d out=%q", res.ExitCode, res.Stdout), nil)
 			}
-			} else if o.Err != nil {
-				report("CmdAbility/run", fmt.Sprintf("%v", o.Value), o.Err)
-			} else {
-				report("CmdAbility/run", fmt.Sprintf("%v", o.Value), fmt.Errorf("run returned %T (want ability.CmdResult)", o.Value))
-			}
+		} else if o.Err != nil {
+			report("CmdAbility/run", fmt.Sprintf("%v", o.Value), o.Err)
+		} else {
+			report("CmdAbility/run", fmt.Sprintf("%v", o.Value), fmt.Errorf("run returned %T (want ability.CmdResult)", o.Value))
+		}
 	}
 
 	// --- ability: ShAbility (白名单: 允许 printf, 拒绝 rm) ---
@@ -471,11 +471,11 @@ func main() {
 			} else {
 				report("ShAbility/run-allow", fmt.Sprintf("exit=%d out=%q", res.ExitCode, res.Stdout), nil)
 			}
-			} else if o.Err != nil {
-				report("ShAbility/run-allow", fmt.Sprintf("%v", o.Value), o.Err)
-			} else {
-				report("ShAbility/run-allow", fmt.Sprintf("%v", o.Value), fmt.Errorf("run returned %T (want ability.CmdResult)", o.Value))
-			}
+		} else if o.Err != nil {
+			report("ShAbility/run-allow", fmt.Sprintf("%v", o.Value), o.Err)
+		} else {
+			report("ShAbility/run-allow", fmt.Sprintf("%v", o.Value), fmt.Errorf("run returned %T (want ability.CmdResult)", o.Value))
+		}
 		o = a.Command(atom, ability.ShCommandRun, ability.ShRunArgs{Command: "rm -rf /tmp/x", Timeout: 3 * time.Second})
 		if o.Err == nil {
 			report("ShAbility/run-denied", "rm 应被白名单拒绝但成功", fmt.Errorf("allowlist bypass"))
@@ -497,11 +497,11 @@ func main() {
 			} else {
 				report("BashAbility/run", fmt.Sprintf("exit=%d out=%q", res.ExitCode, res.Stdout), nil)
 			}
-			} else if o.Err != nil {
-				report("BashAbility/run", fmt.Sprintf("%v", o.Value), o.Err)
-			} else {
-				report("BashAbility/run", fmt.Sprintf("%v", o.Value), fmt.Errorf("run returned %T (want ability.CmdResult)", o.Value))
-			}
+		} else if o.Err != nil {
+			report("BashAbility/run", fmt.Sprintf("%v", o.Value), o.Err)
+		} else {
+			report("BashAbility/run", fmt.Sprintf("%v", o.Value), fmt.Errorf("run returned %T (want ability.CmdResult)", o.Value))
+		}
 	}
 
 	// --- ability: NetMapAbility (注册/列举/注销 peer) ---
@@ -977,9 +977,9 @@ func main() {
 
 	// --- EKuiperAbility (配置类; 流/规则需注入 transport) ---
 	if a, ok := extAtom.Ability("EKuiperAbility"); ok {
-	// set_endpoint 校验与数据层 validateInfluxEndpoint 对齐(第五轮):
-	// 拒 userinfo/fragment/无 host/回环/私网/未指定/组播——域名放行,
-	// 拨号层负责二次校验(存储期不解析)。
+		// set_endpoint 校验与数据层 validateInfluxEndpoint 对齐(第五轮):
+		// 拒 userinfo/fragment/无 host/回环/私网/未指定/组播——域名放行,
+		// 拨号层负责二次校验(存储期不解析)。
 		o := a.Command(extAtom, ability.EKuiperCommandSetEndpoint, ability.EKuiperEndpointArgs{URL: "http://ekuiper.internal.example:9081"})
 		report("EKuiper/set_endpoint", "http://ekuiper.internal.example:9081", o.Err)
 		o = a.Command(extAtom, ability.EKuiperCommandGetEndpoint, nil)

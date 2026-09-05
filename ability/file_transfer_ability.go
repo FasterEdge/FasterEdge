@@ -368,7 +368,8 @@ func (a *FileTransferAbility) Command(atom *types.Atom, act string, args any) ty
 		}
 		// 并发传输上限(对照 CmdAbility maxConc=16): 每次传输一个 goroutine,
 		// 无上限时调用方可洪泛出无限 goroutine/内存。
-		if a.running.Load() >= maxConcurrentTransfers {			a.mu.Unlock()
+		if a.running.Load() >= maxConcurrentTransfers {
+			a.mu.Unlock()
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: too many concurrent transfers (max %d): %w", act, maxConcurrentTransfers, types.ErrInvalidArguments)}
 		}
 		a.seq++

@@ -383,11 +383,11 @@ func TestKeyringLoadSnapshotTTLClockIndependent(t *testing.T) {
 	// (now+1d .. now+31d), TTL 窗恰为 30d——旧校验(锚定 now)会误判
 	// "expires beyond max ttl" 拒载。
 	snap := keyringSnapshot{
-		Version:       keyringSnapshotVersion,
-		SavedAt:       now.Add(30 * 24 * time.Hour),
-		Secret:        base64.StdEncoding.EncodeToString([]byte("this-is-a-32-byte-secret-for-tests!")),
-		TotalIssued:   1,
-		RevokedCount:  0,
+		Version:      keyringSnapshotVersion,
+		SavedAt:      now.Add(30 * 24 * time.Hour),
+		Secret:       base64.StdEncoding.EncodeToString([]byte("this-is-a-32-byte-secret-for-tests!")),
+		TotalIssued:  1,
+		RevokedCount: 0,
 		Tokens: []KeyringToken{{
 			Subject:   "edge-1",
 			IssuedAt:  now.Add(24 * time.Hour),
