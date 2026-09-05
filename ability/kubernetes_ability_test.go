@@ -1,6 +1,7 @@
 package ability
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -31,7 +32,7 @@ func newFakeK8sTransport() *fakeK8sTransport {
 
 func key(kind, ns, name string) string { return kind + "/" + ns + "/" + name }
 
-func (f *fakeK8sTransport) Apply(manifest string) error {
+func (f *fakeK8sTransport) Apply(_ context.Context, manifest string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.applyErr != nil {
@@ -43,7 +44,7 @@ func (f *fakeK8sTransport) Apply(manifest string) error {
 	return nil
 }
 
-func (f *fakeK8sTransport) Delete(kind, name, ns string) error {
+func (f *fakeK8sTransport) Delete(_ context.Context, kind, name, ns string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	delete(f.resources, key(kind, ns, name))
@@ -51,7 +52,7 @@ func (f *fakeK8sTransport) Delete(kind, name, ns string) error {
 	return nil
 }
 
-func (f *fakeK8sTransport) List(kind, ns string) ([]K8sResource, error) {
+func (f *fakeK8sTransport) List(_ context.Context, kind, ns string) ([]K8sResource, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	out := make([]K8sResource, 0)
@@ -68,7 +69,7 @@ func (f *fakeK8sTransport) List(kind, ns string) ([]K8sResource, error) {
 	return out, nil
 }
 
-func (f *fakeK8sTransport) Get(kind, name, ns string) (K8sResource, error) {
+func (f *fakeK8sTransport) Get(_ context.Context, kind, name, ns string) (K8sResource, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	r, ok := f.resources[key(kind, ns, name)]
@@ -78,7 +79,7 @@ func (f *fakeK8sTransport) Get(kind, name, ns string) (K8sResource, error) {
 	return r, nil
 }
 
-func (f *fakeK8sTransport) Scale(deployment, ns string, replicas int32) error {
+func (f *fakeK8sTransport) Scale(_ context.Context, deployment, ns string, replicas int32) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.scaleErr != nil {
@@ -88,7 +89,7 @@ func (f *fakeK8sTransport) Scale(deployment, ns string, replicas int32) error {
 	return nil
 }
 
-func (f *fakeK8sTransport) Logs(pod, ns string, tail int) (string, error) {
+func (f *fakeK8sTransport) Logs(_ context.Context, pod, ns string, tail int) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.logs, nil

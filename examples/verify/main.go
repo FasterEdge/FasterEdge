@@ -156,6 +156,45 @@ func main() {
 		}
 	}
 
+	// 组件枚举与 InitStandardAtom 一致性: verify 各段全部用 if x, ok := 静默
+	// 跳过——删掉任一组件整段验证会无声消失仍 "ALL PASS"。期望清单缺失即 FAIL。
+	expectedMain := []string{
+		"BaseAbility", "RoleAbility", "TimeAbility", "OneKeyAbility", "CmdAbility",
+		"ShAbility", "BashAbility", "NetMapAbility", "ConfigFileAbility",
+		"BaseData", "ConfigData", "NetMapData", "KeyringData",
+	}
+	cm := make(map[string]struct{}, len(components))
+	for _, n := range components {
+		cm[n] = struct{}{}
+	}
+	for _, want := range expectedMain {
+		if _, ok := cm[want]; !ok {
+			msg := "期望组件缺失(verify 漏测面): " + want
+			fmt.Printf("  [FAIL] %s\n", msg)
+			failCount++
+			failDetails = append(failDetails, msg)
+		}
+	}
+	for _, n := range components {
+		known := false
+		for _, w := range expectedMain {
+			if n == w {
+				known = true
+				break
+			}
+		}
+		// 数据库类 data 组件在 extAtom 段(dbVerify)验证, 不算漏测
+		for _, w := range []string{"InfluxDBData", "MongoDBData", "MySQLData", "PostgreSQLData", "RedisData", "SQLiteData"} {
+			if n == w {
+				known = true
+				break
+			}
+		}
+		if !known {
+			fmt.Printf("  [WARN] 组件未纳入 verify 断言: %s\n", n)
+		}
+	}
+
 	// 2. 逐个组件验证
 	fmt.Println("\n=== 逐个执行命令 ===")
 
@@ -250,7 +289,15 @@ func main() {
 		report("TimeAbility/sync_manual", manual, o.Err)
 		o = a.Command(atom, ability.TimeCommandGetTime, nil)
 		if snap, ok := o.Value.(ability.TimeSnapshot); ok {
-			report("TimeAbility/get_time-after-manual", fmt.Sprintf("now=%s src=%s", snap.Time.Format(time.RFC3339), snap.Source), o.Err)
+			// 断言 get_time 真实反映 sync_manual 的值: sync_manual 回归为
+			// no-op 时 snap.Time 仍是系统时间(与 manual 差 ~2h), 只查 Err==nil 是假 PASS。
+			manualT, _ := time.Parse(time.RFC3339Nano, manual)
+			delta := snap.Time.Sub(manualT)
+			if delta < -2*time.Second || delta > 2*time.Second {
+				report("TimeAbility/get_time-after-manual", fmt.Sprintf("now=%s src=%s", snap.Time.Format(time.RFC3339), snap.Source), fmt.Errorf("get_time did not reflect sync_manual (delta=%v)", delta))
+			} else {
+				report("TimeAbility/get_time-after-manual", fmt.Sprintf("now=%s src=%s", snap.Time.Format(time.RFC3339), snap.Source), nil)
+			}
 		} else {
 			report("TimeAbility/get_time-after-manual", fmt.Sprintf("%v", o.Value), o.Err)
 		}
@@ -310,31 +357,65 @@ func main() {
 		if o.Err != nil {
 			report("OneKeyAbility/issue", "", o.Err)
 		} else {
-			tok, _ := o.Value.(ability.OneKeyToken)
-			report("OneKeyAbility/issue", fmt.Sprintf("sig=%s... exp=%s", tok.Signature[:8], tok.ExpiresAt.Format(time.RFC3339)), nil)
-			wire := ability.EncodeForTransmission(tok)
-			dec, err := ability.DecodeFromTransmission(wire)
-			if err != nil {
-				report("OneKeyAbility/wire-encode", "", err)
+			tok, okTok := o.Value.(ability.OneKeyToken)
+			if !okTok || len(tok.Signature) < 8 {
+				report("OneKeyAbility/issue", "返回值类型/签名异常", fmt.Errorf("unexpected token value"))
 			} else {
-				v := a.Command(atom, ability.OneKeyCommandVerifyToken, ability.OneKeyVerifyTokenArgs{
-					Subject: dec.Subject, IssuedAt: dec.IssuedAt, ExpiresAt: dec.ExpiresAt, Signature: dec.Signature,
-				})
-				report("OneKeyAbility/verify", fmt.Sprintf("subject=%s", v.Value), v.Err)
+				report("OneKeyAbility/issue", fmt.Sprintf("sig=%s... exp=%s", tok.Signature[:8], tok.ExpiresAt.Format(time.RFC3339)), nil)
+				wire := ability.EncodeForTransmission(tok)
+				dec, err := ability.DecodeFromTransmission(wire)
+				if err != nil {
+					report("OneKeyAbility/wire-encode", "", err)
+				} else {
+					v := a.Command(atom, ability.OneKeyCommandVerifyToken, ability.OneKeyVerifyTokenArgs{
+						Subject: dec.Subject, IssuedAt: dec.IssuedAt, ExpiresAt: dec.ExpiresAt, Signature: dec.Signature,
+					})
+					report("OneKeyAbility/verify", fmt.Sprintf("subject=%s", v.Value), v.Err)
+				}
+				bad := ability.OneKeyVerifyTokenArgs{Subject: tok.Subject, IssuedAt: tok.IssuedAt, ExpiresAt: tok.ExpiresAt, Signature: strings.Repeat("0", len(tok.Signature))}
+				v := a.Command(atom, ability.OneKeyCommandVerifyToken, bad)
+				if v.Err == nil {
+					report("OneKeyAbility/verify-tampered", "应失败但通过", fmt.Errorf("tampered signature accepted"))
+				} else {
+					report("OneKeyAbility/verify-tampered", "正确拒绝", nil)
+				}
+				o = a.Command(atom, ability.OneKeyCommandListTokens, nil)
+				report("OneKeyAbility/list_tokens", fmt.Sprintf("%v", o.Value), o.Err)
+				// 鉴权正路径(revoke 前): 有效令牌经 AuthenticatedCommand 应放行。
+				// 凭据是 OneKeyVerifyTokenArgs 结构(AuthenticateCommand 的类型断言要求)。
+				cred := ability.OneKeyVerifyTokenArgs{Subject: tok.Subject, IssuedAt: tok.IssuedAt, ExpiresAt: tok.ExpiresAt, Signature: tok.Signature}
+				authOK := atom.AuthenticatedCommand(cred, "BaseAbility", ability.CommandListAbilityNames, nil)
+				if authOK.Err != nil {
+					report("OneKeyAbility/auth-valid", "", fmt.Errorf("valid token rejected: %v", authOK.Err))
+				} else {
+					report("OneKeyAbility/auth-valid", "有效令牌放行", nil)
+				}
+				o = a.Command(atom, ability.OneKeyCommandRevokeToken, ability.OneKeyRevokeTokenArgs{Subject: tok.Subject})
+				report("OneKeyAbility/revoke", tok.Subject, o.Err)
+				o = a.Command(atom, ability.OneKeyCommandListTokens, nil)
+				if toks, ok := o.Value.([]data.KeyringToken); ok {
+					revoked := false
+					for _, tk := range toks {
+						if tk.Subject == tok.Subject && tk.Revoked {
+							revoked = true
+						}
+					}
+					if !revoked {
+						report("OneKeyAbility/list_after_revoke", fmt.Sprintf("%v", o.Value), fmt.Errorf("revoked flag not reflected for %s", tok.Subject))
+					} else {
+						report("OneKeyAbility/list_after_revoke", "revoked=true", nil)
+					}
+				} else {
+					report("OneKeyAbility/list_after_revoke", fmt.Sprintf("%v", o.Value), o.Err)
+				}
+				// 吊销后经 AuthenticatedCommand 重验应拒绝(与 auth-valid 同凭据)。
+				authRevoked := atom.AuthenticatedCommand(cred, "BaseAbility", ability.CommandListAbilityNames, nil)
+				if authRevoked.Err == nil {
+					report("OneKeyAbility/auth-after-revoke", "应拒绝但成功", fmt.Errorf("revoked token accepted"))
+				} else {
+					report("OneKeyAbility/auth-after-revoke", "正确拒绝", nil)
+				}
 			}
-			bad := ability.OneKeyVerifyTokenArgs{Subject: tok.Subject, IssuedAt: tok.IssuedAt, ExpiresAt: tok.ExpiresAt, Signature: strings.Repeat("0", len(tok.Signature))}
-			v := a.Command(atom, ability.OneKeyCommandVerifyToken, bad)
-			if v.Err == nil {
-				report("OneKeyAbility/verify-tampered", "应失败但通过", fmt.Errorf("tampered signature accepted"))
-			} else {
-				report("OneKeyAbility/verify-tampered", "正确拒绝", nil)
-			}
-			o = a.Command(atom, ability.OneKeyCommandListTokens, nil)
-			report("OneKeyAbility/list_tokens", fmt.Sprintf("%v", o.Value), o.Err)
-			o = a.Command(atom, ability.OneKeyCommandRevokeToken, ability.OneKeyRevokeTokenArgs{Subject: tok.Subject})
-			report("OneKeyAbility/revoke", tok.Subject, o.Err)
-			o = a.Command(atom, ability.OneKeyCommandListTokens, nil)
-			report("OneKeyAbility/list_after_revoke", fmt.Sprintf("%v", o.Value), o.Err)
 		}
 	}
 
@@ -344,7 +425,18 @@ func main() {
 		report("CmdAbility/set_allowlist", "echo", o.Err)
 		o = a.Command(atom, ability.CmdCommandRun, ability.CmdRunArgs{Name: "echo", Args: []string{"cmd-ability-ok"}, Timeout: 3 * time.Second})
 		if res, ok := o.Value.(ability.CmdResult); ok {
-			report("CmdAbility/run", fmt.Sprintf("exit=%d out=%q", res.ExitCode, res.Stdout), o.Err)
+			// 非零退出码/空输出也须 FAIL: execOnce 对退出码与启动失败都不返回 Err
+			if res.ExitCode < 0 {
+				// ExitCode==-1 表示 exec 启动失败(如 Windows 无 echo 可执行文件)——
+				// 环境性豁免, 不计入 PASS/FAIL(容器 Linux 下 echo 正常)。
+				fmt.Printf("  [SKIP] CmdAbility/run (exec 启动失败, 环境缺命令): %s\n", strings.TrimSpace(res.Stderr))
+			} else if res.ExitCode != 0 {
+				report("CmdAbility/run", fmt.Sprintf("exit=%d out=%q", res.ExitCode, res.Stdout), fmt.Errorf("non-zero exit code"))
+			} else if !strings.Contains(res.Stdout, "cmd-ability-ok") {
+				report("CmdAbility/run", fmt.Sprintf("exit=%d out=%q", res.ExitCode, res.Stdout), fmt.Errorf("missing expected output"))
+			} else {
+				report("CmdAbility/run", fmt.Sprintf("exit=%d out=%q", res.ExitCode, res.Stdout), nil)
+			}
 		} else {
 			report("CmdAbility/run", fmt.Sprintf("%v", o.Value), o.Err)
 		}
@@ -356,7 +448,15 @@ func main() {
 		report("ShAbility/set_allowlist", "printf", o.Err)
 		o = a.Command(atom, ability.ShCommandRun, ability.ShRunArgs{Command: "printf 'sh-ok\\n'", Timeout: 3 * time.Second})
 		if res, ok := o.Value.(ability.CmdResult); ok {
-			report("ShAbility/run-allow", fmt.Sprintf("exit=%d out=%q", res.ExitCode, res.Stdout), o.Err)
+			if res.ExitCode < 0 {
+				fmt.Printf("  [SKIP] ShAbility/run-allow (exec 启动失败, 环境缺 sh): %s\n", strings.TrimSpace(res.Stderr))
+			} else if res.ExitCode != 0 {
+				report("ShAbility/run-allow", fmt.Sprintf("exit=%d out=%q", res.ExitCode, res.Stdout), fmt.Errorf("non-zero exit code"))
+			} else if !strings.Contains(res.Stdout, "sh-ok") {
+				report("ShAbility/run-allow", fmt.Sprintf("exit=%d out=%q", res.ExitCode, res.Stdout), fmt.Errorf("missing expected output"))
+			} else {
+				report("ShAbility/run-allow", fmt.Sprintf("exit=%d out=%q", res.ExitCode, res.Stdout), nil)
+			}
 		} else {
 			report("ShAbility/run-allow", fmt.Sprintf("%v", o.Value), o.Err)
 		}
@@ -372,7 +472,15 @@ func main() {
 	if a, ok := atom.Ability("BashAbility"); ok {
 		o := a.Command(atom, ability.BashCommandRun, ability.ShRunArgs{Command: "echo bash-ability-ok", Timeout: 3 * time.Second})
 		if res, ok := o.Value.(ability.CmdResult); ok {
-			report("BashAbility/run", fmt.Sprintf("exit=%d out=%q", res.ExitCode, res.Stdout), o.Err)
+			if res.ExitCode < 0 {
+				fmt.Printf("  [SKIP] BashAbility/run (exec 启动失败, 环境缺 bash): %s\n", strings.TrimSpace(res.Stderr))
+			} else if res.ExitCode != 0 {
+				report("BashAbility/run", fmt.Sprintf("exit=%d out=%q", res.ExitCode, res.Stdout), fmt.Errorf("non-zero exit code"))
+			} else if !strings.Contains(res.Stdout, "bash-ability-ok") {
+				report("BashAbility/run", fmt.Sprintf("exit=%d out=%q", res.ExitCode, res.Stdout), fmt.Errorf("missing expected output"))
+			} else {
+				report("BashAbility/run", fmt.Sprintf("exit=%d out=%q", res.ExitCode, res.Stdout), nil)
+			}
 		} else {
 			report("BashAbility/run", fmt.Sprintf("%v", o.Value), o.Err)
 		}
@@ -383,15 +491,47 @@ func main() {
 		o := a.Command(atom, ability.NetMapCommandRegisterPeer, ability.NetMapRegisterPeerArgs{Name: "edge-3", Address: "10.0.0.3:7000", Role: "edge"})
 		report("NetMapAbility/register_peer", "edge-3@10.0.0.3:7000", o.Err)
 		o = a.Command(atom, ability.NetMapCommandListPeers, nil)
-		report("NetMapAbility/list_peers", fmt.Sprintf("%v", o.Value), o.Err)
+		if peers, ok := o.Value.([]ability.NetMapPeer); ok {
+			found := false
+			for _, p := range peers {
+				if p.Name == "edge-3" {
+					found = true
+				}
+			}
+			if !found {
+				report("NetMapAbility/list_peers", fmt.Sprintf("%v", o.Value), fmt.Errorf("edge-3 not listed after register"))
+			} else {
+				report("NetMapAbility/list_peers", fmt.Sprintf("%d peers", len(peers)), nil)
+			}
+		} else {
+			report("NetMapAbility/list_peers", fmt.Sprintf("%v", o.Value), o.Err)
+		}
 		o = a.Command(atom, ability.NetMapCommandUnregisterPeer, ability.NetMapLookupPeerArgs{Name: "edge-3"})
 		report("NetMapAbility/unregister_peer", "edge-3", o.Err)
 		o = a.Command(atom, ability.NetMapCommandListPeers, nil)
-		report("NetMapAbility/list_after_remove", fmt.Sprintf("%v", o.Value), o.Err)
+		stillThere := false
+		if peers, ok := o.Value.([]ability.NetMapPeer); ok {
+			for _, p := range peers {
+				if p.Name == "edge-3" {
+					stillThere = true
+					break
+				}
+			}
+		}
+		if stillThere {
+			report("NetMapAbility/list_after_remove", fmt.Sprintf("%v", o.Value), fmt.Errorf("edge-3 still listed after unregister"))
+		} else {
+			report("NetMapAbility/list_after_remove", fmt.Sprintf("%v", o.Value), o.Err)
+		}
 	}
 
 	// --- ability: ConfigFileAbility (ConfigData → JSON 落盘 → 新 atom 重载) ---
 	if a, ok := atom.Ability("ConfigFileAbility"); ok {
+		// confine 以 cwd 为根: 绝对 Temp 路径会逃逸被拒——显式 SetRoot
+		// 到系统临时目录(与 config_file_ability_test 同模式)。
+		if s, ok := a.(interface{ SetRoot(string) }); ok {
+			s.SetRoot(os.TempDir())
+		}
 		cfgPath := filepath.Join(os.TempDir(), "fe-verify-config.json")
 		o := a.Command(atom, ability.ConfigFileCommandSave, ability.ConfigFileSaveArgs{Path: cfgPath, Overwrite: true})
 		report("ConfigFileAbility/save", cfgPath, o.Err)
@@ -402,7 +542,15 @@ func main() {
 			report("ConfigFileAbility/load", "", o.Err)
 		} else if d, ok := atom2.Data("ConfigData"); ok {
 			g := d.Command(atom2, data.ConfigCommandGet, data.ConfigGetArgs{Key: "node.role"})
-			report("ConfigFileAbility/load-reload", fmt.Sprintf("node.role=%v", g.Value), g.Err)
+			// 断言落盘→重载后值真实恢复(而非只查 Err): save/load 为 no-op
+			// 往返时 value 恒空, 只查 Err==nil 是假 PASS。
+			if g.Err != nil {
+				report("ConfigFileAbility/load-reload", "node.role", g.Err)
+			} else if v, _ := g.Value.(string); v != "edge" {
+				report("ConfigFileAbility/load-reload", fmt.Sprintf("node.role=%q", v), fmt.Errorf("reloaded value mismatch"))
+			} else {
+				report("ConfigFileAbility/load-reload", fmt.Sprintf("node.role=%v", v), nil)
+			}
 		}
 	}
 
@@ -463,8 +611,10 @@ func main() {
 	if ab, ok := extAtom.Ability("MQTTAbility"); ok {
 		ma, ok2 := ab.(*ability.MQTTAbility)
 		if !ok2 {
-			fmt.Printf("  [FAIL] MQTT 类型断言失败\n")
+			msg := "MQTT 类型断言失败"
+			fmt.Printf("  [FAIL] %s\n", msg)
 			failCount++
+			failDetails = append(failDetails, msg)
 		} else {
 			// broker 地址经 FE_MQTT_BROKER 注入 (容器 eth0 IP); isAcceptableBrokerURL 拒绝回环, 属安全设计
 			mqttURL := "tcp://" + brokerAddr()
@@ -478,14 +628,20 @@ func main() {
 			if mtCon.Err != nil {
 				fmt.Printf("  [SKIP] MQTT 联调 (无法连接 broker): %v\n", mtCon.Err)
 			} else {
-				report("MQTT/connect", "tcp://127.0.0.1:1883", nil)
+				report("MQTT/connect", "tcp://"+brokerAddr(), nil)
 				o := ab.Command(extAtom, ability.MQTTCommandSubscribe, ability.MQTTSubscribeArgs{Topic: "verify/topic", Qos: 1, MaxQueue: 16})
 				report("MQTT/subscribe", "verify/topic qos=1", o.Err)
 				o = ab.Command(extAtom, ability.MQTTCommandPublish, ability.MQTTPublishArgs{Topic: "verify/topic", Payload: []byte("hello-fe-mqtt"), Qos: 1})
 				report("MQTT/publish", "hello-fe-mqtt", o.Err)
 				o = ab.Command(extAtom, ability.MQTTCommandDrain, ability.MQTTPullArgs{Topic: "verify/topic", Max: 5, Timeout: 3 * time.Second})
 				if msgs, ok := o.Value.([]ability.MQTTMessage); ok {
-					report("MQTT/drain", fmt.Sprintf("got=%d payload=%q", len(msgs), string(msgs[0].Payload)), o.Err)
+					if len(msgs) == 0 {
+						// drain 超时无消息返回空 slice + nil err——断言 len 防
+						// msgs[0] 越界 panic, 并把"丢消息"计为 FAIL 而非崩溃。
+						report("MQTT/drain", "drain 空(消息未投递)", fmt.Errorf("no messages drained"))
+					} else {
+						report("MQTT/drain", fmt.Sprintf("got=%d payload=%q", len(msgs), string(msgs[0].Payload)), o.Err)
+					}
 				} else {
 					report("MQTT/drain", fmt.Sprintf("%v", o.Value), o.Err)
 				}
@@ -504,8 +660,10 @@ func main() {
 		// 注入真实 TCP transport (ModbusAbility 只做协议骨架, 字节流由 transport 负责)
 		ma, ok := ab.(*ability.ModbusAbility)
 		if !ok {
-			fmt.Printf("  [FAIL] Modbus 类型断言失败\n")
+			msg := "Modbus 类型断言失败"
+			fmt.Printf("  [FAIL] %s\n", msg)
 			failCount++
+			failDetails = append(failDetails, msg)
 		} else {
 			mt, err := newModbusTCPTransport("127.0.0.1:1502")
 			if err != nil {
@@ -531,6 +689,7 @@ func main() {
 				if o.Err != nil {
 					fmt.Printf("  [FAIL] Modbus/write_coil: %v\n", o.Err)
 					failCount++
+					failDetails = append(failDetails, fmt.Sprintf("Modbus/write_coil: %v", o.Err))
 				} else {
 					report("Modbus/write_coil", "addr=5 true", nil)
 				}
@@ -589,7 +748,7 @@ func main() {
 		_ = os.WriteFile(src, []byte("file-transfer-payload-0123456789"), 0o644)
 		o := a.Command(extAtom, ability.FileTransferCommandSetTarget, ability.FileTransferTargetArgs{PeerName: "peer-b"})
 		report("FileTransfer/set_target", "peer-b", o.Err)
-		o = a.Command(extAtom, ability.FileTransferCommandUpload, ability.FileTransferUploadArgs{LocalPath: src, RemotePath: "incoming/fe-src.bin"})
+		o = a.Command(extAtom, ability.FileTransferCommandUpload, ability.FileTransferUploadArgs{LocalPath: src, RemotePath: "/incoming/fe-src.bin"})
 		if o.Err != nil {
 			fmt.Printf("  [SKIP] FileTransfer/upload (无传输实现, 框架预期): %v\n", o.Err)
 		} else {
@@ -908,7 +1067,29 @@ func main() {
 			func() error { return d.Command(extAtom, data.DatabaseCommandSnapshot, nil).Err })
 	}
 
-	// 3. 命令鉴权: 未配置认证时应拒绝
+	// --- data: KeyringData (OneKeyAbility 依赖的基础; 直接验证 set_secret/rotate/状态) ---
+	if d, ok := atom.Data("KeyringData"); ok {
+		o := d.Command(atom, data.KeyringCommandSetSecret, data.KeyringSetSecretArgs{Secret: "verify-secret-key-0123456789"})
+		report("KeyringData/set_secret", "≥16B", o.Err)
+		o = d.Command(atom, data.KeyringCommandStatus, nil)
+		report("KeyringData/status", fmt.Sprintf("%v", o.Value), o.Err)
+		o = d.Command(atom, data.KeyringCommandListTokens, nil)
+		report("KeyringData/list_tokens", fmt.Sprintf("%v", o.Value), o.Err)
+		o = d.Command(atom, data.KeyringCommandRotate, nil)
+		report("KeyringData/rotate", "rotate", o.Err)
+		// 轮换后旧令牌应失效(verify 应拒绝)
+		o = d.Command(atom, data.KeyringCommandIssueToken, data.KeyringIssueTokenArgs{Subject: "pre-rotate", TTL: time.Hour})
+		report("KeyringData/issue_token", "pre-rotate", o.Err)
+		o = d.Command(atom, data.KeyringCommandRotate, nil)
+		report("KeyringData/rotate-after-issue", "rotate", o.Err)
+		o = d.Command(atom, data.KeyringCommandRevokeAll, nil)
+		report("KeyringData/revoke_all", "revoke_all", o.Err)
+	}
+
+	// 3. 命令鉴权: InitStandardAtom 恒配置 OneKeyAbility 为 CommandAuthenticator,
+	// 未认证/坏凭据应被拒(此处 "cred" 是错误类型触发类型断言失败——只覆盖
+	// "对任意凭据放行"的回归; 有效令牌/吊销后的正向鉴权在 OneKeyAbility 段
+	// 的 auth-valid/auth-after-revoke 断言)。
 	fmt.Println("\n=== 命令鉴权验证 ===")
 	o := atom.AuthenticatedCommand("cred", "BaseAbility", ability.CommandListAbilityNames, nil)
 	if o.Err == nil {

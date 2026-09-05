@@ -188,6 +188,31 @@ func TestUnmountAllTimeout(t *testing.T) {
 	}
 }
 
+func TestUnmountAllTimeoutContinuesToLaterComponents(t *testing.T) {
+	// 回归: 旧实现首个组件超时即 return, 中止逆序卸载链——后续组件的
+	// Unmount(如 Modbus/Serial 的 Close)永不执行。新行为: 超时只记录
+	// 该组件错误, 继续卸载剩余组件。
+	a := &Atom{}
+	alpha := &recordingAbility{name: "alpha", holdUnmount: true, blockUnmount: make(chan struct{})}
+	beta := &recordingAbility{name: "beta"}
+	if err := a.AddAbility(alpha); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.AddAbility(beta); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.MountAll(); err != nil {
+		t.Fatal(err)
+	}
+	err := a.UnmountAll(context.Background(), 10*time.Millisecond)
+	if err == nil || !errors.Is(err, ErrShutdownTimeout) {
+		t.Fatalf("err=%v want ErrShutdownTimeout", err)
+	}
+	if beta.unmountCalls.Load() != 1 {
+		t.Fatalf("beta unmount calls = %d, want 1 (chain must continue after alpha timeout)", beta.unmountCalls.Load())
+	}
+}
+
 func TestUnmountAllNotMounted(t *testing.T) {
 	a := &Atom{}
 	if err := a.UnmountAll(context.Background(), time.Second); !errors.Is(err, ErrInvalidAtomState) {

@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -122,7 +123,7 @@ func (t *dockerUnixTransport) List(all bool) ([]ability.DockerContainer, error) 
 }
 
 func (t *dockerUnixTransport) Start(idOrName string) error {
-	_, err := t.do("POST", "/containers/"+idOrName+"/start", nil)
+	_, err := t.do("POST", "/containers/"+url.PathEscape(idOrName)+"/start", nil)
 	return err
 }
 
@@ -131,7 +132,7 @@ func (t *dockerUnixTransport) Stop(idOrName string, timeout time.Duration) error
 	if secs <= 0 {
 		secs = 10
 	}
-	_, err := t.do("POST", "/containers/"+idOrName+"/stop?t="+strconv.Itoa(secs), nil)
+	_, err := t.do("POST", "/containers/"+url.PathEscape(idOrName)+"/stop?t="+strconv.Itoa(secs), nil)
 	return err
 }
 
@@ -140,7 +141,7 @@ func (t *dockerUnixTransport) Restart(idOrName string, timeout time.Duration) er
 	if secs <= 0 {
 		secs = 10
 	}
-	_, err := t.do("POST", "/containers/"+idOrName+"/restart?t="+strconv.Itoa(secs), nil)
+	_, err := t.do("POST", "/containers/"+url.PathEscape(idOrName)+"/restart?t="+strconv.Itoa(secs), nil)
 	return err
 }
 
@@ -149,17 +150,22 @@ func (t *dockerUnixTransport) Remove(idOrName string, force bool) error {
 	if force {
 		forceFlag = 1
 	}
-	_, err := t.do("DELETE", "/containers/"+idOrName+"?force="+strconv.Itoa(forceFlag), nil)
+	// PathEscape + ability 层白名单双重防护: 旧实现把 idOrName 原样拼进
+	// path, "../volumes/myapp-data" 经 daemon 路径清理后 DELETE /volumes/...
+	// 即删除命名卷(数据丢失)。
+	_, err := t.do("DELETE", "/containers/"+url.PathEscape(idOrName)+"?force="+strconv.Itoa(forceFlag), nil)
 	return err
 }
 
 func (t *dockerUnixTransport) Pull(reference string) error {
-	_, err := t.do("POST", "/images/create?fromImage="+reference, nil)
+	// QueryEscape: 旧实现把 reference 原样拼进 fromImage, "nginx&tag=1.2.3"
+	// 可注入额外 query 参数、拉取与审计记录不符的镜像。
+	_, err := t.do("POST", "/images/create?fromImage="+url.QueryEscape(reference), nil)
 	return err
 }
 
 func (t *dockerUnixTransport) Inspect(idOrName string) (ability.DockerContainer, error) {
-	data, err := t.do("GET", "/containers/"+idOrName+"/json", nil)
+	data, err := t.do("GET", "/containers/"+url.PathEscape(idOrName)+"/json", nil)
 	if err != nil {
 		return ability.DockerContainer{}, err
 	}
@@ -187,7 +193,7 @@ func (t *dockerUnixTransport) Logs(idOrName string, tail int) (string, error) {
 	if tail <= 0 {
 		tail = 100
 	}
-	data, err := t.do("GET", fmt.Sprintf("/containers/%s/logs?stdout=1&stderr=1&tail=%d", idOrName, tail), nil)
+	data, err := t.do("GET", fmt.Sprintf("/containers/%s/logs?stdout=1&stderr=1&tail=%d", url.PathEscape(idOrName), tail), nil)
 	if err != nil {
 		return "", err
 	}
