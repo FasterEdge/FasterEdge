@@ -68,7 +68,13 @@ func verifyPoweredExtras(atom, extAtom *types.Atom) {
 		}
 		// clear_finished 值段(清理已终态 job)
 		o = a.Command(extAtom, ability.AlgDistCommandClearFinished, nil)
-		report("AlgDist/clear_finished", fmt.Sprintf("%v", o.Value), o.Err)
+		if n, ok := o.Value.(int); ok {
+			report("AlgDist/clear_finished", fmt.Sprintf("cleared=%d", n), nil)
+		} else if o.Err != nil {
+			report("AlgDist/clear_finished", fmt.Sprintf("%v", o.Value), o.Err)
+		} else {
+			report("AlgDist/clear_finished", fmt.Sprintf("%T", o.Value), fmt.Errorf("clear_finished returned %T (want int)", o.Value))
+		}
 	}
 
 	// --- FileTransferAbility: download/get/get_target/cancel 盲区 ---
@@ -113,7 +119,13 @@ func verifyPoweredExtras(atom, extAtom *types.Atom) {
 		}
 		// clear_finished 值段(清理已终态 transfer)
 		o = a.Command(extAtom, ability.FileTransferCommandClearFinished, nil)
-		report("FileTransfer/clear_finished", fmt.Sprintf("%v", o.Value), o.Err)
+		if n, ok := o.Value.(int); ok {
+			report("FileTransfer/clear_finished", fmt.Sprintf("cleared=%d", n), nil)
+		} else if o.Err != nil {
+			report("FileTransfer/clear_finished", fmt.Sprintf("%v", o.Value), o.Err)
+		} else {
+			report("FileTransfer/clear_finished", fmt.Sprintf("%T", o.Value), fmt.Errorf("clear_finished returned %T (want int)", o.Value))
+		}
 	}
 
 	// --- InfluxAbility: set_token/set_org/get_endpoint/list_series/delete_series

@@ -43,7 +43,13 @@ func verifyCoreExtras(atom, extAtom *types.Atom) {
 			report("Cmd/list", fmt.Sprintf("%T", o.Value), fmt.Errorf("list returned %T (want []ability.CmdJob)", o.Value))
 		}
 		o = a.Command(extAtom, ability.CmdCommandClearJobs, nil)
-		report("Cmd/clear_jobs", fmt.Sprintf("%v", o.Value), o.Err)
+		if n, ok := o.Value.(int); ok {
+			report("Cmd/clear_jobs", fmt.Sprintf("cleared=%d", n), nil)
+		} else if o.Err != nil {
+			report("Cmd/clear_jobs", fmt.Sprintf("%v", o.Value), o.Err)
+		} else {
+			report("Cmd/clear_jobs", fmt.Sprintf("%T", o.Value), fmt.Errorf("clear_jobs returned %T (want int)", o.Value))
+		}
 		// start 类型错 → 拒绝
 		o = a.Command(extAtom, ability.CmdCommandStart, "raw")
 		if o.Err == nil {
