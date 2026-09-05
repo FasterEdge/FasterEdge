@@ -130,12 +130,16 @@ func verifySkeletonExtras(atom, extAtom *types.Atom) {
 		} else {
 			report("Modbus/read_input-zero", "正确拒绝", nil)
 		}
-		// read_discrete 合法参数(无从站时 transport.Send 失败 → 运行期拒绝)
+		// read_discrete 合法参数: 环境相关——无 transport/从站时正确拒绝,
+		// 有从站(如 WSL 容器联调)时返回真实 ModbusReadResult; 两种都 PASS,
+		// 仅类型不符 FAIL(防换环境误报)。
 		o = a.Command(extAtom, ability.ModbusCommandReadDiscrete, ability.ModbusReadArgs{Address: 0, Quantity: 8})
-		if o.Err == nil {
-			report("Modbus/read_discrete-unreachable", "应拒绝但成功", fmt.Errorf("read_discrete accepted without reachable slave"))
+		if o.Err != nil {
+			report("Modbus/read_discrete-unreachable", "正确拒绝(无从站)", nil)
+		} else if _, ok := o.Value.(ability.ModbusReadResult); ok {
+			report("Modbus/read_discrete-unreachable", "真实读取成功", nil)
 		} else {
-			report("Modbus/read_discrete-unreachable", "正确拒绝", nil)
+			report("Modbus/read_discrete-unreachable", fmt.Sprintf("%T %v", o.Value, o.Value), fmt.Errorf("read_discrete returned %T (want ability.ModbusReadResult)", o.Value))
 		}
 		// set_endpoint 非法地址 → 拒绝
 		o = a.Command(extAtom, ability.ModbusCommandSetEndpoint, ability.ModbusEndpointArgs{Addr: "not-an-addr::x"})
