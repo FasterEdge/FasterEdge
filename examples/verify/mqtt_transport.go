@@ -90,15 +90,33 @@ func (t *mqttClientTransport) Connect() error {
 //	0xD0 PINGRESP  -> 忽略
 func (t *mqttClientTransport) readLoop() {
 	for {
-		hdr := make([]byte, 2)
-		if _, err := io.ReadFull(t.conn, hdr); err != nil {
+		hdr0 := make([]byte, 1)
+		if _, err := io.ReadFull(t.conn, hdr0); err != nil {
 			t.mu.Lock()
 			t.connected = false
 			t.mu.Unlock()
 			return
 		}
-		kind := hdr[0] & 0xF0
-		remLen, _ := decodeRemainingLength(hdr[1:])
+		kind := hdr0[0] & 0xF0
+		// 剩余长度为变长编码(1-4 字节)。旧实现只读 1 字节:
+		// broker 下发 ≥128 字节的包(如大 PUBLISH)时解码截断, 流永久错位。
+		remLen := 0
+		mult := 1
+		for i := 0; i < 4; i++ {
+			one := make([]byte, 1)
+			if _, err := io.ReadFull(t.conn, one); err != nil {
+				t.mu.Lock()
+				t.connected = false
+				t.mu.Unlock()
+				return
+			}
+			digit := int(one[0])
+			remLen += (digit & 0x7F) * mult
+			if digit&0x80 == 0 {
+				break
+			}
+			mult *= 128
+		}
 		body := make([]byte, remLen)
 		if _, err := io.ReadFull(t.conn, body); err != nil {
 			t.mu.Lock()
@@ -110,7 +128,7 @@ func (t *mqttClientTransport) readLoop() {
 		case 0x30: // PUBLISH
 			topic, off := decodeMQTTString(body, 0)
 			// QoS>0 时 topic 后还有 2 字节 packet id, 需要跳过才是 payload
-			if hdr[0]&0x06 != 0 && off+2 <= len(body) {
+			if hdr0[0]&0x06 != 0 && off+2 <= len(body) {
 				off += 2
 			}
 			payload := body[off:]
@@ -259,10 +277,30 @@ func decodeRemainingLength(b []byte) (int, int) {
 	return val, len(b)
 }
 
-func writeMQTTPacket(conn net.Conn, fixed byte, body []byte) error {
-	if _, err := conn.Write([]byte{fixed, byte(len(body))}); err != nil {
-		return err
+// encodeRemainingLength 按 MQTT 3.1.1 规范编码剩余长度(变长, 1-4 字节,
+// 高 7 位为值、MSB 为延续位)。旧实现 writeMQTTPacket 用单字节
+// byte(len(body)), ≥128 字节的包会被截断/损坏。
+func encodeRemainingLength(n int) []byte {
+	var out []byte
+	for {
+		digit := byte(n % 128)
+		n /= 128
+		if n > 0 {
+			digit |= 0x80
+		}
+		out = append(out, digit)
+		if n == 0 {
+			return out
+		}
 	}
-	_, err := conn.Write(body)
+}
+
+func writeMQTTPacket(conn net.Conn, fixed byte, body []byte) error {
+	rl := encodeRemainingLength(len(body))
+	out := make([]byte, 0, 1+len(rl)+len(body))
+	out = append(out, fixed)
+	out = append(out, rl...)
+	out = append(out, body...)
+	_, err := conn.Write(out)
 	return err
 }

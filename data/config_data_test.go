@@ -2,6 +2,7 @@ package data
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/FasterEdge/FasterEdge/types"
@@ -82,18 +83,33 @@ func TestConfigDataSetGetDeleteList(t *testing.T) {
 
 func TestConfigDataReplaceAll(t *testing.T) {
 	c := NewConfigData()
-	c.ReplaceAll(map[string]string{"a": "1", "b": "2"})
+	if err := c.ReplaceAll(map[string]string{"a": "1", "b": "2"}); err != nil {
+		t.Fatal(err)
+	}
 	if out := c.Command(nil, ConfigCommandList, nil); out.Err != nil {
 		t.Fatal(out.Err)
 	} else if keys, _ := out.Value.([]string); len(keys) != 2 {
 		t.Fatalf("list after replace = %#v", keys)
 	}
-	c.ReplaceAll(map[string]string{"c": "3"})
+	if err := c.ReplaceAll(map[string]string{"c": "3"}); err != nil {
+		t.Fatal(err)
+	}
 	if v, ok := c.Get("a"); ok {
 		t.Fatalf("a should be gone, got %q", v)
 	}
 	if v, _ := c.Get("c"); v != "3" {
 		t.Fatalf("c = %q, want 3", v)
+	}
+	// 非法键整体拒绝(事务性)
+	if err := c.ReplaceAll(map[string]string{"good": "1", "bad key!": "2"}); err == nil {
+		t.Fatal("invalid key should reject")
+	}
+	// 裁剪后收敛: 带空格键与规范键同义
+	if err := c.ReplaceAll(map[string]string{" x.y ": "1"}); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := c.Get("x.y"); !ok || v != "1" {
+		t.Fatalf("trimmed key x.y = %q, %v", v, ok)
 	}
 }
 
@@ -107,5 +123,43 @@ func TestConfigDataJSONMarshal(t *testing.T) {
 	}
 	if len(raw) == 0 {
 		t.Fatal("marshal returned empty")
+	}
+}
+
+func TestConfigDataSetTrimsKey(t *testing.T) {
+	c := NewConfigData()
+	// 带空格键与规范键必须收敛为同一键(校验裁剪但存储原始会形成影子键)
+	if err := c.Set(" server.port ", "8080"); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := c.Get("server.port"); !ok || v != "8080" {
+		t.Fatalf("trimmed key get = %q, %v", v, ok)
+	}
+	if keys := c.List(); len(keys) != 1 || keys[0] != "server.port" {
+		t.Fatalf("list = %#v, want single trimmed key", keys)
+	}
+	if !c.Delete(" server.port ") {
+		t.Fatal("delete with padded key should find trimmed key")
+	}
+	if _, ok := c.Get("server.port"); ok {
+		t.Fatal("key should be gone after delete")
+	}
+}
+
+func TestConfigDataLimits(t *testing.T) {
+	c := NewConfigData()
+	// 单值上限
+	big := make([]byte, maxConfigValueBytes+1)
+	if err := c.Set("big", string(big)); !errors.Is(err, types.ErrInvalidArguments) {
+		t.Fatalf("oversized value error = %v", err)
+	}
+	// 键数上限
+	for i := 0; i < maxConfigKeys; i++ {
+		if err := c.Set(fmt.Sprintf("k%d", i), "v"); err != nil {
+			t.Fatalf("set %d: %v", i, err)
+		}
+	}
+	if err := c.Set("overflow", "v"); !errors.Is(err, types.ErrInvalidArguments) {
+		t.Fatalf("overflow key error = %v", err)
 	}
 }

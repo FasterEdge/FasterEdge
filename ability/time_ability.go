@@ -20,6 +20,11 @@ const (
 	TimeCommandLastSync     = "last"
 	TimeCommandGetTime      = "get_time"
 	TimeCommandConfigureRun = "configure_run"
+
+	// maxTimeSyncConcurrency 是网络对时(sync_net/sync_ntp)的并发上限,
+	// 每次同步新建 Transport/Dialer, 无上限可耗尽 FD/goroutine(对照
+	// CmdAbility 并发 16 基线; 时间同步为低频操作, 4 足够)。
+	maxTimeSyncConcurrency = 4
 )
 
 type TimeSyncNetworkArgs struct{ URL string }
@@ -61,6 +66,7 @@ type TimeAbility struct {
 	defaultNetworkURL string
 	defaultNTPServer  string
 	ntpQuery          ntpQuerier
+	sem               chan struct{} // 网络对时并发信号量(懒初始化于 ensureDefaults)
 }
 
 type timeAbilityConfig struct {
@@ -160,6 +166,9 @@ func (t *TimeAbility) ensureDefaults() {
 		if t.ntpQuery == nil {
 			t.ntpQuery = ntpQueryAdapter{}
 		}
+		if t.sem == nil {
+			t.sem = make(chan struct{}, maxTimeSyncConcurrency)
+		}
 	})
 }
 func (t *TimeAbility) GetName() string { return "TimeAbility" }
@@ -213,6 +222,10 @@ func (t *TimeAbility) Command(atom *types.Atom, act string, args any) types.Comm
 		if a.URL == "" {
 			a.URL = t.defaultNetworkURL
 		}
+		if !t.acquireSyncSlot() {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: too many concurrent network syncs: %w", act, types.ErrInvalidArguments)}
+		}
+		defer t.releaseSyncSlot()
 		ctx, cancel := context.WithTimeout(context.Background(), t.httpTimeout)
 		defer cancel()
 		ts, err := t.fetchNetworkTime(ctx, a.URL)
@@ -233,6 +246,10 @@ func (t *TimeAbility) Command(atom *types.Atom, act string, args any) types.Comm
 		if a.Address == "" {
 			a.Address = t.defaultNTPServer
 		}
+		if !t.acquireSyncSlot() {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: too many concurrent network syncs: %w", act, types.ErrInvalidArguments)}
+		}
+		defer t.releaseSyncSlot()
 		ts, err := t.fetchNTPTime(a.Address)
 		if err != nil {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, err)}
@@ -285,8 +302,10 @@ func (t *TimeAbility) Command(atom *types.Atom, act string, args any) types.Comm
 }
 
 func (t *TimeAbility) setSync(ts time.Time, source string) {
-	mono := t.clock.Monotonic()
 	t.mu.Lock()
+	// 单调时钟读取移入锁内: 锁外读与并发 setSync 构成"旧对时覆盖新对时"
+	// 的逻辑竞态, 并使 currentTime 偶发 "monotonic clock moved backwards"。
+	mono := t.clock.Monotonic()
 	t.lastSynced = ts
 	t.baseMono = mono
 	t.lastSource = source
@@ -299,16 +318,28 @@ func (t *TimeAbility) ensureSynced() {
 	if ok {
 		return
 	}
-	ts := t.clock.Now()
-	mono := t.clock.Monotonic()
 	t.mu.Lock()
 	if t.lastSynced.IsZero() {
+		ts := t.clock.Now()
+		mono := t.clock.Monotonic()
 		t.lastSynced = ts
 		t.baseMono = mono
 		t.lastSource = "system"
 	}
 	t.mu.Unlock()
 }
+
+// acquireSyncSlot/releaseSyncSlot 实现网络对时并发信号量(非阻塞)。
+func (t *TimeAbility) acquireSyncSlot() bool {
+	t.ensureDefaults()
+	select {
+	case t.sem <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+func (t *TimeAbility) releaseSyncSlot() { <-t.sem }
 func (t *TimeAbility) currentTime() (time.Time, string, error) {
 	mono := t.clock.Monotonic()
 	t.mu.RLock()
@@ -373,13 +404,16 @@ var ErrTimeNotSynced = errors.New("time ability has not been synced")
 // unconfigured monotonic mode is 1 second so the supervision loop does not
 // burn CPU when the user never called configure_run.
 func (t *TimeAbility) Run(ctx context.Context, _ *types.Atom) error {
+	// ensureDefaults 必须先于 interval 检查: 零配置(init.go 注册后直接
+	// RunAll)的 interval 为 0, 旧顺序会先拒绝——与注释"默认 1s"矛盾,
+	// 且未配置实例 RunAll 会拖垮整个 Atom 的 runner 集合。
+	t.ensureDefaults()
 	t.mu.RLock()
 	mode, interval := t.runMode, t.interval
 	t.mu.RUnlock()
 	if interval <= 0 {
 		return fmt.Errorf("time ability run: interval %s: %w", interval, types.ErrInvalidArguments)
 	}
-	t.ensureDefaults()
 	t.ensureSynced()
 	if mode == TimeRunModeMonotonic && interval < time.Second {
 		// Avoid the default 1ms busy loop that ensureDefaults seeds for

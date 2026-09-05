@@ -85,9 +85,15 @@ func (t *TimeAbility) fetchNTPTime(address string) (time.Time, error) {
 	if err != nil {
 		return time.Time{}, err
 	}
+	t.mu.RLock()
+	timeout := t.ntpTimeout
+	t.mu.RUnlock()
 	// Resolve and validate every result before handing control to the client;
 	// the policy-aware dialer then connects only to numeric addresses.
-	ips, err := t.networkPolicy.resolve(context.Background(), ntpHost(server))
+	// DNS 解析必须带超时: context.Background() 在黑洞 DNS 下永久挂死 sync_ntp。
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	ips, err := t.networkPolicy.resolve(ctx, ntpHost(server))
 	if err != nil {
 		return time.Time{}, err
 	}

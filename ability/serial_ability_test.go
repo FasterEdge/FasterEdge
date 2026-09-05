@@ -1,6 +1,7 @@
 package ability
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"testing"
@@ -309,5 +310,38 @@ func TestSerialAbilityUnknownCommand(t *testing.T) {
 	atom := newSerialAtom(t)
 	if out := s.Command(atom, "nope", nil); !errors.Is(out.Err, types.ErrUnsupportedCommand) {
 		t.Fatalf("unknown error = %v", out.Err)
+	}
+}
+
+func TestSerialAbilityUnmountClosesAllPorts(t *testing.T) {
+	s := NewSerialAbility()
+	atom := newSerialAtom(t)
+	ft := newFakeSerialTransport()
+	s.SetTransport(ft)
+	for _, port := range []string{"/dev/ttyUSB0", "/dev/ttyUSB1", "COM3"} {
+		if out := s.Command(atom, SerialCommandOpen, SerialOpenArgs{Port: port, Config: SerialConfig{Baud: 9600, DataBits: 8, StopBits: 1, Parity: "N"}}); out.Err != nil {
+			t.Fatal(out.Err)
+		}
+	}
+	// 全部已打开
+	ft.mu.Lock()
+	if len(ft.opened) != 3 {
+		ft.mu.Unlock()
+		t.Fatalf("opened = %d, want 3", len(ft.opened))
+	}
+	ft.mu.Unlock()
+	// Unmount 应关闭全部端口并清空记录
+	if err := s.Unmount(context.Background(), atom); err != nil {
+		t.Fatal(err)
+	}
+	ft.mu.Lock()
+	defer ft.mu.Unlock()
+	if len(ft.opened) != 0 {
+		t.Fatalf("opened after unmount = %d, want 0", len(ft.opened))
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if len(s.openPorts) != 0 {
+		t.Fatalf("openPorts after unmount = %d, want 0", len(s.openPorts))
 	}
 }

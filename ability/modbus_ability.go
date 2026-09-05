@@ -2,6 +2,7 @@
 package ability
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -127,6 +128,21 @@ func (m *ModbusAbility) Check(atom *types.Atom) error {
 
 func (m *ModbusAbility) Mount(atom *types.Atom) error { return m.Check(atom) }
 
+// Unmount 释放注入的 transport 连接。旧实现未实现 Unmounter, 框架永不调用
+// Close, 导致 TCP 连接/串口 fd 在 atom 拆除时泄漏。
+func (m *ModbusAbility) Unmount(_ context.Context, _ *types.Atom) error {
+	m.mu.RLock()
+	transport := m.transport
+	m.mu.RUnlock()
+	if transport != nil {
+		return transport.Close()
+	}
+	return nil
+}
+
+// Compile-time guarantee that ModbusAbility satisfies Unmounter.
+var _ types.Unmounter = (*ModbusAbility)(nil)
+
 func (m *ModbusAbility) Command(atom *types.Atom, act string, args any) types.CommandOutput {
 	if err := m.Check(atom); err != nil {
 		return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, err)}
@@ -248,6 +264,16 @@ func (m *ModbusAbility) executeRead(act string, funcCode ModbusFunctionCode, add
 	if 2+byteCount > len(resp) {
 		return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: response truncated: %w", act, types.ErrInvalidArguments)}
 	}
+	// byteCount 必须与 quantity 一致: 寄存器 q*2 字节, 线圈/离散 (q+7)/8 字节。
+	// 短响应(byteCount 不足)是截断/伪造响应, 静默补零或截断会产出与声明不符
+	// 的数据(旧实现只查长度上界)。
+	expected := int(quantity) * 2
+	if !isRegisterFunc(funcCode) {
+		expected = (int(quantity) + 7) / 8
+	}
+	if byteCount != expected {
+		return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: byte count %d != expected %d for quantity %d: %w", act, byteCount, expected, quantity, types.ErrInvalidArguments)}
+	}
 	payload := resp[2 : 2+byteCount]
 	res := ModbusReadResult{
 		Function: funcCode,
@@ -281,6 +307,12 @@ func (m *ModbusAbility) executeWrite(act string, funcCode ModbusFunctionCode, pd
 	}
 	if ModbusFunctionCode(resp[0]) != funcCode {
 		return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: device exception 0x%02x: %w", act, resp[0], types.ErrInvalidArguments)}
+	}
+	// 写回显校验: FC05/06/10 回显均为 5 字节(功能码+地址+值/数量),
+	// 必须与请求的 pdu[1:5] 一致(FC10 的 resp[3:5] 是数量, 由 pdu[3:5] 定义)。
+	// 旧实现只查首字节功能码, {0x06,0x00,...} 之类的伪造/损坏响应会误报"成功"。
+	if len(resp) < 5 || resp[1] != pdu[1] || resp[2] != pdu[2] || resp[3] != pdu[3] || resp[4] != pdu[4] {
+		return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: write echo mismatch (got % x, want % x): %w", act, resp[:5], pdu[1:5], types.ErrInvalidArguments)}
 	}
 	return types.CommandOutput{Name: act, Value: true}
 }

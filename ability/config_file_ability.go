@@ -211,7 +211,12 @@ func (a *ConfigFileAbility) Command(atom *types.Atom, act string, args any) type
 			}
 			return types.CommandOutput{Name: act, Value: cfg.Snapshot()}
 		}
-		cfg.ReplaceAll(parsed)
+		if err := cfg.ReplaceAll(parsed); err != nil {
+			if typed.Strict {
+				return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: apply %s: %w: %v", act, cleaned, types.ErrInvalidArguments, err)}
+			}
+			return types.CommandOutput{Name: act, Value: cfg.Snapshot()}
+		}
 		a.mu.Lock()
 		a.path = cleaned
 		a.mu.Unlock()

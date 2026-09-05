@@ -95,7 +95,12 @@ func TestMQTTAbilitySetGetBroker(t *testing.T) {
 	if out := m.Command(atom, MQTTCommandSetBroker, "raw-string"); !errors.Is(out.Err, types.ErrInvalidArguments) {
 		t.Fatalf("set wrong type error = %v", out.Err)
 	}
-	for _, bad := range []string{"", "http://x", "tcp://localhost:1883", "tcp://127.0.0.1:1883", "tcp://0.0.0.0:1883", "tcp://", "tcp://[::1]:1883", "tcp://::1:1883"} {
+	for _, bad := range []string{
+		"", "http://x", "tcp://localhost:1883", "tcp://127.0.0.1:1883", "tcp://0.0.0.0:1883",
+		"tcp://", "tcp://[::1]:1883", "tcp://::1:1883",
+		// 安全回归: IPv4-mapped IPv6 回环与 userinfo 手法必须拒绝
+		"tcp://[::ffff:127.0.0.1]:1883", "tcp://alice@127.0.0.1:1883", "tcp://alice@[::ffff:127.0.0.1]:1883",
+	} {
 		if out := m.Command(atom, MQTTCommandSetBroker, MQTTBrokerArgs{URL: bad}); !errors.Is(out.Err, types.ErrInvalidArguments) {
 			t.Errorf("bad url %q should reject, got %v", bad, out.Err)
 		}

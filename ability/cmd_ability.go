@@ -51,7 +51,9 @@ type CmdRunArgs struct {
 	Name    string
 	Args    []string
 	Timeout time.Duration
-	Env     []string // 可选,仅透传白名单环境变量
+	// Env 原样透传给子进程环境(空时继承父进程全部环境; 非空时整体替换)。
+	// 注意: 不做"白名单过滤"——调用方(认证边界内)对其内容负责。
+	Env []string
 }
 
 // CmdWaitArgs 是 wait 命令的参数。

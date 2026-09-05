@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -32,6 +33,7 @@ import (
 type modbusTCPTransport struct {
 	conn net.Conn
 	seq  atomic.Uint32
+	mu   sync.Mutex // 串行化 Send: 旧实现并发 Send 的响应会串线
 }
 
 func newModbusTCPTransport(addr string) (*modbusTCPTransport, error) {
@@ -43,6 +45,13 @@ func newModbusTCPTransport(addr string) (*modbusTCPTransport, error) {
 }
 
 func (t *modbusTCPTransport) Send(unitID uint8, pdu []byte) ([]byte, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	// 每次事务设置读写 deadline: 假从站接受连接不回包时旧实现永久挂起
+	// (ModbusAbility 自身无兜底超时)。
+	if err := t.conn.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		return nil, err
+	}
 	// MBAP 头: 事务ID(2) + 协议ID(2) + 长度(2) + 单元ID(1), 之后是 PDU
 	tid := uint16(t.seq.Add(1))
 	mbap := make([]byte, 7)

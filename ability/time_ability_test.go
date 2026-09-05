@@ -124,11 +124,23 @@ func TestTimeAbilityRunHonorsImmediateCtxCancel(t *testing.T) {
 	}
 }
 
-func TestTimeAbilityRunRejectsZeroInterval(t *testing.T) {
+func TestTimeAbilityRunNormalizesZeroInterval(t *testing.T) {
+	// 零配置实例(init.go 注册后直接 RunAll): interval=0 必须被 ensureDefaults
+	// 归一化而非拒绝(旧行为会拖垮整个 Atom 的 runner 集合)。
 	c := &taskFakeClock{wall: time.Date(2026, 8, 9, 0, 0, 0, 0, time.UTC)}
-	a := &TimeAbility{clock: c, runMode: TimeRunModeTicker, interval: 0}
-	if err := a.Run(context.Background(), nil); !errors.Is(err, types.ErrInvalidArguments) {
-		t.Fatalf("Run err=%v", err)
+	a := &TimeAbility{clock: c, runMode: TimeRunModeMonotonic, interval: 0}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- a.Run(ctx, nil) }()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run err=%v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Run did not return after cancel")
 	}
 }
 

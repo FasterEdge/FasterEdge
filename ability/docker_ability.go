@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -271,6 +272,12 @@ func isValidDockerEndpoint(u string) bool {
 		}
 		if host == "" {
 			return false
+		}
+		// userinfo 防护: 标准 URL 解析后 Hostname() 不含 userinfo
+		// (tcp://alice@127.0.0.1:2375 的 Hostname 是 127.0.0.1 而非
+		// "alice@127.0.0.1", 旧实现按冒号切分后两者都命中不了回环名单)。
+		if parsed, perr := url.Parse(u); perr == nil && parsed.Hostname() != "" {
+			host = parsed.Hostname()
 		}
 		// IPv6 字面量带方括号, 先剥掉 (如 tcp://[::1]:2375)
 		if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") && len(host) >= 2 {

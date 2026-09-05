@@ -17,6 +17,11 @@ const (
 	ConfigCommandDelete   = "delete"
 	ConfigCommandList     = "list"
 	ConfigCommandSnapshot = "snapshot"
+
+	// maxConfigKeys 是配置键数上限, maxConfigValueBytes 是单值字节上限
+	// (与 ConfigFileAbility load 的 1MiB 上限一致), 防无界内存面。
+	maxConfigKeys       = 10000
+	maxConfigValueBytes = 1 << 20
 )
 
 // ConfigData 以键值树形式存储配置项(扁平点号路径,如 "server.port")。
@@ -38,27 +43,37 @@ func (c *ConfigData) Check(_ *types.Atom) error { return nil }
 
 func (c *ConfigData) Mount(_ *types.Atom) error { return nil }
 
-// Get 返回指定键的当前值与是否存在。
+// Get 返回指定键的当前值与是否存在(入参键裁剪后查询,与 Set 存储一致)。
 func (c *ConfigData) Get(key string) (string, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	v, ok := c.values[key]
+	v, ok := c.values[strings.TrimSpace(key)]
 	return v, ok
 }
 
 // Set 设置键值;key 必须非空且仅由字母数字、点、下划线、连字符组成。
+// 键裁剪后存储(与校验一致, 避免 "a.b" 与 " a.b " 形成影子键),
+// 键数与单值大小有上限。
 func (c *ConfigData) Set(key, value string) error {
+	key = strings.TrimSpace(key)
 	if err := validateKey(key); err != nil {
 		return err
 	}
+	if len(value) > maxConfigValueBytes {
+		return fmt.Errorf("config: value for %q exceeds %d bytes: %w", key, maxConfigValueBytes, types.ErrInvalidArguments)
+	}
 	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, exists := c.values[key]; !exists && len(c.values) >= maxConfigKeys {
+		return fmt.Errorf("config: key count exceeds %d: %w", maxConfigKeys, types.ErrInvalidArguments)
+	}
 	c.values[key] = value
-	c.mu.Unlock()
 	return nil
 }
 
-// Delete 删除键,返回是否存在。
+// Delete 删除键(入参裁剪),返回是否存在。
 func (c *ConfigData) Delete(key string) bool {
+	key = strings.TrimSpace(key)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	_, ok := c.values[key]
@@ -81,13 +96,27 @@ func (c *ConfigData) List() []string {
 }
 
 // ReplaceAll 整体覆盖当前所有键值(供 Ability 加载文件后调用)。
-func (c *ConfigData) ReplaceAll(values map[string]string) {
-	c.mu.Lock()
-	c.values = make(map[string]string, len(values))
+// 与 Set 同纪律: 逐键校验+裁剪+上限, 任一非法整体拒绝(事务性);
+// 旧实现完全绕过 validateKey 且存原始键。
+func (c *ConfigData) ReplaceAll(values map[string]string) error {
+	normalized := make(map[string]string, len(values))
 	for k, v := range values {
-		c.values[k] = v
+		k = strings.TrimSpace(k)
+		if err := validateKey(k); err != nil {
+			return err
+		}
+		if len(v) > maxConfigValueBytes {
+			return fmt.Errorf("config: value for %q exceeds %d bytes: %w", k, maxConfigValueBytes, types.ErrInvalidArguments)
+		}
+		normalized[k] = v
 	}
+	if len(normalized) > maxConfigKeys {
+		return fmt.Errorf("config: key count exceeds %d: %w", maxConfigKeys, types.ErrInvalidArguments)
+	}
+	c.mu.Lock()
+	c.values = normalized
 	c.mu.Unlock()
+	return nil
 }
 
 // Snapshot 返回当前所有键值的深拷贝。

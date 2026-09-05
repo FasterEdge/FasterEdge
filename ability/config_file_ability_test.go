@@ -173,6 +173,14 @@ func TestConfigFileAbilityLoadSave(t *testing.T) {
 	if out := a.Command(atom, ConfigFileCommandLoad, ConfigFileLoadArgs{Path: bad3, Strict: true}); !errors.Is(out.Err, types.ErrInvalidArguments) {
 		t.Fatalf("bad key strict error = %v", out.Err)
 	}
+	// 绝对路径逃逸(root 父目录/系统目录)必须拒绝——含 Windows 盘符路径
+	escape := filepath.Join(filepath.Dir(dir), "outside.json")
+	if out := a.Command(atom, ConfigFileCommandLoad, ConfigFileLoadArgs{Path: escape, Strict: true}); !errors.Is(out.Err, types.ErrInvalidArguments) {
+		t.Fatalf("absolute escape load error = %v", out.Err)
+	}
+	if out := a.Command(atom, ConfigFileCommandSave, ConfigFileSaveArgs{Path: escape, Overwrite: true}); !errors.Is(out.Err, types.ErrInvalidArguments) {
+		t.Fatalf("absolute escape save error = %v", out.Err)
+	}
 }
 
 func TestConfigFileAbilitySaveWithoutPath(t *testing.T) {

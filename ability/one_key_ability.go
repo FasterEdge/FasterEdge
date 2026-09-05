@@ -93,9 +93,12 @@ func (o *OneKeyAbility) Mount(atom *types.Atom) error { return o.Check(atom) }
 // AuthenticateCommand implements types.CommandAuthenticator. The current
 // OneKey protocol authenticates node identity globally; component/command/args
 // are accepted for future authorization policies but are not signed today.
+//
+// 管理命令(issue_token/revoke_token/revoke_all/rotate)仅限本地进程内调用:
+// 任何持有效令牌的对端若可远程调用, 即可签发任意 subject 的令牌冒充任意
+// 节点, 或做吊销/轮换 DoS。verify_token 必须远程可达(认证依赖它)。
 func (o *OneKeyAbility) AuthenticateCommand(ctx context.Context, atom *types.Atom, credential any, component, command string, args any) (string, error) {
 	_ = component
-	_ = command
 	_ = args
 	if ctx == nil {
 		return "", types.ErrNilContext
@@ -114,6 +117,13 @@ func (o *OneKeyAbility) AuthenticateCommand(ctx context.Context, atom *types.Ato
 	subject, ok := out.Value.(string)
 	if !ok || strings.TrimSpace(subject) == "" {
 		return "", types.ErrAuthenticationFailed
+	}
+	name := o.GetName()
+	if component == name {
+		switch command {
+		case OneKeyCommandIssueToken, OneKeyCommandRevokeToken, OneKeyCommandRevokeAll, OneKeyCommandRotate:
+			return "", fmt.Errorf("%w: %s is restricted to local in-process calls", types.ErrAuthenticationFailed, command)
+		}
 	}
 	return subject, nil
 }
@@ -168,7 +178,9 @@ func (o *OneKeyAbility) Command(atom *types.Atom, act string, args any) types.Co
 		if typed.IssuedAt.IsZero() || typed.ExpiresAt.IsZero() || !typed.ExpiresAt.After(typed.IssuedAt) || typed.ExpiresAt.Before(now) || typed.IssuedAt.After(now.Add(time.Minute)) {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: invalid token lifetime: %w", act, types.ErrInvalidArguments)}
 		}
-		stored, ok := keyring.LookupToken(subject)
+		// TokenSnapshot 返回值拷贝: LookupToken 返回共享指针, 锁外读
+		// Revoked/IssuedAt/ExpiresAt 会与 RevokeToken/RevokeAll 构成数据竞争。
+		stored, ok := keyring.TokenSnapshot(subject)
 		if !ok {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: unknown subject: %w", act, types.ErrInvalidArguments)}
 		}

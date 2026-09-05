@@ -32,6 +32,11 @@ const (
 	keyringSnapshotMajor   = 1
 	keyringSnapshotMaxSize = int64(4 << 20) // 4 MiB
 	keyringSnapshotPerm    = os.FileMode(0o600)
+
+	// maxTokenTTL 是单次签发令牌的最大 TTL(30 天)。
+	// 旧实现无上限: 显式超大 TTL(如 876000h)可签发约 292 年的"永久"令牌,
+	// 使吊销/轮换丧失意义。
+	maxTokenTTL = 30 * 24 * time.Hour
 )
 
 const (
@@ -199,6 +204,9 @@ func (k *KeyringData) IssueToken(subject string, ttl time.Duration) (*KeyringTok
 	if ttl <= 0 {
 		ttl = k.defaultTokenTTL
 	}
+	if ttl > maxTokenTTL {
+		return nil, fmt.Errorf("issue token: ttl %s exceeds max %s: %w", ttl, maxTokenTTL, types.ErrInvalidArguments)
+	}
 	now := time.Now()
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -255,11 +263,26 @@ func (k *KeyringData) ActiveToken(subject string) (*KeyringToken, bool) {
 }
 
 // LookupToken 返回指定 subject 的令牌条目(不做有效性过滤,供校验时使用)。
+// 注意: 返回共享指针, 调用方不得在锁外读取可变字段(Revoked 等),
+// 否则与 RevokeToken/RevokeAll 构成数据竞争——请改用 TokenSnapshot。
 func (k *KeyringData) LookupToken(subject string) (*KeyringToken, bool) {
 	k.mu.RLock()
 	defer k.mu.RUnlock()
 	t, ok := k.tokens[subject]
 	return t, ok
+}
+
+// TokenSnapshot 返回指定 subject 的令牌**值拷贝**, 供校验路径在锁外安全读取
+// (Revoked/IssuedAt/ExpiresAt), 与 LookupToken 的共享指针不同, 不与
+// RevokeToken/RevokeAll 构成数据竞争。
+func (k *KeyringData) TokenSnapshot(subject string) (KeyringToken, bool) {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	t, ok := k.tokens[subject]
+	if !ok {
+		return KeyringToken{}, false
+	}
+	return *t, true
 }
 
 // Snapshot 返回状态与令牌表的深拷贝副本(按 Subject 排序)。
@@ -569,6 +592,12 @@ func (k *KeyringData) Sign(tok *KeyringToken) string {
 // Verify 校验 subject + issuedAt + expiresAt + signature 是否与当前密钥一致。
 func (k *KeyringData) Verify(subject string, issuedAt, expiresAt time.Time, signature string) bool {
 	secret := k.Secret()
+	if len(secret) == 0 {
+		// 密钥未就绪(未挂载): 空密钥 HMAC 是确定性可计算的, 任意签名都可被伪造
+		// 匹配——必须拒绝(fail-closed), 否则未 PreRun 即对外提供认证服务的
+		// 进程, 其认证边界形同虚设(伪造任意 subject 令牌)。
+		return false
+	}
 	mac := hmac.New(sha256.New, secret)
 	payload := fmt.Sprintf("%s|%d|%d", subject, issuedAt.UnixNano(), expiresAt.UnixNano())
 	mac.Write([]byte(payload))

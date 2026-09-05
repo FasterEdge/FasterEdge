@@ -470,6 +470,14 @@ func (m *MQTTAbility) Command(atom *types.Atom, act string, args any) types.Comm
 			m.mu.Unlock()
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %v", act, types.ErrInvalidArguments, err)}
 		}
+		// Subscribe 成功后确保队列存在: 占位队列可能被并发 Unsubscribe
+		// 删除(其 transport.Unsubscribe 与本次 Subscribe 竞争), 缺失则补建,
+		// 否则订阅成功但无队列会丢消息。
+		m.mu.Lock()
+		if _, ok := m.queues[topic]; !ok {
+			m.queues[topic] = newMQTTQueue(typed.MaxQueue)
+		}
+		m.mu.Unlock()
 		return types.CommandOutput{Name: act, Value: topic}
 	case MQTTCommandUnsubscribe:
 		typed, ok := args.(MQTTTopicArg)
