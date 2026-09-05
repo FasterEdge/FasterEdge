@@ -51,22 +51,102 @@ func verifyCoreExtras(atom, extAtom *types.Atom) {
 		} else {
 			report("Cmd/start-type", "正确拒绝", nil)
 		}
+		// get_allowlist 往返(main 段在 atom 上 set echo——extAtom 实例独立,
+		// 本段自行 set 再断言, 覆盖 set→get 往返)
+		o = a.Command(extAtom, ability.CmdCommandSetAllowlist, ability.CmdSetAllowlistArgs{Entries: []ability.CmdAllowlistEntry{{Name: "echo"}}})
+		report("Cmd/set_allowlist2", "echo", o.Err)
+		o = a.Command(extAtom, ability.CmdCommandGetAllowlist, nil)
+		if entries, ok := o.Value.([]ability.CmdAllowlistEntry); ok {
+			found := false
+			for _, e := range entries {
+				if e.Name == "echo" {
+					found = true
+					break
+				}
+			}
+			if !found {
+				report("Cmd/get_allowlist", fmt.Sprintf("%v", entries), fmt.Errorf("echo not listed after set_allowlist"))
+			} else {
+				report("Cmd/get_allowlist", fmt.Sprintf("entries=%d", len(entries)), nil)
+			}
+		} else if o.Err != nil {
+			report("Cmd/get_allowlist", fmt.Sprintf("%v", o.Value), o.Err)
+		} else {
+			report("Cmd/get_allowlist", fmt.Sprintf("%T", o.Value), fmt.Errorf("get_allowlist returned %T (want []ability.CmdAllowlistEntry)", o.Value))
+		}
 	}
 
-	// --- ShAbility/BashAbility: get_allowlist 往返(值段, 返回 ShAllowlist 快照) ---
-	for _, pair := range []struct{ name, getCmd string }{
-		{"ShAbility", ability.ShCommandGetAllowlist},
-		{"BashAbility", ability.BashCommandGetAllowlist},
+	// --- ShAbility/BashAbility: set/get_allowlist 往返 + start/kill/list/wait 盲区 ---
+	// 注意: main 段的 Sh/Bash 在 atom 上 set allowlist——extAtom 实例独立,
+	// 本段自行 set 再断言(往返), 不依赖 main 段的状态。
+	for _, pair := range []struct {
+		name, getCmd string
+		allowed      []string
+	}{
+		{"ShAbility", ability.ShCommandGetAllowlist, []string{"printf"}},
+		{"BashAbility", ability.BashCommandGetAllowlist, []string{"echo", "printf"}},
 	} {
 		if a, ok := extAtom.Ability(pair.name); ok {
-			o := a.Command(extAtom, pair.getCmd, nil)
+			o := a.Command(extAtom, mapBashToSh(pair.name, ability.ShCommandSetAllowlist), ability.ShSetAllowlistArgs{Allowed: pair.allowed})
+			report(pair.name+"/set_allowlist2", fmt.Sprintf("%v", pair.allowed), o.Err)
+			o = a.Command(extAtom, pair.getCmd, nil)
 			if al, ok := o.Value.(ability.ShAllowlist); ok {
-				report(pair.name+"/get_allowlist", fmt.Sprintf("shell=%s entries=%d", al.Shell, len(al.Allowed)), nil)
+				if len(al.Allowed) != len(pair.allowed) {
+					report(pair.name+"/get_allowlist", fmt.Sprintf("%+v", al), fmt.Errorf("set_allowlist not reflected: %+v", al))
+				} else {
+					report(pair.name+"/get_allowlist", fmt.Sprintf("shell=%s entries=%d", al.Shell, len(al.Allowed)), nil)
+				}
 			} else if o.Err != nil {
 				report(pair.name+"/get_allowlist", fmt.Sprintf("%v", o.Value), o.Err)
 			} else {
 				report(pair.name+"/get_allowlist", fmt.Sprintf("%T", o.Value), fmt.Errorf("get_allowlist returned %T (want ability.ShAllowlist)", o.Value))
 			}
+			// kill 不存在 job → 拒绝(委托 Cmd 层)
+			o = a.Command(extAtom, mapBashToSh(pair.name, ability.ShCommandKill), ability.ShKillArgs{JobID: "job-none"})
+			if o.Err == nil {
+				report(pair.name+"/kill-missing", "应拒绝但成功", fmt.Errorf("kill on missing job accepted"))
+			} else {
+				report(pair.name+"/kill-missing", "正确拒绝", nil)
+			}
+			// wait 不存在 job → 拒绝(快速返回, 无挂起)
+			o = a.Command(extAtom, mapBashToSh(pair.name, ability.ShCommandWait), ability.ShWaitArgs{JobID: "job-none", Wait: time.Millisecond})
+			if o.Err == nil {
+				report(pair.name+"/wait-missing", "应拒绝但成功", fmt.Errorf("wait on missing job accepted"))
+			} else {
+				report(pair.name+"/wait-missing", "正确拒绝", nil)
+			}
+			// list 值段(委托 Cmd 层)
+			o = a.Command(extAtom, mapBashToSh(pair.name, ability.ShCommandList), nil)
+			if jobs, ok := o.Value.([]ability.CmdJob); ok {
+				report(pair.name+"/list", fmt.Sprintf("jobs=%d", len(jobs)), nil)
+			} else if o.Err != nil {
+				report(pair.name+"/list", fmt.Sprintf("%v", o.Value), o.Err)
+			} else {
+				report(pair.name+"/list", fmt.Sprintf("%T", o.Value), fmt.Errorf("list returned %T (want []ability.CmdJob)", o.Value))
+			}
+			// start 白名单外命令 → 拒绝(matchInner/checkInner 在 exec 前拦截)
+			o = a.Command(extAtom, mapBashToSh(pair.name, ability.ShCommandStart), ability.ShRunArgs{Command: "touch /tmp/fe-unauth", Timeout: time.Second})
+			if o.Err == nil {
+				report(pair.name+"/start-deny", "应拒绝但成功", fmt.Errorf("non-allowlisted command accepted"))
+			} else {
+				report(pair.name+"/start-deny", "正确拒绝", nil)
+			}
+		}
+	}
+
+	// Bash set_allowlist 往返(独立于上面循环——Bash 的 set 与 Sh 参数同构)
+	if a, ok := extAtom.Ability("BashAbility"); ok {
+		o := a.Command(extAtom, ability.BashCommandSetAllowlist, ability.ShSetAllowlistArgs{Allowed: []string{"echo", "printf"}})
+		if al, ok := o.Value.(ability.ShAllowlist); ok {
+			if len(al.Allowed) != 2 || al.Allowed[0] != "echo" || al.Allowed[1] != "printf" {
+				report("Bash/set_allowlist", fmt.Sprintf("%+v", al), fmt.Errorf("set_allowlist not reflected: %+v", al))
+			} else {
+				report("Bash/set_allowlist", fmt.Sprintf("%v", al.Allowed), nil)
+			}
+		} else if o.Err != nil {
+			report("Bash/set_allowlist", fmt.Sprintf("%v", o.Value), o.Err)
+		} else {
+			report("Bash/set_allowlist", fmt.Sprintf("%T", o.Value), fmt.Errorf("set_allowlist returned %T (want ability.ShAllowlist)", o.Value))
 		}
 	}
 
@@ -87,6 +167,15 @@ func verifyCoreExtras(atom, extAtom *types.Atom) {
 			report("Time/configure_run-monotonic-interval", "应拒绝但成功", fmt.Errorf("monotonic with interval accepted"))
 		} else {
 			report("Time/configure_run-monotonic-interval", "正确拒绝", nil)
+		}
+		// last_sync 值段(TimeSnapshot 快照)
+		o = a.Command(extAtom, ability.TimeCommandLastSync, nil)
+		if snap, ok := o.Value.(ability.TimeSnapshot); ok {
+			report("Time/last_sync", fmt.Sprintf("source=%q", snap.Source), nil)
+		} else if o.Err != nil {
+			report("Time/last_sync", fmt.Sprintf("%v", o.Value), o.Err)
+		} else {
+			report("Time/last_sync", fmt.Sprintf("%T", o.Value), fmt.Errorf("last_sync returned %T (want ability.TimeSnapshot)", o.Value))
 		}
 	}
 
@@ -110,6 +199,15 @@ func verifyCoreExtras(atom, extAtom *types.Atom) {
 			report("TSN/unregister-missing", "应拒绝但成功", fmt.Errorf("unregister missing stream accepted"))
 		} else {
 			report("TSN/unregister-missing", "正确拒绝", nil)
+		}
+		// get_time_aware 往返(main 段已 set_time_aware enabled=true)
+		o = a.Command(extAtom, ability.TSNCommandGetTimeAware, nil)
+		if ta, ok := o.Value.(ability.TSNTimeAwareArgs); ok {
+			report("TSN/get_time_aware", fmt.Sprintf("enabled=%v", ta.Enabled), nil)
+		} else if o.Err != nil {
+			report("TSN/get_time_aware", fmt.Sprintf("%v", o.Value), o.Err)
+		} else {
+			report("TSN/get_time_aware", fmt.Sprintf("%T", o.Value), fmt.Errorf("get_time_aware returned %T (want ability.TSNTimeAwareArgs)", o.Value))
 		}
 	}
 
@@ -271,3 +369,24 @@ func verifyCoreExtras(atom, extAtom *types.Atom) {
 }
 
 var _ = types.CommandOutput{}
+
+// mapBashToSh 把 BashAbility 的管理命令常量映射到对应的 Sh 常量名(仅作
+// verify 段选择命令的辅助——Bash 的 Command 只认 BashCommand* 常量)。
+func mapBashToSh(abilityName, shCmd string) string {
+	if abilityName != "BashAbility" {
+		return shCmd
+	}
+	switch shCmd {
+	case ability.ShCommandKill:
+		return ability.BashCommandKill
+	case ability.ShCommandWait:
+		return ability.BashCommandWait
+	case ability.ShCommandList:
+		return ability.BashCommandList
+	case ability.ShCommandStart:
+		return ability.BashCommandStart
+	case ability.ShCommandSetAllowlist:
+		return ability.BashCommandSetAllowlist
+	}
+	return shCmd
+}

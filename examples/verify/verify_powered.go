@@ -59,6 +59,9 @@ func verifyPoweredExtras(atom, extAtom *types.Atom) {
 		} else {
 			report("AlgDist/distribute-missing-alg", "正确拒绝", nil)
 		}
+		// clear_finished 值段(清理已终态 job)
+		o = a.Command(extAtom, ability.AlgDistCommandClearFinished, nil)
+		report("AlgDist/clear_finished", fmt.Sprintf("%v", o.Value), o.Err)
 	}
 
 	// --- FileTransferAbility: download/get/get_target/cancel 盲区 ---
@@ -101,6 +104,9 @@ func verifyPoweredExtras(atom, extAtom *types.Atom) {
 		} else {
 			report("FileTransfer/get-missing", "正确拒绝", nil)
 		}
+		// clear_finished 值段(清理已终态 transfer)
+		o = a.Command(extAtom, ability.FileTransferCommandClearFinished, nil)
+		report("FileTransfer/clear_finished", fmt.Sprintf("%v", o.Value), o.Err)
 	}
 
 	// --- InfluxAbility: set_token/set_org/get_endpoint/list_series/delete_series

@@ -81,6 +81,13 @@ func verifySkeletonExtras(atom, extAtom *types.Atom) {
 		} else {
 			report("Serial/set_config-unopened", "正确拒绝", nil)
 		}
+		// close 未打开端口 → 拒绝
+		o = a.Command(extAtom, ability.SerialCommandClose, ability.SerialPortArg{Port: "/dev/ttyUSB0"})
+		if o.Err == nil {
+			report("Serial/close-unopened", "应拒绝但成功", fmt.Errorf("close on unopened port accepted"))
+		} else {
+			report("Serial/close-unopened", "正确拒绝", nil)
+		}
 	}
 
 	// --- ModbusAbility: get_endpoint/get_unit_id/read_input/read_discrete/write_multi_reg ---
