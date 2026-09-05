@@ -131,6 +131,27 @@ func (o *OneKeyAbility) AuthenticateCommand(ctx context.Context, atom *types.Ato
 	if component == "RoleAbility" && command == "set_role" {
 		return "", fmt.Errorf("%w: set_role is restricted to local in-process calls", types.ErrAuthenticationFailed)
 	}
+	// KeyringData 的密钥/令牌管理命令同样仅限本地进程内调用(旧实现只拦了
+	// OneKeyAbility 的四个命令, 兜底分支对其余 component/command 全放行):
+	// 任何持有效令牌的对端可经 AuthenticatedCommand(cred, "KeyringData",
+	// "set_secret", ...) 置换共享密钥为自选值, 再用所知密钥离线 Sign 出任意
+	// subject 的伪造令牌(身份伪造); rotate/revoke_all 即全局认证 DoS。
+	// list_tokens/status 为读面, 保持远程可达。
+	if component == "KeyringData" {
+		switch command {
+		case data.KeyringCommandSetSecret, data.KeyringCommandRotate,
+			data.KeyringCommandIssueToken, data.KeyringCommandRevokeToken,
+			data.KeyringCommandRevokeAll:
+			return "", fmt.Errorf("%w: %s is restricted to local in-process calls", types.ErrAuthenticationFailed, command)
+		}
+	}
+	// Cmd/Sh/Bash 的 set_allowlist 是能力授予面: 远程改写白名单后可经 run
+	// 执行任意命令(allowlist 以 Name 精确匹配 shell 条目即放行)——绕过
+	// 命令执行的安全边界演化为远程 RCE。set_allowlist 仅限本地; run 保持
+	// 远程可达但受 allowlist 约束。
+	if (component == "CmdAbility" || component == "ShAbility" || component == "BashAbility") && command == "set_allowlist" {
+		return "", fmt.Errorf("%w: set_allowlist is restricted to local in-process calls", types.ErrAuthenticationFailed)
+	}
 	return subject, nil
 }
 

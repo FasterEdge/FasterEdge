@@ -803,8 +803,9 @@ func main() {
 
 	// --- EKuiperAbility (配置类; 流/规则需注入 transport) ---
 	if a, ok := extAtom.Ability("EKuiperAbility"); ok {
-	// set_endpoint 仅校验 http/https 前缀 (认证边界内的用户配置目标,
-	// 不拒绝 IP/回环——与 MqttBrokerCore 同判例)
+	// set_endpoint 校验与数据层 validateInfluxEndpoint 对齐(第五轮):
+	// 拒 userinfo/fragment/无 host/回环/私网/未指定/组播——域名放行,
+	// 拨号层负责二次校验(存储期不解析)。
 		o := a.Command(extAtom, ability.EKuiperCommandSetEndpoint, ability.EKuiperEndpointArgs{URL: "http://ekuiper.internal.example:9081"})
 		report("EKuiper/set_endpoint", "http://ekuiper.internal.example:9081", o.Err)
 		o = a.Command(extAtom, ability.EKuiperCommandGetEndpoint, nil)

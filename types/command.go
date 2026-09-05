@@ -58,14 +58,24 @@ func (a *Atom) AuthenticatedCommandContext(ctx context.Context, credential any, 
 		return
 	}
 	var authErr error
+	var panicked bool
+	var panicErr error
 	func() {
 		defer func() {
 			if v := recover(); v != nil {
-				authErr = NewComponentPanicError("command authenticator", "authenticate", v)
+				panicked = true
+				panicErr = NewComponentPanicError("command authenticator", "authenticate", v)
 			}
 		}()
 		_, authErr = auth.AuthenticateCommand(ctx, a, credential, component, command, args)
 	}()
+	// 鉴权器 panic 与普通凭据错误保持可区分(旧实现统一折叠为哨兵,
+	// ComponentPanicError 含 Stack 被构造后丢弃——鉴权后端崩溃被静默
+	// 伪装成凭据错误, 无法告警)。只暴露哨兵 + 类型化错误, 不泄露 panic 值。
+	if panicked {
+		out.Err = fmt.Errorf("authenticate command: %w: %v", ErrAuthenticationFailed, panicErr)
+		return
+	}
 	if authErr != nil {
 		out.Err = fmt.Errorf("authenticate command: %w", ErrAuthenticationFailed)
 		return
