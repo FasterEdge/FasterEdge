@@ -222,9 +222,9 @@ func TestCmdAbilityStartWaitKill(t *testing.T) {
 	if out := c.Command(atom, CmdCommandGetJob, CmdJobIDArg{JobID: "job-9999"}); !errors.Is(out.Err, types.ErrInvalidArguments) {
 		t.Fatalf("get missing job error = %v", out.Err)
 	}
-	// get_job 空
+	// get_job 空(旧实现 t.Logf 代替断言——实现回归为接受空 ID 时测试仍 PASS)
 	if out := c.Command(atom, CmdCommandGetJob, CmdJobIDArg{}); !errors.Is(out.Err, types.ErrInvalidArguments) {
-		t.Logf("note: empty get_job error = %v", out.Err)
+		t.Fatalf("get empty job error = %v", out.Err)
 	}
 	// kill 已完成 job
 	if out := c.Command(atom, CmdCommandKill, CmdKillArgs{JobID: jobID}); out.Err != nil {

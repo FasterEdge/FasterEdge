@@ -108,6 +108,10 @@ func TestModbusAbilityRejectsReadWithoutTransport(t *testing.T) {
 	if out := m.Command(atom, ModbusCommandReadHolding, ModbusReadArgs{Quantity: 200}); !errors.Is(out.Err, types.ErrInvalidArguments) {
 		t.Fatalf("quantity 200 error = %v", out.Err)
 	}
+	// 上界 126 非法(1..125 合法区间)(边界原只测 0 与 200)
+	if out := m.Command(atom, ModbusCommandReadHolding, ModbusReadArgs{Quantity: 126}); !errors.Is(out.Err, types.ErrInvalidArguments) {
+		t.Fatalf("quantity 126 error = %v", out.Err)
+	}
 	// 类型错误
 	if out := m.Command(atom, ModbusCommandReadHolding, "raw-string"); !errors.Is(out.Err, types.ErrInvalidArguments) {
 		t.Fatalf("read wrong type error = %v", out.Err)
@@ -144,6 +148,28 @@ func TestModbusAbilityReadHoldingSuccess(t *testing.T) {
 	}
 }
 
+// TestModbusAbilityReadQuantityUpperBound 覆盖 1..125 合法区间的上界 125
+// (旧测试只测 0 与 200 非法, 合法边界从未验证)。
+func TestModbusAbilityReadQuantityUpperBound(t *testing.T) {
+	m := NewModbusAbility()
+	atom := newModbusAtom(t)
+	resp := make([]byte, 0, 252)
+	resp = append(resp, 0x03, 250) // FC=0x03, ByteCount=250
+	for i := 0; i < 250; i++ {
+		resp = append(resp, byte(i))
+	}
+	ft := &fakeModbusTransport{resp: resp}
+	m.SetTransport(ft)
+	out := m.Command(atom, ModbusCommandReadHolding, ModbusReadArgs{Address: 0, Quantity: 125})
+	if out.Err != nil {
+		t.Fatalf("quantity 125 should be valid: %v", out.Err)
+	}
+	res, ok := out.Value.(ModbusReadResult)
+	if !ok || len(res.Regs) != 125 {
+		t.Fatalf("regs = %#v", res)
+	}
+}
+
 func TestModbusAbilityReadCoilsSuccess(t *testing.T) {
 	m := NewModbusAbility()
 	atom := newModbusAtom(t)
@@ -173,7 +199,7 @@ func TestModbusAbilityDeviceException(t *testing.T) {
 	// 异常响应: 0x83 (0x80 | 0x03) + 异常码
 	ft := &fakeModbusTransport{resp: []byte{0x83, 0x02}}
 	m.SetTransport(ft)
-	if out := m.Command(atom, ModbusCommandReadHolding, ModbusReadArgs{Quantity: 1}); !errors.Is(out.Err, types.ErrInvalidArguments) {
+	if out := m.Command(atom, ModbusCommandReadHolding, ModbusReadArgs{Quantity: 1}); !errors.Is(out.Err, types.ErrOperationFailed) {
 		t.Fatalf("exception error = %v", out.Err)
 	}
 }
@@ -183,12 +209,12 @@ func TestModbusAbilityShortResponse(t *testing.T) {
 	atom := newModbusAtom(t)
 	ft := &fakeModbusTransport{resp: []byte{0x03}}
 	m.SetTransport(ft)
-	if out := m.Command(atom, ModbusCommandReadHolding, ModbusReadArgs{Quantity: 1}); !errors.Is(out.Err, types.ErrInvalidArguments) {
+	if out := m.Command(atom, ModbusCommandReadHolding, ModbusReadArgs{Quantity: 1}); !errors.Is(out.Err, types.ErrOperationFailed) {
 		t.Fatalf("short error = %v", out.Err)
 	}
 	ft = &fakeModbusTransport{resp: []byte{0x03, 0x10, 0x00, 0x01}}
 	m.SetTransport(ft)
-	if out := m.Command(atom, ModbusCommandReadHolding, ModbusReadArgs{Quantity: 8}); !errors.Is(out.Err, types.ErrInvalidArguments) {
+	if out := m.Command(atom, ModbusCommandReadHolding, ModbusReadArgs{Quantity: 8}); !errors.Is(out.Err, types.ErrOperationFailed) {
 		t.Fatalf("truncated error = %v", out.Err)
 	}
 }
@@ -197,7 +223,7 @@ func TestModbusAbilityTransportError(t *testing.T) {
 	m := NewModbusAbility()
 	atom := newModbusAtom(t)
 	m.SetTransport(&fakeModbusTransport{err: errors.New("net down")})
-	if out := m.Command(atom, ModbusCommandReadHolding, ModbusReadArgs{Quantity: 1}); !errors.Is(out.Err, types.ErrInvalidArguments) {
+	if out := m.Command(atom, ModbusCommandReadHolding, ModbusReadArgs{Quantity: 1}); !errors.Is(out.Err, types.ErrOperationFailed) {
 		t.Fatalf("transport error = %v", out.Err)
 	}
 }

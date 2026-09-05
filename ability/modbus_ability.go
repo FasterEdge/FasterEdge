@@ -234,7 +234,7 @@ func (m *ModbusAbility) handleWrite(act string, args any) types.CommandOutput {
 		}
 		pdu, err := encodeWriteMultiPDU(typed.Address, typed.Values)
 		if err != nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %v", act, types.ErrInvalidArguments, err)}
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %w", act, types.ErrOperationFailed, err)}
 		}
 		return m.executeWrite(act, ModbusFuncWriteMultiReg, pdu)
 	}
@@ -251,18 +251,18 @@ func (m *ModbusAbility) executeRead(act string, funcCode ModbusFunctionCode, add
 	}
 	resp, err := transport.Send(unit, pdu)
 	if err != nil {
-		return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: send: %w: %v", act, types.ErrInvalidArguments, err)}
+		return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: send: %w: %w", act, types.ErrOperationFailed, err)}
 	}
 	if len(resp) < 2 {
-		return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: short response (%d): %w", act, len(resp), types.ErrInvalidArguments)}
+		return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: short response (%d): %w", act, len(resp), types.ErrOperationFailed)}
 	}
 	if ModbusFunctionCode(resp[0]) != funcCode {
 		// 异常响应:0x80 | funcCode + 异常码
-		return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: device exception 0x%02x: %w", act, resp[0], types.ErrInvalidArguments)}
+		return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: device exception 0x%02x: %w", act, resp[0], types.ErrOperationFailed)}
 	}
 	byteCount := int(resp[1])
 	if 2+byteCount > len(resp) {
-		return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: response truncated: %w", act, types.ErrInvalidArguments)}
+		return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: response truncated: %w", act, types.ErrOperationFailed)}
 	}
 	// byteCount 必须与 quantity 一致: 寄存器 q*2 字节, 线圈/离散 (q+7)/8 字节。
 	// 短响应(byteCount 不足)是截断/伪造响应, 静默补零或截断会产出与声明不符
@@ -272,7 +272,7 @@ func (m *ModbusAbility) executeRead(act string, funcCode ModbusFunctionCode, add
 		expected = (int(quantity) + 7) / 8
 	}
 	if byteCount != expected {
-		return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: byte count %d != expected %d for quantity %d: %w", act, byteCount, expected, quantity, types.ErrInvalidArguments)}
+		return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: byte count %d != expected %d for quantity %d: %w", act, byteCount, expected, quantity, types.ErrOperationFailed)}
 	}
 	payload := resp[2 : 2+byteCount]
 	res := ModbusReadResult{
@@ -300,13 +300,13 @@ func (m *ModbusAbility) executeWrite(act string, funcCode ModbusFunctionCode, pd
 	}
 	resp, err := transport.Send(unit, pdu)
 	if err != nil {
-		return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: send: %w: %v", act, types.ErrInvalidArguments, err)}
+		return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: send: %w: %w", act, types.ErrOperationFailed, err)}
 	}
 	if len(resp) < 2 {
-		return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: short response (%d): %w", act, len(resp), types.ErrInvalidArguments)}
+		return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: short response (%d): %w", act, len(resp), types.ErrOperationFailed)}
 	}
 	if ModbusFunctionCode(resp[0]) != funcCode {
-		return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: device exception 0x%02x: %w", act, resp[0], types.ErrInvalidArguments)}
+		return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: device exception 0x%02x: %w", act, resp[0], types.ErrOperationFailed)}
 	}
 	// 写回显校验: FC05/06/10 回显均为 5 字节(功能码+地址+值/数量),
 	// 必须与请求的 pdu[1:5] 一致(FC10 的 resp[3:5] 是数量, 由 pdu[3:5] 定义)。

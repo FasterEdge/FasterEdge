@@ -251,3 +251,24 @@ func TestEKuiperAbilityUnknownCommand(t *testing.T) {
 		t.Fatalf("unknown error = %v", out.Err)
 	}
 }
+
+// TestEKuiperAbilityTransportErrors 补 fake 定义了却从未注入的 createErr/startErr
+// 分支: CreateStream/StartRule 的 transport 失败路径原零测试(只测过成功与参数校验)。
+func TestEKuiperAbilityTransportErrors(t *testing.T) {
+	e := NewEKuiperAbility()
+	atom := newEKuiperAtom(t)
+	ft := newFakeEKuiperTransport()
+	e.SetTransport(ft)
+	ft.createErr = errors.New("create down")
+	if out := e.Command(atom, EKuiperCommandCreateStream, EKuiperStreamArgs{Name: "s1", SQL: "CREATE STREAM ..."}); !errors.Is(out.Err, types.ErrOperationFailed) {
+		t.Fatalf("create transport err = %v", out.Err)
+	}
+	ft.createErr = nil
+	if out := e.Command(atom, EKuiperCommandCreateRule, EKuiperCreateRuleArgs{ID: "r1", SQL: "SELECT * FROM s"}); out.Err != nil {
+		t.Fatal(out.Err)
+	}
+	ft.startErr = errors.New("start down")
+	if out := e.Command(atom, EKuiperCommandStartRule, EKuiperRuleIDArg{ID: "r1"}); !errors.Is(out.Err, types.ErrOperationFailed) {
+		t.Fatalf("start transport err = %v", out.Err)
+	}
+}

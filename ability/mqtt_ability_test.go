@@ -303,8 +303,31 @@ func TestMQTTAbilityConnectError(t *testing.T) {
 	atom := newMQTTAtom(t)
 	ft := &fakeMQTTTransport{connectErr: errors.New("refused")}
 	m.SetTransport(ft)
-	if out := m.Command(atom, MQTTCommandConnect, nil); !errors.Is(out.Err, types.ErrInvalidArguments) {
+	if out := m.Command(atom, MQTTCommandConnect, nil); !errors.Is(out.Err, types.ErrOperationFailed) {
 		t.Fatalf("connect err = %v", out.Err)
+	}
+}
+
+// TestMQTTAbilityPublishSubscribeErrors 补 fake 定义了却从未注入的 publishErr/
+// subscribeErr 分支: 发布/订阅的 transport 失败路径原零测试(只测过 connectErr)。
+func TestMQTTAbilityPublishSubscribeErrors(t *testing.T) {
+	m := NewMQTTAbility()
+	atom := newMQTTAtom(t)
+	ft := &fakeMQTTTransport{}
+	m.SetTransport(ft)
+	ft.publishErr = errors.New("broker down")
+	if out := m.Command(atom, MQTTCommandPublish, MQTTPublishArgs{Topic: "t", Payload: []byte("x")}); !errors.Is(out.Err, types.ErrOperationFailed) {
+		t.Fatalf("publish transport err = %v", out.Err)
+	}
+	ft.publishErr = nil
+	ft.subscribeErr = errors.New("no suback")
+	if out := m.Command(atom, MQTTCommandSubscribe, MQTTSubscribeArgs{Topic: "sensors/temp", Qos: 1}); !errors.Is(out.Err, types.ErrOperationFailed) {
+		t.Fatalf("subscribe transport err = %v", out.Err)
+	}
+	// 订阅失败必须回滚队列占位: 重试订阅应成功(而非报 already subscribed)
+	ft.subscribeErr = nil
+	if out := m.Command(atom, MQTTCommandSubscribe, MQTTSubscribeArgs{Topic: "sensors/temp", Qos: 1}); out.Err != nil {
+		t.Fatalf("resubscribe after failure: %v", out.Err)
 	}
 }
 

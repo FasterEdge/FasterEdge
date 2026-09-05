@@ -372,7 +372,7 @@ func (m *MQTTAbility) Command(atom *types.Atom, act string, args any) types.Comm
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: no transport: %w", act, types.ErrInvalidArguments)}
 		}
 		if err := transport.Connect(); err != nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %v", act, types.ErrInvalidArguments, err)}
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %w", act, types.ErrOperationFailed, err)}
 		}
 		// 断线重连(clean session)后 broker 端订阅清空: 恢复本地队列对应的
 		// 全部订阅, 否则消息静默永久丢失。恢复统一用 QoS0(能力层不记录
@@ -452,7 +452,7 @@ func (m *MQTTAbility) Command(atom *types.Atom, act string, args any) types.Comm
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: no transport: %w", act, types.ErrInvalidArguments)}
 		}
 		if err := transport.Publish(topic, typed.Payload, typed.Qos, typed.Retain); err != nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %v", act, types.ErrInvalidArguments, err)}
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %w", act, types.ErrOperationFailed, err)}
 		}
 		return types.CommandOutput{Name: act, Value: topic}
 	case MQTTCommandSubscribe:
@@ -497,7 +497,7 @@ func (m *MQTTAbility) Command(atom *types.Atom, act string, args any) types.Comm
 				delete(m.queues, topic)
 			}
 			m.mu.Unlock()
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %v", act, types.ErrInvalidArguments, err)}
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %w", act, types.ErrOperationFailed, err)}
 		}
 		// Subscribe 成功后确保队列存在: 占位队列可能被并发 Unsubscribe
 		// 删除(其 transport.Unsubscribe 与本次 Subscribe 竞争)。若已被删除,
@@ -599,14 +599,24 @@ func isAcceptableBrokerURL(u string) bool {
 			if host == "" {
 				return false
 			}
-			// userinfo 防护: 标准 URL 解析后 Hostname() 不含 userinfo。
-			// URL 内嵌凭据(tcp://alice:pass@host:1883)会经 get_broker 原样
-			// 回显泄露密码——直接拒绝, 凭据应走 set_credentials 通道。
-			if parsed, err := url.Parse(u); err == nil && parsed.Hostname() != "" {
-				if parsed.User != nil {
-					return false
-				}
-				host = parsed.Hostname()
+			// userinfo 防护 + 严格解析: 旧实现只有在 url.Parse 成功时才用
+			// parsed.Hostname(), 失败时(畸形 host/空白/截断方括号/空端口)
+			// fall through 到主机名分支返回 true——"tcp://["、"tcp://host:"、
+			// "tcp://a b:1883" 全部放行, 晚到 dial 才失败。
+			parsed, perr := url.Parse(u)
+			if perr != nil || parsed.Hostname() == "" || parsed.Port() == "" {
+				return false
+			}
+			if parsed.User != nil {
+				return false
+			}
+			host = parsed.Hostname()
+			// IPv6 字面量 Hostname() 带方括号([::1]), 剥掉再判回环
+			if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") && len(host) >= 2 {
+				host = host[1 : len(host)-1]
+			}
+			if host == "" {
+				return false
 			}
 			// IP 字面量: netip 规范化后判回环/未指定
 			if addr, aerr := netip.ParseAddr(host); aerr == nil {

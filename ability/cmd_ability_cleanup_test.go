@@ -184,6 +184,7 @@ func TestCmdAbilityConcurrentCommandVsUnmount(t *testing.T) {
 	})
 	var wg sync.WaitGroup
 	var rejected atomic.Int32
+	unmountDone := make(chan struct{})
 	for i := 0; i < 10; i++ {
 		wg.Add(1)
 		go func() {
@@ -196,12 +197,13 @@ func TestCmdAbilityConcurrentCommandVsUnmount(t *testing.T) {
 	}
 	go func() {
 		_ = c.Unmount(context.Background(), atom)
+		unmountDone <- struct{}{}
 	}()
 	wg.Wait()
-	// All runs that started before Unmount may succeed; no crash.
-	if rejected.Load() == 0 {
-		// Allow zero rejections in extreme fast runs; not a hard failure.
-	}
+	<-unmountDone
+	// 旧实现是空 if 死代码(不构成任何断言)。本测试的功能价值是并发退避面
+	// 不 panic/不死锁(-race 检测竞态), rejected 计数仅作观测记录。
+	_ = rejected.Load()
 }
 
 // TestCmdAbilityKillWaitsForCompletion validates the bounded kill path.

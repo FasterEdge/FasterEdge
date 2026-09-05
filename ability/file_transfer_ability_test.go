@@ -306,6 +306,36 @@ func TestFileTransferAbilityTransportError(t *testing.T) {
 	t.Fatal("transfer did not reach failed status in time")
 }
 
+// TestFileTransferAbilityDownloadError 补 fake 定义了却从未注入的 dlErr 分支:
+// Download 的传输失败路径原零测试(上传有 TransportError, 下载只走了骨架成功)。
+func TestFileTransferAbilityDownloadError(t *testing.T) {
+	f := NewFileTransferAbility()
+	atom := newFileTransferAtom(t)
+	registerPeer(t, atom, "edge-2", "10.0.0.2:7000")
+	f.Command(atom, FileTransferCommandSetTarget, FileTransferTargetArgs{PeerName: "edge-2"})
+
+	transport := &fakeTransport{dlErr: errors.New("peer unreachable")}
+	f.SetTransport(transport)
+	out := f.Command(atom, FileTransferCommandDownload, FileTransferDownloadArgs{RemotePath: "/src", LocalPath: filepath.Join(t.TempDir(), "out")})
+	if out.Err != nil {
+		t.Fatal(out.Err)
+	}
+	id := out.Value.(string)
+	for i := 0; i < 50; i++ {
+		getOut := f.Command(atom, FileTransferCommandGet, FileTransferIDArg{ID: id})
+		if getOut.Err == nil {
+			if t2, _ := getOut.Value.(FileTransfer); t2.Status == FileTransferStatusFailed {
+				if t2.Error == "" {
+					t.Fatal("expected error message set on download failure")
+				}
+				return
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("download did not reach failed status in time")
+}
+
 func TestFileTransferAbilityUnknownCommand(t *testing.T) {
 	f := NewFileTransferAbility()
 	atom := newFileTransferAtom(t)

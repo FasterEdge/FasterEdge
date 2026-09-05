@@ -12,9 +12,11 @@ package FasterEdge
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -205,10 +207,14 @@ func TestCombinationNetMapOneKey(t *testing.T) {
 		t.Fatalf("topology peers = %d", len(top.Peers))
 	}
 	// 为每个对端签发令牌并校验
+	var oldEdge2 ability.OneKeyToken
 	for _, name := range []string{"edge-1", "edge-2", "edge-3"} {
 		tok := mustCommand(t, ok, atom, ability.OneKeyCommandIssueToken, ability.OneKeyIssueTokenArgs{
 			Subject: name, TTL: time.Minute,
 		}).Value.(ability.OneKeyToken)
+		if name == "edge-2" {
+			oldEdge2 = tok
+		}
 		v := mustCommand(t, ok, atom, ability.OneKeyCommandVerifyToken, ability.OneKeyVerifyTokenArgs{
 			Subject: tok.Subject, IssuedAt: tok.IssuedAt, ExpiresAt: tok.ExpiresAt, Signature: tok.Signature,
 		}).Value
@@ -216,8 +222,14 @@ func TestCombinationNetMapOneKey(t *testing.T) {
 			t.Fatalf("verify %s = %v", name, v)
 		}
 	}
-	// 吊销其中一个,再次校验应失败
+	// 吊销其中一个,再次校验应失败(旧实现注释承诺"吊销后校验应失败"却只验了
+	// 新令牌——旧令牌负断言从未落地)
 	mustCommand(t, ok, atom, ability.OneKeyCommandRevokeToken, ability.OneKeyRevokeTokenArgs{Subject: "edge-2"})
+	if out := ok.Command(atom, ability.OneKeyCommandVerifyToken, ability.OneKeyVerifyTokenArgs{
+		Subject: oldEdge2.Subject, IssuedAt: oldEdge2.IssuedAt, ExpiresAt: oldEdge2.ExpiresAt, Signature: oldEdge2.Signature,
+	}); out.Err == nil {
+		t.Fatalf("revoked token must fail verification")
+	}
 	// 重新签发拿到新令牌
 	tok := mustCommand(t, ok, atom, ability.OneKeyCommandIssueToken, ability.OneKeyIssueTokenArgs{
 		Subject: "edge-2", TTL: time.Minute,
@@ -330,15 +342,22 @@ func TestCombinationTimeSh(t *testing.T) {
 	if res.ExitCode != 0 {
 		t.Fatalf("date: %+v", res)
 	}
-	// Sh 输出和 TimeAbility 输出应大致一致(允许秒级误差)
+	// Sh 输出和 TimeAbility 输出应大致一致(允许秒级误差)——旧实现只查非空,
+	// 两个值从未互相比较(TimeAbility 与系统时钟不同步时测试照样 PASS)。
 	shTime := strings.TrimSpace(res.Stdout)
 	taSnap := mustCommand(t, ta, atom, ability.TimeCommandGetTime, nil).Value.(ability.TimeSnapshot)
-	// 简单 sanity 检查
 	if shTime == "" {
 		t.Fatal("empty sh time")
 	}
 	if taSnap.Time.IsZero() {
 		t.Fatal("empty ta time")
+	}
+	shUnix, perr := strconv.ParseInt(shTime, 10, 64)
+	if perr != nil {
+		t.Fatalf("sh date %q not unix seconds: %v", shTime, perr)
+	}
+	if d := time.Unix(shUnix, 0).Sub(taSnap.Time); d > 2*time.Second || d < -2*time.Second {
+		t.Fatalf("sh time %s vs TimeAbility %s differ by %v", time.Unix(shUnix, 0), taSnap.Time, d)
 	}
 }
 
@@ -376,14 +395,14 @@ func TestRoleChain(t *testing.T) {
 		if err := atom.AddAbility(ability.NewEdgeRoleAbility()); err != nil {
 			t.Fatal(err)
 		}
-		if err := atom.PreRun(); err != nil {
+		// 旧实现是空壳断言(反向且零断言, 任何结果都 PASS——"角色错配"
+		// 语义实际由 Mount 阶段承担): role 已是 edge 时 CloudRoleAbility
+		// 的 Check 必须在挂载期失败, PreRun 必须返回错误。
+		if err := atom.AddAbility(ability.NewCloudRoleAbility()); err != nil {
 			t.Fatal(err)
 		}
-		// 此时再加 CloudRoleAbility,但 role 已经是 edge,Check 应失败
-		if err := atom.AddAbility(ability.NewCloudRoleAbility()); !errors.Is(err, types.ErrInvalidAtomState) {
-			// 注意:AddAbility 不在 PreRun 之后被允许,所以这里预期失败
-			// 真正的"角色错配"语义由 Mount 阶段承担
-			_ = err
+		if err := atom.PreRun(); err == nil {
+			t.Fatalf("PreRun should fail on role mismatch (cloud ability under edge role)")
 		}
 	})
 }
@@ -403,11 +422,20 @@ func TestStandardAtomConcurrency(t *testing.T) {
 			defer wg.Done()
 			<-start
 			nm, _ := atom.Ability("NetMapAbility")
-			nm.Command(atom, ability.NetMapCommandRegisterPeer, ability.NetMapRegisterPeerArgs{
-				Name: "p", Address: "10.0.0.1:7000",
+			// 唯一 peer 名: 旧实现 64 个 goroutine 注册同名 "p", 63 个冲突错误
+			// 全被丢弃、errs 通道无发送方(测试除 panic/race 外无法失败)。
+			// 唯一名下任何注册错误都是真实缺陷。
+			out := nm.Command(atom, ability.NetMapCommandRegisterPeer, ability.NetMapRegisterPeerArgs{
+				Name: fmt.Sprintf("p-%d", i), Address: "10.0.0.1:7000",
 			})
+			if out.Err != nil {
+				errs <- fmt.Errorf("register p-%d: %w", i, out.Err)
+			}
 			ra, _ := atom.Ability("RoleAbility")
-			ra.Command(atom, ability.CommandSetRole, ability.RoleAbilityArgs{Role: "edge"})
+			out = ra.Command(atom, ability.CommandSetRole, ability.RoleAbilityArgs{Role: "edge"})
+			if out.Err != nil {
+				errs <- fmt.Errorf("set role: %w", out.Err)
+			}
 		}(i)
 	}
 	close(start)
@@ -415,6 +443,12 @@ func TestStandardAtomConcurrency(t *testing.T) {
 	close(errs)
 	for e := range errs {
 		t.Error(e)
+	}
+	// 并发注册的对端必须全部可见(确定性结果断言, 非仅无 panic)
+	nm, _ := atom.Ability("NetMapAbility")
+	top := nm.Command(atom, ability.NetMapCommandGetTopology, nil).Value.(ability.NetMapTopology)
+	if len(top.Peers) != N {
+		t.Fatalf("peers = %d, want %d", len(top.Peers), N)
 	}
 }
 

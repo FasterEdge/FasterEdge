@@ -1,6 +1,7 @@
 package ability
 
 import (
+	"net/url"
 	"testing"
 )
 
@@ -81,26 +82,46 @@ func FuzzDecodeFromTransmission(f *testing.F) {
 	})
 }
 
-// FuzzIsAcceptableControllerURL 确保网络 URL 校验对任意输入都不 panic。
-func FuzzIsAcceptableControllerURL(f *testing.F) {
-	f.Add("https://ctrl.example.com")
-	f.Add("http://localhost:8080")
-	f.Add("")
-	f.Add("ftp://x")
-	f.Add("http://")
-	f.Fuzz(func(t *testing.T, s string) {
-		_ = isAcceptableControllerURL(s)
-	})
-}
-
-// FuzzIsAcceptableBrokerURL 确保 MQTT broker URL 校验对任意输入都不 panic。
+// FuzzIsAcceptableBrokerURL 确保 MQTT broker URL 校验对任意输入都不 panic,
+// 且"接受"意味着标准 URL 可解析、host/端口齐全(畸形 URL 必须被拒)。
 func FuzzIsAcceptableBrokerURL(f *testing.F) {
 	f.Add("tcp://broker.example.com:1883")
 	f.Add("tcp://127.0.0.1:1883")
 	f.Add("")
 	f.Add("ws://localhost")
+	f.Add("tcp://[")
+	f.Add("tcp://host:")
+	f.Add("tcp://a b:1883")
 	f.Fuzz(func(t *testing.T, s string) {
-		_ = isAcceptableBrokerURL(s)
+		ok := isAcceptableBrokerURL(s)
+		// 接受的输入必须能被标准 URL 解析且 host/端口齐全(旧实现 fall
+		// through 放行畸形输入——"tcp://[" 曾被接受)。
+		if ok {
+			p, err := url.Parse(s)
+			if err != nil || p.Hostname() == "" || p.Port() == "" {
+				t.Fatalf("accepted malformed broker URL %q", s)
+			}
+		}
+	})
+}
+
+// FuzzIsAcceptableControllerURL 确保 controller URL 校验对任意输入都不 panic,
+// 且接受意味着标准 URL 可解析(与 broker 同属性)。
+func FuzzIsAcceptableControllerURL(f *testing.F) {
+	f.Add("")
+	f.Add("https://ctrl.example.com")
+	f.Add("https://host:")
+	f.Add("https://[::1]:8080")
+	f.Add("ftp://x")
+	f.Add("https://user:pass@host")
+	f.Fuzz(func(t *testing.T, s string) {
+		ok := isAcceptableControllerURL(s)
+		if ok {
+			p, err := url.Parse(s)
+			if err != nil || p.Hostname() == "" {
+				t.Fatalf("accepted malformed controller URL %q", s)
+			}
+		}
 	})
 }
 

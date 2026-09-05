@@ -223,7 +223,7 @@ func (k *K8sAbility) Command(atom *types.Atom, act string, args any) types.Comma
 		}
 		defer done()
 		if err := transport.Apply(ctx, typed.Manifest); err != nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %v", act, types.ErrInvalidArguments, err)}
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %w", act, types.ErrOperationFailed, err)}
 		}
 		return types.CommandOutput{Name: act, Value: true}
 	case K8sCommandDelete:
@@ -250,7 +250,7 @@ func (k *K8sAbility) Command(atom *types.Atom, act string, args any) types.Comma
 		}
 		defer done()
 		if err := transport.Delete(ctx, strings.TrimSpace(typed.Kind), strings.TrimSpace(typed.Name), ns); err != nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %v", act, types.ErrInvalidArguments, err)}
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %w", act, types.ErrOperationFailed, err)}
 		}
 		return types.CommandOutput{Name: act, Value: typed.Name}
 	case K8sCommandList:
@@ -278,7 +278,7 @@ func (k *K8sAbility) Command(atom *types.Atom, act string, args any) types.Comma
 		defer done()
 		rs, err := transport.List(ctx, strings.TrimSpace(typed.Kind), ns)
 		if err != nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %v", act, types.ErrInvalidArguments, err)}
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %w", act, types.ErrOperationFailed, err)}
 		}
 		sort.Slice(rs, func(i, j int) bool { return rs[i].Name < rs[j].Name })
 		return types.CommandOutput{Name: act, Value: rs}
@@ -307,7 +307,7 @@ func (k *K8sAbility) Command(atom *types.Atom, act string, args any) types.Comma
 		defer done()
 		r, err := transport.Get(ctx, strings.TrimSpace(typed.Kind), strings.TrimSpace(typed.Name), ns)
 		if err != nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %v", act, types.ErrInvalidArguments, err)}
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %w", act, types.ErrOperationFailed, err)}
 		}
 		return types.CommandOutput{Name: act, Value: r}
 	case K8sCommandScale:
@@ -337,7 +337,7 @@ func (k *K8sAbility) Command(atom *types.Atom, act string, args any) types.Comma
 		}
 		defer done()
 		if err := transport.Scale(ctx, strings.TrimSpace(typed.Deployment), ns, typed.Replicas); err != nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %v", act, types.ErrInvalidArguments, err)}
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %w", act, types.ErrOperationFailed, err)}
 		}
 		return types.CommandOutput{Name: act, Value: typed.Replicas}
 	case K8sCommandGetLogs:
@@ -377,7 +377,7 @@ func (k *K8sAbility) Command(atom *types.Atom, act string, args any) types.Comma
 		defer done()
 		logs, err := transport.Logs(ctx, strings.TrimSpace(typed.Pod), ns, tail)
 		if err != nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %v", act, types.ErrInvalidArguments, err)}
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %w", act, types.ErrOperationFailed, err)}
 		}
 		// 字节截断: Tail 只限行数, 单行日志(如 base64 blob)可任意长——
 		// 返回值钳到 1MiB, 防内存/回显放大。

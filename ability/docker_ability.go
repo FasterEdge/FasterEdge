@@ -173,7 +173,7 @@ func (d *DockerAbility) Command(atom *types.Atom, act string, args any) types.Co
 		defer d.dockerEnd()
 		cs, err := transport.List(all)
 		if err != nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %v", act, types.ErrInvalidArguments, err)}
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %w", act, types.ErrOperationFailed, err)}
 		}
 		sort.Slice(cs, func(i, j int) bool { return cs[i].Name < cs[j].Name })
 		return types.CommandOutput{Name: act, Value: cs}
@@ -202,7 +202,7 @@ func (d *DockerAbility) Command(atom *types.Atom, act string, args any) types.Co
 		}
 		defer d.dockerEnd()
 		if err := transport.Pull(ref); err != nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %v", act, types.ErrInvalidArguments, err)}
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %w", act, types.ErrOperationFailed, err)}
 		}
 		return types.CommandOutput{Name: act, Value: ref}
 	case DockerCommandCreate:
@@ -233,7 +233,7 @@ func (d *DockerAbility) Command(atom *types.Atom, act string, args any) types.Co
 		defer d.dockerEnd()
 		id, err := transport.Create(typed)
 		if err != nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %v", act, types.ErrInvalidArguments, err)}
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %w", act, types.ErrOperationFailed, err)}
 		}
 		return types.CommandOutput{Name: act, Value: id}
 	}
@@ -266,7 +266,7 @@ func (d *DockerAbility) simpleContainerAction(act string, args any) types.Comman
 	switch act {
 	case DockerCommandStart:
 		if err := transport.Start(id); err != nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %v", act, types.ErrInvalidArguments, err)}
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %w", act, types.ErrOperationFailed, err)}
 		}
 		return types.CommandOutput{Name: act, Value: id}
 	case DockerCommandStop:
@@ -275,7 +275,7 @@ func (d *DockerAbility) simpleContainerAction(act string, args any) types.Comman
 			typed.Timeout = dockerMaxStopTimeout
 		}
 		if err := transport.Stop(id, typed.Timeout); err != nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %v", act, types.ErrInvalidArguments, err)}
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %w", act, types.ErrOperationFailed, err)}
 		}
 		return types.CommandOutput{Name: act, Value: id}
 	case DockerCommandRestart:
@@ -283,24 +283,24 @@ func (d *DockerAbility) simpleContainerAction(act string, args any) types.Comman
 			typed.Timeout = dockerMaxStopTimeout
 		}
 		if err := transport.Restart(id, typed.Timeout); err != nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %v", act, types.ErrInvalidArguments, err)}
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %w", act, types.ErrOperationFailed, err)}
 		}
 		return types.CommandOutput{Name: act, Value: id}
 	case DockerCommandRemove:
 		if err := transport.Remove(id, false); err != nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %v", act, types.ErrInvalidArguments, err)}
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %w", act, types.ErrOperationFailed, err)}
 		}
 		return types.CommandOutput{Name: act, Value: id}
 	case DockerCommandInspect:
 		c, err := transport.Inspect(id)
 		if err != nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %v", act, types.ErrInvalidArguments, err)}
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %w", act, types.ErrOperationFailed, err)}
 		}
 		return types.CommandOutput{Name: act, Value: c}
 	case DockerCommandGetLogs:
 		logs, err := transport.Logs(id, 100)
 		if err != nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %v", act, types.ErrInvalidArguments, err)}
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %w", act, types.ErrOperationFailed, err)}
 		}
 		return types.CommandOutput{Name: act, Value: logs}
 	}

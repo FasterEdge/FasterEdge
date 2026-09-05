@@ -166,7 +166,7 @@ func TestK8sAbilityApply(t *testing.T) {
 		t.Fatal(out.Err)
 	}
 	ft.applyErr = errors.New("apply fail")
-	if out := k.Command(atom, K8sCommandApply, K8sApplyArgs{Manifest: "x"}); !errors.Is(out.Err, types.ErrInvalidArguments) {
+	if out := k.Command(atom, K8sCommandApply, K8sApplyArgs{Manifest: "x"}); !errors.Is(out.Err, types.ErrOperationFailed) {
 		t.Fatalf("apply err = %v", out.Err)
 	}
 }
@@ -203,7 +203,7 @@ func TestK8sAbilityListGetDelete(t *testing.T) {
 	} else if r, _ := out.Value.(K8sResource); r.Name != "demo" {
 		t.Fatalf("get = %+v", r)
 	}
-	if out := k.Command(atom, K8sCommandGet, K8sGetArgs{Kind: "Pod", Name: "missing"}); !errors.Is(out.Err, types.ErrInvalidArguments) {
+	if out := k.Command(atom, K8sCommandGet, K8sGetArgs{Kind: "Pod", Name: "missing"}); !errors.Is(out.Err, types.ErrOperationFailed) {
 		t.Fatalf("get missing error = %v", out.Err)
 	}
 	// delete
@@ -239,7 +239,7 @@ func TestK8sAbilityScale(t *testing.T) {
 		t.Fatal(out.Err)
 	}
 	ft.scaleErr = errors.New("scale fail")
-	if out := k.Command(atom, K8sCommandScale, K8sScaleArgs{Deployment: "web", Replicas: 1}); !errors.Is(out.Err, types.ErrInvalidArguments) {
+	if out := k.Command(atom, K8sCommandScale, K8sScaleArgs{Deployment: "web", Replicas: 1}); !errors.Is(out.Err, types.ErrOperationFailed) {
 		t.Fatalf("scale err = %v", out.Err)
 	}
 }
