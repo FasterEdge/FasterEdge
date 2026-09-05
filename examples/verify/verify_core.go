@@ -234,6 +234,13 @@ func verifyCoreExtras(atom, extAtom *types.Atom) {
 		} else {
 			report("OneKey/rotate-issue", fmt.Sprintf("%T", o.Value), fmt.Errorf("issue returned %T (want ability.OneKeyToken)", o.Value))
 		}
+		// issue 空 subject → 拒绝
+		o = a.Command(extAtom, ability.OneKeyCommandIssueToken, ability.OneKeyIssueTokenArgs{Subject: "   ", TTL: time.Hour})
+		if o.Err == nil {
+			report("OneKey/issue-empty-subject", "应拒绝但成功", fmt.Errorf("blank subject accepted"))
+		} else {
+			report("OneKey/issue-empty-subject", "正确拒绝", nil)
+		}
 		o = a.Command(extAtom, ability.OneKeyCommandStatus, nil)
 		if st, ok := o.Value.(data.KeyringStatus); ok {
 			report("OneKey/status", fmt.Sprintf("active=%d issued=%d", st.ActiveTokens, st.TotalIssued), nil)

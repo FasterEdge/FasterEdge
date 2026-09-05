@@ -59,6 +59,13 @@ func verifyPoweredExtras(atom, extAtom *types.Atom) {
 		} else {
 			report("AlgDist/distribute-missing-alg", "正确拒绝", nil)
 		}
+		// distribute 空 target → 拒绝(name/version/target 必填)
+		o = a.Command(extAtom, ability.AlgDistCommandDistribute, ability.AlgDistDistributeArgs{Name: "fe-verify-dist", Version: "2.0", Target: "  "})
+		if o.Err == nil {
+			report("AlgDist/distribute-empty-target", "应拒绝但成功", fmt.Errorf("blank target accepted"))
+		} else {
+			report("AlgDist/distribute-empty-target", "正确拒绝", nil)
+		}
 		// clear_finished 值段(清理已终态 job)
 		o = a.Command(extAtom, ability.AlgDistCommandClearFinished, nil)
 		report("AlgDist/clear_finished", fmt.Sprintf("%v", o.Value), o.Err)
@@ -145,6 +152,13 @@ func verifyPoweredExtras(atom, extAtom *types.Atom) {
 			report("Influx/write-no-transport", "应拒绝但成功", fmt.Errorf("write accepted without transport"))
 		} else {
 			report("Influx/write-no-transport", "正确拒绝", nil)
+		}
+		// write 空 points → 拒绝(参数校验先于 transport)
+		o = a.Command(extAtom, ability.InfluxCommandWrite, ability.InfluxWriteArgs{Points: nil})
+		if o.Err == nil {
+			report("Influx/write-empty-points", "应拒绝但成功", fmt.Errorf("empty points accepted"))
+		} else {
+			report("Influx/write-empty-points", "正确拒绝", nil)
 		}
 		o = a.Command(extAtom, ability.InfluxCommandQuery, ability.InfluxQueryArgs{Query: "SELECT * FROM m"})
 		if o.Err == nil {

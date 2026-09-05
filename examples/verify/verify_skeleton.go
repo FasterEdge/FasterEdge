@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/FasterEdge/FasterEdge/ability"
 	"github.com/FasterEdge/FasterEdge/data"
@@ -81,6 +82,13 @@ func verifySkeletonExtras(atom, extAtom *types.Atom) {
 		} else {
 			report("Serial/set_config-unopened", "正确拒绝", nil)
 		}
+		// set_config 非法参数(Baud 非标准) → 拒绝(参数校验先于 open 状态)
+		o = a.Command(extAtom, ability.SerialCommandSetConfig, ability.SerialSetConfigArgs{Port: "/dev/ttyUSB0", Config: ability.SerialConfig{Baud: 12345, DataBits: 3, StopBits: 1, Parity: "N"}})
+		if o.Err == nil {
+			report("Serial/set_config-bad-config", "应拒绝但成功", fmt.Errorf("invalid config accepted"))
+		} else {
+			report("Serial/set_config-bad-config", "正确拒绝", nil)
+		}
 		// close 未打开端口 → 拒绝
 		o = a.Command(extAtom, ability.SerialCommandClose, ability.SerialPortArg{Port: "/dev/ttyUSB0"})
 		if o.Err == nil {
@@ -128,6 +136,13 @@ func verifySkeletonExtras(atom, extAtom *types.Atom) {
 			report("Modbus/read_discrete-unreachable", "应拒绝但成功", fmt.Errorf("read_discrete accepted without reachable slave"))
 		} else {
 			report("Modbus/read_discrete-unreachable", "正确拒绝", nil)
+		}
+		// set_endpoint 非法地址 → 拒绝
+		o = a.Command(extAtom, ability.ModbusCommandSetEndpoint, ability.ModbusEndpointArgs{Addr: "not-an-addr::x"})
+		if o.Err == nil {
+			report("Modbus/set_endpoint-invalid", "应拒绝但成功", fmt.Errorf("invalid endpoint accepted"))
+		} else {
+			report("Modbus/set_endpoint-invalid", "正确拒绝", nil)
 		}
 		// write_multi_reg 空/超 123 → 拒绝
 		o = a.Command(extAtom, ability.ModbusCommandWriteMultiReg, ability.ModbusWriteMultiArgs{Address: 0, Values: nil})
@@ -189,6 +204,21 @@ func verifySkeletonExtras(atom, extAtom *types.Atom) {
 			report("MQTT/unsubscribe-not-subscribed", "应拒绝但成功", fmt.Errorf("unsubscribe on non-subscribed topic accepted"))
 		} else {
 			report("MQTT/unsubscribe-not-subscribed", "正确拒绝", nil)
+		}
+		// publish 含通配符 topic → 拒绝(参数校验先于 transport)
+		o = a.Command(extAtom, ability.MQTTCommandPublish, ability.MQTTPublishArgs{Topic: "a/+/c", Payload: []byte("x")})
+		if o.Err == nil {
+			report("MQTT/publish-wildcard-topic", "应拒绝但成功", fmt.Errorf("publish with wildcard topic accepted"))
+		} else {
+			report("MQTT/publish-wildcard-topic", "正确拒绝", nil)
+		}
+		// publish 超长 topic(>65535) → 拒绝
+		long := strings.Repeat("t", 70000)
+		o = a.Command(extAtom, ability.MQTTCommandPublish, ability.MQTTPublishArgs{Topic: long, Payload: []byte("x")})
+		if o.Err == nil {
+			report("MQTT/publish-topic-too-long", "应拒绝但成功", fmt.Errorf("oversized topic accepted"))
+		} else {
+			report("MQTT/publish-topic-too-long", "正确拒绝", nil)
 		}
 	}
 
