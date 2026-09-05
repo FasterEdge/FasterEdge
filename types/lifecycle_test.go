@@ -13,6 +13,7 @@ import (
 type recordingAbility struct {
 	name         string
 	checkErr     error
+	checkPanic   any // 非 nil 时 Check 直接 panic(测试 panic 兜底路径)
 	mountErr     error
 	unmountErr   error
 	mountCalls   atomic.Int32
@@ -31,6 +32,9 @@ func (c *recordingAbility) Describe() string { return c.name + " ability" }
 func (c *recordingAbility) Check(*Atom) error {
 	if c.log != nil {
 		*c.log = append(*c.log, "check:"+c.name)
+	}
+	if c.checkPanic != nil {
+		panic(c.checkPanic)
 	}
 	return c.checkErr
 }
@@ -507,5 +511,127 @@ loop:
 	mounted, mountedAbs := a.mountedSlices()
 	if len(mounted) != 0 || len(mountedAbs) != 0 {
 		t.Fatalf("bookkeeping not cleared: mounted=%d mountedAbilities=%d", len(mounted), len(mountedAbs))
+	}
+}
+
+// panickingDepsAbility 的 Dependencies() 直接 panic(测试依赖图预检的
+// panic→ComponentPanicError 兜底——旧实现折叠成普通 DependencyError,
+// 丢失 panic 信息且渲染出误导文案)。
+type panickingDepsAbility struct {
+	recordingAbility
+}
+
+func (p *panickingDepsAbility) Dependencies() []Dependency {
+	panic("deps boom")
+}
+
+// TestMountAllCheckFailureRejectsWithoutPartialMount 覆盖 checkErr 路径:
+// check 阶段是事务性的——任一 check 失败即整体拒绝(不挂载任何组件,
+// 不触发 rollback), 调用方可修正注册后重试。
+func TestMountAllCheckFailureRejectsWithoutPartialMount(t *testing.T) {
+	a := &Atom{}
+	alpha := &recordingAbility{name: "alpha"}
+	betaCheckErr := errors.New("check boom")
+	beta := &recordingAbility{name: "beta", checkErr: betaCheckErr}
+	if err := a.AddAbility(alpha); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.AddAbility(beta); err != nil {
+		t.Fatal(err)
+	}
+	err := a.MountAll()
+	if err == nil {
+		t.Fatal("MountAll should fail on check error")
+	}
+	if !errors.Is(err, betaCheckErr) {
+		t.Fatalf("err=%v does not chain checkErr", err)
+	}
+	if alpha.mountCalls.Load() != 0 || alpha.unmountCalls.Load() != 0 {
+		t.Fatalf("alpha mounted=%d unmounted=%d (want 0/0: 整体拒绝不挂载)", alpha.mountCalls.Load(), alpha.unmountCalls.Load())
+	}
+	if beta.mountCalls.Load() != 0 {
+		t.Fatalf("beta mounted=%d (want 0)", beta.mountCalls.Load())
+	}
+	if a.State() != AtomCreated || a.transitioning {
+		t.Fatalf("state=%v transitioning=%v (want created/false, retryable)", a.State(), a.transitioning)
+	}
+}
+
+// TestMountAllMountFailureRollsBackMounted 覆盖 mount 失败路径: 已挂载组件
+// 逆序回滚(旧实现该路径零测试——rollback 的逐组件超时与逆序卸载均无
+// 回归保护)。
+func TestMountAllMountFailureRollsBackMounted(t *testing.T) {
+	a := &Atom{}
+	alpha := &recordingAbility{name: "alpha"}
+	betaMountErr := errors.New("mount boom")
+	beta := &recordingAbility{name: "beta", mountErr: betaMountErr}
+	if err := a.AddAbility(alpha); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.AddAbility(beta); err != nil {
+		t.Fatal(err)
+	}
+	err := a.MountAll()
+	if err == nil {
+		t.Fatal("MountAll should fail on mount error")
+	}
+	if !errors.Is(err, betaMountErr) {
+		t.Fatalf("err=%v does not chain mountErr", err)
+	}
+	if alpha.mountCalls.Load() != 1 || alpha.unmountCalls.Load() != 1 {
+		t.Fatalf("alpha mounted=%d unmounted=%d (want 1/1: 挂载后回滚)", alpha.mountCalls.Load(), alpha.unmountCalls.Load())
+	}
+	if beta.mountCalls.Load() != 1 || beta.unmountCalls.Load() != 0 {
+		t.Fatalf("beta mounted=%d unmounted=%d (want 1/0: 挂载失败不卸载)", beta.mountCalls.Load(), beta.unmountCalls.Load())
+	}
+	if a.State() != AtomCreated || a.transitioning {
+		t.Fatalf("state=%v transitioning=%v (want created/false, retryable)", a.State(), a.transitioning)
+	}
+}
+
+// TestMountAllPanicInCheckBecomesComponentPanicError 覆盖 Check 回调 panic 的
+// callCheck 兜底 + MountAll 顶层兜底(命名返回值把 panic 转成错误返回——旧
+// 实现 recover 后静默返回 nil 伪成功)。
+func TestMountAllPanicInCheckBecomesComponentPanicError(t *testing.T) {
+	a := &Atom{}
+	if err := a.AddAbility(&recordingAbility{name: "alpha", checkPanic: "boom"}); err != nil {
+		t.Fatal(err)
+	}
+	err := a.MountAll()
+	if err == nil {
+		t.Fatal("MountAll should fail on check panic")
+	}
+	var cpe *ComponentPanicError
+	if !errors.As(err, &cpe) {
+		t.Fatalf("err=%v not ComponentPanicError", err)
+	}
+	if cpe.Name != "alpha" || cpe.Phase != "check" {
+		t.Fatalf("cpe=%+v", cpe)
+	}
+	if a.State() != AtomCreated || a.transitioning {
+		t.Fatalf("state=%v transitioning=%v (want created/false)", a.State(), a.transitioning)
+	}
+}
+
+// TestDependenciesPanicBecomesComponentPanicError 覆盖 Dependencies() panic
+// 的兜底(值 + Phase 可经 errors.As 识别——旧实现折叠成 DependencyError)。
+func TestDependenciesPanicBecomesComponentPanicError(t *testing.T) {
+	a := &Atom{}
+	if err := a.AddAbility(&panickingDepsAbility{recordingAbility: recordingAbility{name: "gamma"}}); err != nil {
+		t.Fatal(err)
+	}
+	err := a.MountAll()
+	if err == nil {
+		t.Fatal("MountAll should fail on Dependencies panic")
+	}
+	var cpe *ComponentPanicError
+	if !errors.As(err, &cpe) {
+		t.Fatalf("err=%v not ComponentPanicError", err)
+	}
+	if cpe.Name != "gamma" || cpe.Phase != "dependencies" {
+		t.Fatalf("cpe=%+v", cpe)
+	}
+	if a.State() != AtomCreated || a.transitioning {
+		t.Fatalf("state=%v transitioning=%v (want created/false)", a.State(), a.transitioning)
 	}
 }

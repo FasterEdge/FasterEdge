@@ -62,17 +62,23 @@ func dependencyOrder(items []namedComponent) ([]namedComponent, error) {
 		// 回调——组件 panic 会让 dependencyOrder 冒泡, 且 MountAll 的
 		// transitioning 无 defer 复位, Atom 从此永久 ErrInvalidState 锁死。
 		var decls []Dependency
-		panicked := false
+		var panicked bool
+		var panicValue any
 		func() {
 			defer func() {
 				if v := recover(); v != nil {
 					panicked = true
+					panicValue = v
 				}
 			}()
 			decls = append([]Dependency(nil), provider.Dependencies()...)
 		}()
 		if panicked {
-			return nil, &DependencyError{Component: item.name, Dependency: Dependency{Kind: item.kind.dependencyKind(), Name: item.name}, Err: fmt.Errorf("Dependencies() panicked")}
+			// 与 callCheck/callMount/unmount 一致: panic 转 ComponentPanicError
+			// (带 Value + Stack)而非折叠成 DependencyError——旧实现丢失 panic
+			// 信息, 且经 DependencyError.Error() 渲染成 "requires ... panicked"
+			// 的误导文案。
+			return nil, NewComponentPanicError(item.name, "dependencies", panicValue)
 		}
 		sort.Slice(decls, func(i, j int) bool {
 			if decls[i].Kind != decls[j].Kind {
@@ -182,7 +188,7 @@ func (a *Atom) Reset() error {
 }
 
 // MountAll performs the pre-run lifecycle transaction.
-func (a *Atom) MountAll() error {
+func (a *Atom) MountAll() (err error) {
 	if a == nil {
 		return ErrNilAtom
 	}
@@ -193,12 +199,17 @@ func (a *Atom) MountAll() error {
 	}
 	a.transitioning = true
 	// 双保险: dependencyOrder 内的 Dependencies() 已加 recover, 此处兜底
-	// 其余未覆盖的组件回调 panic——transitioning 不复位会永久锁死 Atom。
+	// 其余未覆盖的组件回调 panic——不复位 transitioning 会永久锁死 Atom;
+	// 同时把 panic 转成错误返回, 不得静默吞掉(旧实现 recover 后无返回值,
+	// 调用方误以为挂载成功, state 却停在 AtomCreated——伪成功)。
 	defer func() {
 		if v := recover(); v != nil {
 			a.mu.Lock()
 			a.transitioning = false
+			a.mounted = nil
+			a.mountedAbilities = nil
 			a.mu.Unlock()
+			err = fmt.Errorf("mount all: %v", v)
 		}
 	}()
 	items := make([]namedComponent, 0, len(a.data)+len(a.abilities))
@@ -319,8 +330,11 @@ func callMount(item namedComponent, atom *Atom) (err error) {
 	return nil
 }
 
+// rollback 以逐组件超时逆序卸载已挂载组件(与 unmountWithTimeout 同纪律):
+// 旧实现用裸 context.Background() 无任何预算——任一 Unmount 挂死会让整个
+// 挂载事务(启动路径)永久阻塞, 且无恢复手段。
 func rollback(atom *Atom, mounted []namedComponent, cause error) error {
-	ctx := context.Background()
+	const perComponent = 3 * time.Second
 	var errs []error
 	errs = append(errs, cause)
 	for i := len(mounted) - 1; i >= 0; i-- {
@@ -329,19 +343,31 @@ func rollback(atom *Atom, mounted []namedComponent, cause error) error {
 		if !ok {
 			continue
 		}
-		callErr := atom.observe(m.name, "", PhaseRollback, func() (err error) {
-			defer func() {
-				if v := recover(); v != nil {
-					err = &ComponentPanicError{Name: m.name, Phase: "rollback", Value: v, Stack: debug.Stack()}
+		compCtx, compCancel := context.WithTimeout(context.Background(), perComponent)
+		result := make(chan error, 1)
+		go func() {
+			defer compCancel()
+			result <- atom.observe(m.name, "", PhaseRollback, func() (err error) {
+				defer func() {
+					if v := recover(); v != nil {
+						err = &ComponentPanicError{Name: m.name, Phase: "rollback", Value: v, Stack: debug.Stack()}
+					}
+				}()
+				if err = u.Unmount(compCtx, atom); err != nil {
+					return &ComponentError{Name: m.name, Phase: "rollback", Err: err}
 				}
-			}()
-			if err = u.Unmount(ctx, atom); err != nil {
-				return &ComponentError{Name: m.name, Phase: "rollback", Err: err}
+				return nil
+			})
+		}()
+		select {
+		case err := <-result:
+			if err != nil {
+				errs = append(errs, err)
 			}
-			return nil
-		})
-		if callErr != nil {
-			errs = append(errs, callErr)
+		case <-compCtx.Done():
+			// 仅记录该组件超时并继续卸载剩余组件(goroutine 随 compCtx
+			// 取消自行收敛; 缓冲 chan 保证发送侧不阻塞)。
+			errs = append(errs, &ShutdownTimeoutError{Timeout: perComponent, Phase: "rollback", Components: []string{m.name}})
 		}
 	}
 	return errors.Join(errs...)

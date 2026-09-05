@@ -7,6 +7,7 @@ import (
 	"runtime/debug"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -153,34 +154,40 @@ func (e *ComponentNameChangedError) Unwrap() error {
 
 // ShutdownTimeoutError describes components that remained active after the
 // bounded shutdown interval. Components are normalized to an owned sorted
-// copy whenever the error is observed.
+// copy on first observation: 旧实现每次 Error()/Unwrap() 都原地排序写回,
+// 同一 error 被多 goroutine 并发观察时存在数据竞争——sync.Once 保证
+// 排序副本只构造一次(并发安全), 字段即排序后副本。
 type ShutdownTimeoutError struct {
 	Timeout    time.Duration
 	Phase      string
 	Components []string
+	once       sync.Once
 }
 
-func (e *ShutdownTimeoutError) normalize() {
+func (e *ShutdownTimeoutError) normalize() []string {
 	if e == nil {
-		return
+		return nil
 	}
-	components := append([]string(nil), e.Components...)
-	sort.Strings(components)
-	e.Components = components
+	e.once.Do(func() {
+		e.Components = append([]string(nil), e.Components...)
+		sort.Strings(e.Components)
+	})
+	return e.Components
 }
 
 func (e *ShutdownTimeoutError) Error() string {
 	if e == nil {
 		return "<nil>"
 	}
-	e.normalize()
-	return fmt.Sprintf("%s after %s waiting for %s: %v", e.Phase, e.Timeout, strings.Join(e.Components, ", "), ErrShutdownTimeout)
+	return fmt.Sprintf("%s after %s waiting for %s: %v", e.Phase, e.Timeout, strings.Join(e.normalize(), ", "), ErrShutdownTimeout)
 }
 
 func (e *ShutdownTimeoutError) Unwrap() error {
 	if e == nil {
 		return nil
 	}
+	// 与旧行为一致: 任何观察入口(errors.Is/As/Error)都归一化 Components
+	// 为排序副本——sync.Once 保证构造一次且并发安全。
 	e.normalize()
 	return ErrShutdownTimeout
 }

@@ -70,8 +70,10 @@ func (t *modbusTCPTransport) Send(unitID uint8, pdu []byte) ([]byte, error) {
 		return nil, err
 	}
 	plen := int(binary.BigEndian.Uint16(hdr[4:6])) - 1
-	if plen < 0 {
-		return nil, fmt.Errorf("bad mbap length")
+	// MBAP 长度字段 = 单元ID(1) + PDU; 最大合法 PDU 253 字节(协议上限),
+	// 损坏/恶意响应报大长度会驱动 readFull 等 64KB——直接拒绝。
+	if plen < 0 || plen > 254 {
+		return nil, fmt.Errorf("bad mbap length %d", plen)
 	}
 	resp := make([]byte, plen)
 	if _, err := readFull(t.conn, resp); err != nil {
@@ -447,9 +449,11 @@ func main() {
 			} else {
 				report("CmdAbility/run", fmt.Sprintf("exit=%d out=%q", res.ExitCode, res.Stdout), nil)
 			}
-		} else {
-			report("CmdAbility/run", fmt.Sprintf("%v", o.Value), o.Err)
-		}
+			} else if o.Err != nil {
+				report("CmdAbility/run", fmt.Sprintf("%v", o.Value), o.Err)
+			} else {
+				report("CmdAbility/run", fmt.Sprintf("%v", o.Value), fmt.Errorf("run returned %T (want ability.CmdResult)", o.Value))
+			}
 	}
 
 	// --- ability: ShAbility (白名单: 允许 printf, 拒绝 rm) ---
@@ -467,9 +471,11 @@ func main() {
 			} else {
 				report("ShAbility/run-allow", fmt.Sprintf("exit=%d out=%q", res.ExitCode, res.Stdout), nil)
 			}
-		} else {
-			report("ShAbility/run-allow", fmt.Sprintf("%v", o.Value), o.Err)
-		}
+			} else if o.Err != nil {
+				report("ShAbility/run-allow", fmt.Sprintf("%v", o.Value), o.Err)
+			} else {
+				report("ShAbility/run-allow", fmt.Sprintf("%v", o.Value), fmt.Errorf("run returned %T (want ability.CmdResult)", o.Value))
+			}
 		o = a.Command(atom, ability.ShCommandRun, ability.ShRunArgs{Command: "rm -rf /tmp/x", Timeout: 3 * time.Second})
 		if o.Err == nil {
 			report("ShAbility/run-denied", "rm 应被白名单拒绝但成功", fmt.Errorf("allowlist bypass"))
@@ -491,9 +497,11 @@ func main() {
 			} else {
 				report("BashAbility/run", fmt.Sprintf("exit=%d out=%q", res.ExitCode, res.Stdout), nil)
 			}
-		} else {
-			report("BashAbility/run", fmt.Sprintf("%v", o.Value), o.Err)
-		}
+			} else if o.Err != nil {
+				report("BashAbility/run", fmt.Sprintf("%v", o.Value), o.Err)
+			} else {
+				report("BashAbility/run", fmt.Sprintf("%v", o.Value), fmt.Errorf("run returned %T (want ability.CmdResult)", o.Value))
+			}
 	}
 
 	// --- ability: NetMapAbility (注册/列举/注销 peer) ---
@@ -514,24 +522,28 @@ func main() {
 				report("NetMapAbility/list_peers", fmt.Sprintf("%d peers", len(peers)), nil)
 			}
 		} else {
-			report("NetMapAbility/list_peers", fmt.Sprintf("%v", o.Value), o.Err)
+			report("NetMapAbility/list_peers", fmt.Sprintf("%v", o.Value), fmt.Errorf("list_peers returned %T (want []ability.NetMapPeer)", o.Value))
 		}
 		o = a.Command(atom, ability.NetMapCommandUnregisterPeer, ability.NetMapLookupPeerArgs{Name: "edge-3"})
 		report("NetMapAbility/unregister_peer", "edge-3", o.Err)
 		o = a.Command(atom, ability.NetMapCommandListPeers, nil)
-		stillThere := false
-		if peers, ok := o.Value.([]ability.NetMapPeer); ok {
+		peers, peersOK := o.Value.([]ability.NetMapPeer)
+		if !peersOK {
+			// 类型回归时不能走 o.Err(nil → 假 PASS): 与 list_peers 段同纪律
+			report("NetMapAbility/list_after_remove", fmt.Sprintf("%v", o.Value), fmt.Errorf("list_peers returned %T (want []ability.NetMapPeer)", o.Value))
+		} else {
+			stillThere := false
 			for _, p := range peers {
 				if p.Name == "edge-3" {
 					stillThere = true
 					break
 				}
 			}
-		}
-		if stillThere {
-			report("NetMapAbility/list_after_remove", fmt.Sprintf("%v", o.Value), fmt.Errorf("edge-3 still listed after unregister"))
-		} else {
-			report("NetMapAbility/list_after_remove", fmt.Sprintf("%v", o.Value), o.Err)
+			if stillThere {
+				report("NetMapAbility/list_after_remove", fmt.Sprintf("%v", o.Value), fmt.Errorf("edge-3 still listed after unregister"))
+			} else {
+				report("NetMapAbility/list_after_remove", fmt.Sprintf("edge-3 removed (%d peers)", len(peers)), nil)
+			}
 		}
 	}
 
@@ -694,8 +706,10 @@ func main() {
 					} else {
 						report("MQTT/drain", fmt.Sprintf("got=%d payload=%q", len(msgs), string(msgs[0].Payload)), o.Err)
 					}
-				} else {
+				} else if o.Err != nil {
 					report("MQTT/drain", fmt.Sprintf("%v", o.Value), o.Err)
+				} else {
+					report("MQTT/drain", fmt.Sprintf("%v", o.Value), fmt.Errorf("drain returned %T (want []ability.MQTTMessage)", o.Value))
 				}
 				o = ab.Command(extAtom, ability.MQTTCommandDisconnect, nil)
 				report("MQTT/disconnect", "", o.Err)
@@ -739,8 +753,10 @@ func main() {
 					} else {
 						report("Modbus/read_holding", fmt.Sprintf("regs=%v", res.Regs), o.Err)
 					}
-				} else {
+				} else if o.Err != nil {
 					report("Modbus/read_holding", fmt.Sprintf("%v", o.Value), o.Err)
+				} else {
+					report("Modbus/read_holding", fmt.Sprintf("%v", o.Value), fmt.Errorf("read_holding returned %T (want ability.ModbusReadResult)", o.Value))
 				}
 				o = ab.Command(extAtom, ability.ModbusCommandWriteCoil, ability.ModbusWriteCoilArgs{Address: 5, Value: true})
 				if o.Err != nil {
@@ -757,8 +773,10 @@ func main() {
 					} else {
 						report("Modbus/read_coils", fmt.Sprintf("coils=%v", res.Coils), o.Err)
 					}
-				} else {
+				} else if o.Err != nil {
 					report("Modbus/read_coils", fmt.Sprintf("%v", o.Value), o.Err)
+				} else {
+					report("Modbus/read_coils", fmt.Sprintf("%v", o.Value), fmt.Errorf("read_coils returned %T (want ability.ModbusReadResult)", o.Value))
 				}
 			}
 		}
@@ -778,7 +796,25 @@ func main() {
 		o = a.Command(extAtom, ability.EdgeRoleCommandAddCap, ability.EdgeRoleCapabilityArg{Name: "modbus"})
 		report("EdgeRole/add_capability", "modbus", o.Err)
 		o = a.Command(extAtom, ability.EdgeRoleCommandListCaps, nil)
-		report("EdgeRole/list_capabilities", fmt.Sprintf("%v", o.Value), o.Err)
+		// add 后 list 存在性断言(旧实现只打印——add 变 no-op 也 PASS)
+		if caps, ok := o.Value.([]string); ok {
+			found := false
+			for _, c := range caps {
+				if c == "modbus" {
+					found = true
+					break
+				}
+			}
+			if !found {
+				report("EdgeRole/list_capabilities", fmt.Sprintf("%v", o.Value), fmt.Errorf("modbus not listed after add_capability"))
+			} else {
+				report("EdgeRole/list_capabilities", fmt.Sprintf("%d caps", len(caps)), nil)
+			}
+		} else if o.Err != nil {
+			report("EdgeRole/list_capabilities", fmt.Sprintf("%v", o.Value), o.Err)
+		} else {
+			report("EdgeRole/list_capabilities", fmt.Sprintf("%v", o.Value), fmt.Errorf("list_capabilities returned %T (want []string)", o.Value))
+		}
 		o = a.Command(extAtom, ability.EdgeRoleCommandDescribe, nil)
 		report("EdgeRole/describe", fmt.Sprintf("%v", o.Value), o.Err)
 		o = a.Command(extAtom, ability.EdgeRoleCommandRecordLatency, ability.EdgeRoleRecordLatencyArgs{LatencyMs: 12.5})
@@ -806,7 +842,25 @@ func main() {
 		o = a.Command(extAtom, ability.CloudRoleCommandRegister, ability.CloudRoleRegisterServiceArgs{Name: "svc-1", Version: "1.0", Endpoint: "10.0.0.9:8080"})
 		report("CloudRole/register_service", "svc-1", o.Err)
 		o = a.Command(extAtom, ability.CloudRoleCommandListServices, nil)
-		report("CloudRole/list_services", fmt.Sprintf("%v", o.Value), o.Err)
+		// register 后 list 存在性断言(旧实现只打印——register 变 no-op 也 PASS)
+		if svcs, ok := o.Value.([]ability.CloudRoleService); ok {
+			found := false
+			for _, s := range svcs {
+				if s.Name == "svc-1" {
+					found = true
+					break
+				}
+			}
+			if !found {
+				report("CloudRole/list_services", fmt.Sprintf("%v", o.Value), fmt.Errorf("svc-1 not listed after register_service"))
+			} else {
+				report("CloudRole/list_services", fmt.Sprintf("%d services", len(svcs)), nil)
+			}
+		} else if o.Err != nil {
+			report("CloudRole/list_services", fmt.Sprintf("%v", o.Value), o.Err)
+		} else {
+			report("CloudRole/list_services", fmt.Sprintf("%v", o.Value), fmt.Errorf("list_services returned %T (want []ability.CloudRoleService)", o.Value))
+		}
 		o = a.Command(extAtom, ability.CloudRoleCommandHeartbeat, nil)
 		report("CloudRole/heartbeat", "", o.Err)
 		o = a.Command(extAtom, ability.CloudRoleCommandSetStatus, ability.CloudRoleSetStatusArgs{Status: "healthy"})
@@ -822,10 +876,36 @@ func main() {
 		o := a.Command(extAtom, ability.FileTransferCommandSetTarget, ability.FileTransferTargetArgs{PeerName: "peer-b"})
 		report("FileTransfer/set_target", "peer-b", o.Err)
 		o = a.Command(extAtom, ability.FileTransferCommandUpload, ability.FileTransferUploadArgs{LocalPath: src, RemotePath: "/incoming/fe-src.bin"})
+		// 框架无内置 transport: 无 transport 时 upload 走骨架模式——立即返回
+		// 完成(不实际传输), 这是已记录框架语义(AlgDist 骨架可用)。旧实现
+		// "报错→[SKIP]、成功→PASS" 两种结果都不计入 FAIL——upload 回归为
+		// 硬错误(连骨架完成都不给)或空 ID 时无法告警。这里断言: 返回非空
+		// transfer ID, 且 list 可见该 transfer 处于 completed 终态。
 		if o.Err != nil {
-			fmt.Printf("  [SKIP] FileTransfer/upload (无传输实现, 框架预期): %v\n", o.Err)
+			report("FileTransfer/upload", fmt.Sprintf("%v", o.Err), o.Err)
+		} else if id, ok := o.Value.(string); !ok || strings.TrimSpace(id) == "" {
+			report("FileTransfer/upload", fmt.Sprintf("%v", o.Value), fmt.Errorf("upload returned %T %v (want non-empty transfer ID)", o.Value, o.Value))
 		} else {
-			report("FileTransfer/upload", "incoming/fe-src.bin", nil)
+			report("FileTransfer/upload", fmt.Sprintf("id=%s", id), nil)
+			o = a.Command(extAtom, ability.FileTransferCommandList, nil)
+			if transfers, ok := o.Value.([]ability.FileTransfer); ok {
+				found := false
+				for _, ft := range transfers {
+					if ft.ID == id && ft.Status == ability.FileTransferStatusCompleted {
+						found = true
+						break
+					}
+				}
+				if !found {
+					report("FileTransfer/upload-status", fmt.Sprintf("%v", o.Value), fmt.Errorf("transfer %s not completed in list", id))
+				} else {
+					report("FileTransfer/upload-status", "completed", nil)
+				}
+			} else if o.Err != nil {
+				report("FileTransfer/upload-status", fmt.Sprintf("%v", o.Value), o.Err)
+			} else {
+				report("FileTransfer/upload-status", fmt.Sprintf("%v", o.Value), fmt.Errorf("list returned %T (want []ability.FileTransfer)", o.Value))
+			}
 		}
 	}
 
@@ -848,7 +928,18 @@ func main() {
 		o = a.Command(extAtom, ability.InfluxCommandSetBucket, ability.InfluxConfigArgs{Value: "telemetry"})
 		report("Influx/set_bucket", "telemetry", o.Err)
 		o = a.Command(extAtom, ability.InfluxCommandGetConfig, nil)
-		report("Influx/get_config", fmt.Sprintf("%v", o.Value), o.Err)
+		// set 后 get_config 关键字段往返(旧实现只打印——set 变 no-op 也 PASS)
+		if cfg, ok := o.Value.(ability.InfluxConfig); ok {
+			if cfg.Endpoint != "http://127.0.0.1:8086" || cfg.Bucket != "telemetry" {
+				report("Influx/get_config", fmt.Sprintf("%+v", cfg), fmt.Errorf("get_config round-trip mismatch: %+v", cfg))
+			} else {
+				report("Influx/get_config", fmt.Sprintf("endpoint=%s bucket=%s", cfg.Endpoint, cfg.Bucket), nil)
+			}
+		} else if o.Err != nil {
+			report("Influx/get_config", fmt.Sprintf("%v", o.Value), o.Err)
+		} else {
+			report("Influx/get_config", fmt.Sprintf("%v", o.Value), fmt.Errorf("get_config returned %T (want ability.InfluxConfig)", o.Value))
+		}
 	}
 
 	// TSNAbility (配置类)
@@ -856,7 +947,18 @@ func main() {
 		o := a.Command(extAtom, ability.TSNCommandSetInterface, ability.TSNInterfaceArg{Interface: "eth0"})
 		report("TSN/set_interface", "eth0", o.Err)
 		o = a.Command(extAtom, ability.TSNCommandGetInterface, nil)
-		report("TSN/get_interface", fmt.Sprintf("%v", o.Value), o.Err)
+		// set 后 get 相等断言(旧实现只打印——set 变 no-op 也 PASS)
+		if got, ok := o.Value.(string); ok {
+			if got != "eth0" {
+				report("TSN/get_interface", fmt.Sprintf("%q", got), fmt.Errorf("get_interface round-trip mismatch: got %q want eth0", got))
+			} else {
+				report("TSN/get_interface", got, nil)
+			}
+		} else if o.Err != nil {
+			report("TSN/get_interface", fmt.Sprintf("%v", o.Value), o.Err)
+		} else {
+			report("TSN/get_interface", fmt.Sprintf("%v", o.Value), fmt.Errorf("get_interface returned %T (want string)", o.Value))
+		}
 		o = a.Command(extAtom, ability.TSNCommandRegisterTalker, ability.TSNRegisterTalkerArgs{ID: "stream-100", MAC: "00:11:22:33:44:55", DestMAC: "01:00:5e:00:00:01", VLANID: 100, Priority: 3, PayloadLen: 512, Interval: 1000000000})
 		report("TSN/register_talker", "stream-100", o.Err)
 		o = a.Command(extAtom, ability.TSNCommandListStreams, nil)
@@ -881,7 +983,18 @@ func main() {
 		o := a.Command(extAtom, ability.EKuiperCommandSetEndpoint, ability.EKuiperEndpointArgs{URL: "http://ekuiper.internal.example:9081"})
 		report("EKuiper/set_endpoint", "http://ekuiper.internal.example:9081", o.Err)
 		o = a.Command(extAtom, ability.EKuiperCommandGetEndpoint, nil)
-		report("EKuiper/get_endpoint", fmt.Sprintf("%v", o.Value), o.Err)
+		// set 后 get 相等断言(旧实现只打印——set 变 no-op 也 PASS)
+		if got, ok := o.Value.(string); ok {
+			if got != "http://ekuiper.internal.example:9081" {
+				report("EKuiper/get_endpoint", fmt.Sprintf("%q", got), fmt.Errorf("get_endpoint round-trip mismatch: got %q", got))
+			} else {
+				report("EKuiper/get_endpoint", got, nil)
+			}
+		} else if o.Err != nil {
+			report("EKuiper/get_endpoint", fmt.Sprintf("%v", o.Value), o.Err)
+		} else {
+			report("EKuiper/get_endpoint", fmt.Sprintf("%v", o.Value), fmt.Errorf("get_endpoint returned %T (want string)", o.Value))
+		}
 		// 无 transport 时 create_stream 应正确报错 (验证拒绝路径)
 		o = a.Command(extAtom, ability.EKuiperCommandCreateStream, ability.EKuiperStreamArgs{Name: "s1", SQL: "SELECT * FROM demo"})
 		if o.Err == nil {
@@ -906,7 +1019,18 @@ func main() {
 		} else {
 			report("K8s/set_context", "edge-cluster/edge-ns", nil)
 			o = a.Command(extAtom, ability.K8sCommandGetContext, nil)
-			report("K8s/get_context", fmt.Sprintf("%v", o.Value), o.Err)
+			// set 后 get 关键字段往返(旧实现只打印——set 变 no-op 也 PASS)
+			if got, ok := o.Value.(ability.K8sContextView); ok {
+				if got.Cluster != "edge-cluster" || got.Namespace != "edge-ns" {
+					report("K8s/get_context", fmt.Sprintf("%+v", got), fmt.Errorf("get_context round-trip mismatch: %+v", got))
+				} else {
+					report("K8s/get_context", fmt.Sprintf("%s/%s", got.Cluster, got.Namespace), nil)
+				}
+			} else if o.Err != nil {
+				report("K8s/get_context", fmt.Sprintf("%v", o.Value), o.Err)
+			} else {
+				report("K8s/get_context", fmt.Sprintf("%v", o.Value), fmt.Errorf("get_context returned %T (want ability.K8sContextView)", o.Value))
+			}
 		}
 		// 空 cluster 应被拒
 		o = a.Command(extAtom, ability.K8sCommandSetContext, ability.K8sContextArgs{K8sContext: ability.K8sContext{Cluster: ""}})
@@ -930,7 +1054,18 @@ func main() {
 		o := a.Command(extAtom, ability.DockerCommandSetEndpoint, ability.DockerEndpointArgs{URL: "unix:///var/run/docker.sock"})
 		report("Docker/set_endpoint-unix", "unix:///var/run/docker.sock", o.Err)
 		o = a.Command(extAtom, ability.DockerCommandGetEndpoint, nil)
-		report("Docker/get_endpoint", fmt.Sprintf("%v", o.Value), o.Err)
+		// set 后 get 相等断言(旧实现只打印——set 变 no-op 也 PASS)
+		if got, ok := o.Value.(string); ok {
+			if got != "unix:///var/run/docker.sock" {
+				report("Docker/get_endpoint", fmt.Sprintf("%q", got), fmt.Errorf("get_endpoint round-trip mismatch: got %q", got))
+			} else {
+				report("Docker/get_endpoint", got, nil)
+			}
+		} else if o.Err != nil {
+			report("Docker/get_endpoint", fmt.Sprintf("%v", o.Value), o.Err)
+		} else {
+			report("Docker/get_endpoint", fmt.Sprintf("%v", o.Value), fmt.Errorf("get_endpoint returned %T (want string)", o.Value))
+		}
 		// 回环端点应被拒 (isValidDockerEndpoint 拒绝 localhost)
 		o = a.Command(extAtom, ability.DockerCommandSetEndpoint, ability.DockerEndpointArgs{URL: "tcp://127.0.0.1:2375"})
 		if o.Err == nil {
@@ -998,8 +1133,10 @@ func main() {
 								report("Docker/real-remove", id, o.Err)
 							}
 						}
-					} else {
+					} else if o.Err != nil {
 						report("Docker/real-list", fmt.Sprintf("type=%T", o.Value), o.Err)
+					} else {
+						report("Docker/real-list", fmt.Sprintf("type=%T", o.Value), fmt.Errorf("list_containers returned %T (want []ability.DockerContainer)", o.Value))
 					}
 				}
 			}
@@ -1185,10 +1322,18 @@ func main() {
 			report("SQLiteData/configure", "", err)
 		} else {
 			report("SQLiteData/configure", "ok", nil)
-			if err := d.Command(extAtom, data.DatabaseCommandGetConfig, nil).Err; err != nil {
-				report("SQLiteData/get_config", "", err)
+			// configure 后 get_config 关键字段往返(与其余 DB 段同型)
+			gc := d.Command(extAtom, data.DatabaseCommandGetConfig, nil)
+			if gc.Err != nil {
+				report("SQLiteData/get_config", "", gc.Err)
+			} else if got, ok := gc.Value.(data.SQLiteConfig); ok {
+				if got.Path != cfg.Path || got.Mode != cfg.Mode {
+					report("SQLiteData/get_config", fmt.Sprintf("%+v", got), fmt.Errorf("get_config round-trip mismatch: %+v", got))
+				} else {
+					report("SQLiteData/get_config", "ok", nil)
+				}
 			} else {
-				report("SQLiteData/get_config", "ok", nil)
+				report("SQLiteData/get_config", fmt.Sprintf("%v", gc.Value), fmt.Errorf("get_config returned %T (want SQLiteConfig)", gc.Value))
 			}
 			if err := d.Command(extAtom, data.DatabaseCommandStatus, nil).Err; err != nil {
 				report("SQLiteData/status", "", err)
@@ -1409,17 +1554,27 @@ func main() {
 		// 记录轮换前的令牌四元组, 供 rotate 后断言旧签名失效
 		issueOut := d.Command(atom, data.KeyringCommandIssueToken, data.KeyringIssueTokenArgs{Subject: "pre-rotate", TTL: time.Hour})
 		report("KeyringData/issue_token", "pre-rotate", issueOut.Err)
-		o = d.Command(atom, data.KeyringCommandRotate, nil)
-		report("KeyringData/rotate", "rotate", o.Err)
-		kr := d.(*data.KeyringData)
-		if preRotate, ok := issueOut.Value.(*data.KeyringToken); ok {
-			// 轮换后旧令牌签名必须失效(旧实现是空头注释——只有 rotate→issue→
-			// rotate→revoke_all 四个 Err-only 调用, 无任何校验; 且 rotate 清空
-			// 令牌表后 revoke_all 恒吊销 0 个, 恒 PASS)。
-			if kr.Verify(preRotate.Subject, preRotate.IssuedAt, preRotate.ExpiresAt, kr.Sign(preRotate)) {
-				report("KeyringData/rotate-invalidates-old", "old token must be rejected", fmt.Errorf("old token still verifies after rotate"))
+		kr, krOK := d.(*data.KeyringData)
+		if !krOK {
+			fmt.Printf("  [NOTE] KeyringData 注册类型异常(%T), rotate 签名验证跳过\n", d)
+		} else {
+			// 轮换前捕获旧签名: rotate 后旧签名必须以新密钥失效(rotate 回归
+			// no-op 时旧签名仍有效 → FAIL)。注意 issue_token 返回的是值类型
+			// KeyringToken(TokenSnapshot 拷贝)——旧实现断言 *KeyringToken 恒
+			// false, rotate-invalidates-old 段静默不执行(死断言); 且旧断言
+			// 用轮换后的新密钥自签自验恒 true, 逻辑也写反。
+			preRotate, tokOK := issueOut.Value.(data.KeyringToken)
+			if !tokOK {
+				report("KeyringData/rotate-invalidates-old", fmt.Sprintf("%v", issueOut.Value), fmt.Errorf("issue_token returned %T (want data.KeyringToken)", issueOut.Value))
 			} else {
-				report("KeyringData/rotate-invalidates-old", "old token rejected after rotate", nil)
+				oldSig := kr.Sign(&preRotate)
+				o = d.Command(atom, data.KeyringCommandRotate, nil)
+				report("KeyringData/rotate", "rotate", o.Err)
+				if kr.Verify(preRotate.Subject, preRotate.IssuedAt, preRotate.ExpiresAt, oldSig) {
+					report("KeyringData/rotate-invalidates-old", "old signature still verifies", fmt.Errorf("old token still verifies after rotate (rotate is a no-op?)"))
+				} else {
+					report("KeyringData/rotate-invalidates-old", "old signature rejected", nil)
+				}
 			}
 		}
 		o = d.Command(atom, data.KeyringCommandRevokeAll, nil)

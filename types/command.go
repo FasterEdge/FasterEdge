@@ -71,9 +71,11 @@ func (a *Atom) AuthenticatedCommandContext(ctx context.Context, credential any, 
 	}()
 	// 鉴权器 panic 与普通凭据错误保持可区分(旧实现统一折叠为哨兵,
 	// ComponentPanicError 含 Stack 被构造后丢弃——鉴权后端崩溃被静默
-	// 伪装成凭据错误, 无法告警)。只暴露哨兵 + 类型化错误, 不泄露 panic 值。
+	// 伪装成凭据错误, 无法告警)。%w 包装 panicErr: 文本泄露面与 %v 相同
+	// (错误串都渲染 panic 值), 但 errors.As/Is 可识别 ComponentPanicError
+	// 类型与 Stack 做告警聚合。凭据错误分支(下方)刻意丢弃详情只留哨兵。
 	if panicked {
-		out.Err = fmt.Errorf("authenticate command: %w: %v", ErrAuthenticationFailed, panicErr)
+		out.Err = fmt.Errorf("authenticate command: %w: %w", ErrAuthenticationFailed, panicErr)
 		return
 	}
 	if authErr != nil {

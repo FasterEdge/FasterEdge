@@ -65,9 +65,19 @@ func (t *mqttClientTransport) Connect() error {
 		conn.Close()
 		return err
 	}
-	// CONNACK: 固定头 0x20, 剩余长度 2
+	// CONNACK: 固定头 0x20, 剩余长度 2。
+	// 旧实现 DialTimeout 后无读写 deadline: broker 收 CONNECT 不回 CONNACK
+	// (如端口指向非 MQTT 监听)时 ReadFull 永久阻塞, verify 进程挂死。
+	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		conn.Close()
+		return err
+	}
 	ack := make([]byte, 4)
 	if _, err := io.ReadFull(conn, ack); err != nil {
+		conn.Close()
+		return err
+	}
+	if err := conn.SetReadDeadline(time.Time{}); err != nil {
 		conn.Close()
 		return err
 	}
@@ -100,6 +110,11 @@ func (t *mqttClientTransport) readLoop() {
 		kind := hdr0[0] & 0xF0
 		// 剩余长度为变长编码(1-4 字节)。旧实现只读 1 字节:
 		// broker 下发 ≥128 字节的包(如大 PUBLISH)时解码截断, 流永久错位。
+		// 包已开始: 剩余长度与 body 的读取设 5s deadline(空闲连接由 hdr0
+		// 无 deadline 容忍), body 读完清除。
+		if err := t.conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+			return
+		}
 		remLen := 0
 		mult := 1
 		for i := 0; i < 4; i++ {
@@ -117,8 +132,24 @@ func (t *mqttClientTransport) readLoop() {
 			}
 			mult *= 128
 		}
+		// 变长剩余长度上限 268MB: 恶意/损坏 broker 声明大值会让一次性
+		// make 分配 OOM——1MiB 上限与 docker_transport 响应限额同纪律,
+		// 超限断开(调用方的 waitAck 3s 超时兜底)。
+		if remLen > 1<<20 {
+			t.mu.Lock()
+			t.connected = false
+			t.mu.Unlock()
+			t.conn.Close()
+			return
+		}
 		body := make([]byte, remLen)
 		if _, err := io.ReadFull(t.conn, body); err != nil {
+			t.mu.Lock()
+			t.connected = false
+			t.mu.Unlock()
+			return
+		}
+		if err := t.conn.SetReadDeadline(time.Time{}); err != nil {
 			t.mu.Lock()
 			t.connected = false
 			t.mu.Unlock()

@@ -373,11 +373,13 @@ func isValidDockerEndpoint(u string) bool {
 }
 
 // dockerBegin/dockerEnd 是并发 transport 调用闸门(对比 CmdAbility 16 基线)。
+// 原子 Add 后比较: 旧实现 Load+Add 之间有窗口, 突发并发可临时超上限
+// (限流是硬的——与 CmdAbility 的 running.Add(1) > maxConc 同型)。
 func (d *DockerAbility) dockerBegin(act string) types.CommandOutput {
-	if d.running.Load() >= maxDockerConcurrency {
+	if d.running.Add(1) > maxDockerConcurrency {
+		d.running.Add(-1)
 		return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: too many concurrent calls: %w", act, types.ErrInvalidArguments)}
 	}
-	d.running.Add(1)
 	return types.CommandOutput{}
 }
 

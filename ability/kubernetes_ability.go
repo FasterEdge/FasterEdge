@@ -400,11 +400,12 @@ func (k *K8sAbility) currentNamespace() string {
 
 // k8sBegin 为一次 transport 调用分配并发闸门与 30s 超时 ctx。
 // 调用方必须在调用结束后执行返回的 done()(defer 即可)。
+// 原子 Add 后比较: 旧实现 Load+Add 之间有窗口, 突发并发可临时超上限。
 func (k *K8sAbility) k8sBegin(act string) (context.Context, func(), types.CommandOutput) {
-	if k.running.Load() >= maxK8sConcurrency {
+	if k.running.Add(1) > maxK8sConcurrency {
+		k.running.Add(-1)
 		return nil, nil, types.CommandOutput{Name: act, Err: fmt.Errorf("%s: too many concurrent calls: %w", act, types.ErrInvalidArguments)}
 	}
-	k.running.Add(1)
 	ctx, cancel := context.WithTimeout(context.Background(), k8sCallTimeout)
 	return ctx, func() { cancel(); k.running.Add(-1) }, types.CommandOutput{}
 }

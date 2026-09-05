@@ -104,6 +104,7 @@ type AlgDistAbility struct {
 	// watcherWG 跟踪所有进行中的状态同步 watcher,Unmount 时用于等待。
 	watcherWG sync.WaitGroup
 	seq       uint64
+	closing   bool // Unmount 置位: 拒绝新 watcher(防 WaitGroup Add-while-Wait)
 }
 
 // NewAlgDistAbility 创建一个算法分发能力。
@@ -263,6 +264,12 @@ func isValidAlgDistRemotePath(p string) bool {
 }
 
 func (a *AlgDistAbility) Unmount(_ context.Context, _ *types.Atom) error {
+	// 置 closing 拒绝新 watcher(与 startJobWatcher 的 Add 同一把锁串行)——
+	// 旧实现无标志只 Wait: distribute 恰在计数为 0 时 Add(1) 属 WaitGroup
+	// 文档禁止的 Add-while-Wait(0), 未定义行为窗口。
+	a.mu.Lock()
+	a.closing = true
+	a.mu.Unlock()
 	a.watcherWG.Wait()
 	return nil
 }
@@ -500,7 +507,16 @@ func (a *AlgDistAbility) startJobWatcher(jobID, transferID string) {
 	if jobID == "" || transferID == "" {
 		return
 	}
+	// Add 与 Unmount 的 closing 置位在同一把锁内串行: 防止 Add-while-Wait(0)
+	// (WaitGroup 文档禁止, 可 panic)——Unmount 置 closing 后拒绝新 watcher,
+	// Wait 只等已登记 goroutine。
+	a.mu.Lock()
+	if a.closing {
+		a.mu.Unlock()
+		return
+	}
 	a.watcherWG.Add(1)
+	a.mu.Unlock()
 	go func() {
 		defer a.watcherWG.Done()
 		a.watchJob(jobID, transferID)
@@ -558,21 +574,25 @@ func (a *AlgDistAbility) watchJob(jobID, transferID string) {
 		if isTerminalFileTransfer(transfer.Status) {
 			a.mu.Lock()
 			cur, exists := a.jobs[jobID]
-			a.mu.Unlock()
 			if !exists {
+				a.mu.Unlock()
 				return
 			}
-			a.mu.Lock()
-			switch transfer.Status {
-			case FileTransferStatusCompleted:
-				cur.Status = AlgDistStatusCompleted
-			case FileTransferStatusFailed:
-				cur.Status = AlgDistStatusFailed
-				cur.Error = transfer.Error
-			case FileTransferStatusCanceled:
-				cur.Status = AlgDistStatusCanceled
+			// 用户已取消(cancelJob 置 Canceled)时不再覆写终态: transfer 与
+			// cancel 竞速完成会把 Canceled 覆写成 Completed/Failed, 用户
+			// 可观测状态与取消动作矛盾(旧实现无条件覆写)。
+			if cur.Status != AlgDistStatusCanceled {
+				switch transfer.Status {
+				case FileTransferStatusCompleted:
+					cur.Status = AlgDistStatusCompleted
+				case FileTransferStatusFailed:
+					cur.Status = AlgDistStatusFailed
+					cur.Error = transfer.Error
+				case FileTransferStatusCanceled:
+					cur.Status = AlgDistStatusCanceled
+				}
+				cur.FinishedAt = time.Now()
 			}
-			cur.FinishedAt = time.Now()
 			a.mu.Unlock()
 			return
 		}
