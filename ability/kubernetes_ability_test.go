@@ -2,6 +2,8 @@ package ability
 
 import (
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -125,11 +127,23 @@ func TestK8sAbilitySetGetContext(t *testing.T) {
 	}
 	if out := k.Command(atom, K8sCommandGetContext, nil); out.Err != nil {
 		t.Fatal(out.Err)
-	} else if ctx, _ := out.Value.(K8sContext); ctx.Namespace != "default" {
+	} else if ctx, _ := out.Value.(K8sContextView); ctx.Namespace != "default" {
 		t.Fatalf("namespace = %q, want default", ctx.Namespace)
 	}
-	if out := k.Command(atom, K8sCommandSetContext, K8sContextArgs{K8sContext: K8sContext{Cluster: "prod", Namespace: "team-a"}}); out.Err != nil {
+	// 安全回归: set_context 携带含私钥的 kubeconfig 后, get_context/set_context 回执
+	// 均不得回读 Kubeconfig 原文, 只暴露是否已配置。
+	secretKC := "apiVersion: v1\nkind: Config\nusers:\n- name: x\n  user:\n    client-key-data: LS0tLS1CRUdJTiBSU0EgUFJJVkFURSBLRVktLS0tLQo="
+	if out := k.Command(atom, K8sCommandSetContext, K8sContextArgs{K8sContext: K8sContext{Cluster: "prod", Namespace: "team-a", Kubeconfig: secretKC}}); out.Err != nil {
 		t.Fatal(out.Err)
+	} else if v, ok := out.Value.(K8sContextView); !ok || v.KubeconfigConfigured != true || v.Cluster != "prod" {
+		t.Fatalf("set_context view = %#v, want configured view without raw kubeconfig", out.Value)
+	}
+	if out := k.Command(atom, K8sCommandGetContext, nil); out.Err != nil {
+		t.Fatal(out.Err)
+	} else if v, ok := out.Value.(K8sContextView); !ok || v.KubeconfigConfigured != true {
+		t.Fatalf("get_context view = %#v, want configured=true", out.Value)
+	} else if strings.Contains(fmt.Sprintf("%v", out.Value), "client-key-data") {
+		t.Fatalf("get_context leaked raw kubeconfig: %v", out.Value)
 	}
 }
 

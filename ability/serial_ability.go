@@ -2,6 +2,8 @@
 package ability
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -61,12 +63,14 @@ type SerialSetConfigArgs struct {
 }
 
 // SerialTransport 抽象出真实串口字节流收发。
-// Open 打开并按配置初始化,Close 释放资源,Write/Read 完成字节流读写。
+// Open 打开并按配置初始化,Close 释放资源,Write/Read 完成字节流读写,
+// ApplyConfig 把新配置下发到已打开的端口(参数变更真正生效)。
 type SerialTransport interface {
 	Open(port string, cfg SerialConfig) error
 	Close(port string) error
 	Write(port string, data []byte) (int, error)
 	Read(port string, length int, timeout time.Duration) ([]byte, error)
+	ApplyConfig(port string, cfg SerialConfig) error
 }
 
 // SerialPortLister 抽象出列举可用串口设备(默认实现枚举 /dev/tty* 等)。
@@ -120,6 +124,33 @@ func (s *SerialAbility) Mount(atom *types.Atom) error {
 	}
 	return s.Check(atom)
 }
+
+// Unmount 关闭所有已打开端口并清空记录, 防止 atom 拆除/回滚时串口 fd 泄漏
+// (旧实现未实现 Unmounter, 框架永不调用 Close)。
+func (s *SerialAbility) Unmount(ctx context.Context, atom *types.Atom) error {
+	s.mu.Lock()
+	ports := make([]string, 0, len(s.openPorts))
+	for p := range s.openPorts {
+		ports = append(ports, p)
+	}
+	transport := s.transport
+	s.mu.Unlock()
+	var errs []error
+	for _, p := range ports {
+		if transport != nil {
+			if err := transport.Close(p); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		s.mu.Lock()
+		delete(s.openPorts, p)
+		s.mu.Unlock()
+	}
+	return errors.Join(errs...)
+}
+
+// Compile-time guarantee that SerialAbility satisfies Unmounter.
+var _ types.Unmounter = (*SerialAbility)(nil)
 
 func (s *SerialAbility) Command(atom *types.Atom, act string, args any) types.CommandOutput {
 	if err := s.Check(atom); err != nil {
@@ -251,13 +282,21 @@ func (s *SerialAbility) Command(atom *types.Atom, act string, args any) types.Co
 		}
 		s.mu.Lock()
 		_, open := s.openPorts[port]
-		if open {
-			s.openPorts[port] = typed.Config
-		}
+		transport := s.transport
 		s.mu.Unlock()
 		if !open {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: port %q not open: %w", act, port, types.ErrInvalidArguments)}
 		}
+		// 配置必须真正下发到 transport, 否则新波特率等参数静默失效
+		// (旧实现只更新本地记录, 硬件仍按旧配置运行)。
+		if transport != nil {
+			if err := transport.ApplyConfig(port, typed.Config); err != nil {
+				return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: apply config: %w: %v", act, types.ErrInvalidArguments, err)}
+			}
+		}
+		s.mu.Lock()
+		s.openPorts[port] = typed.Config
+		s.mu.Unlock()
 		return types.CommandOutput{Name: act, Value: typed.Config}
 	case SerialCommandGetConfig:
 		typed, ok := args.(SerialPortArg)

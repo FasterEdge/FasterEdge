@@ -214,20 +214,25 @@ func (t *TSNAbility) Command(atom *types.Atom, act string, args any) types.Comma
 		if typed.CycleTime < 0 {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: cycle time must be non-negative: %w", act, types.ErrInvalidArguments)}
 		}
-		for _, gs := range typed.GateStates {
-			_ = gs
+		if len(typed.GateStates) == 0 || len(typed.GateStates) > 16 {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: gate states must be 1-16 bytes: %w", act, types.ErrInvalidArguments)}
 		}
+		// 深拷贝 GateStates: 旧实现直接存调用方 slice(别名), 调用方事后修改会与
+		// 并发 GetTimeAware 的读取形成数据竞争。
+		gs := append([]byte(nil), typed.GateStates...)
 		t.mu.Lock()
-		t.timeAware = typed
+		t.timeAware = TSNTimeAwareArgs{Enabled: typed.Enabled, BaseTime: typed.BaseTime, CycleTime: typed.CycleTime, GateStates: gs}
 		t.mu.Unlock()
-		return types.CommandOutput{Name: act, Value: typed}
+		return types.CommandOutput{Name: act, Value: TSNTimeAwareArgs{Enabled: typed.Enabled, BaseTime: typed.BaseTime, CycleTime: typed.CycleTime, GateStates: gs}}
 	case TSNCommandGetTimeAware:
 		if args != nil {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
 		}
 		t.mu.RLock()
-		defer t.mu.RUnlock()
-		return types.CommandOutput{Name: act, Value: t.timeAware}
+		ta := t.timeAware
+		t.mu.RUnlock()
+		out := TSNTimeAwareArgs{Enabled: ta.Enabled, BaseTime: ta.BaseTime, CycleTime: ta.CycleTime, GateStates: append([]byte(nil), ta.GateStates...)}
+		return types.CommandOutput{Name: act, Value: out}
 	}
 	return types.CommandOutput{Name: act, Err: fmt.Errorf("command %s: %w", act, types.ErrUnsupportedCommand)}
 }

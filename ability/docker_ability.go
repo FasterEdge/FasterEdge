@@ -3,6 +3,8 @@ package ability
 
 import (
 	"fmt"
+	"net"
+	"net/netip"
 	"sort"
 	"strings"
 	"sync"
@@ -270,12 +272,36 @@ func isValidDockerEndpoint(u string) bool {
 		if host == "" {
 			return false
 		}
-		// IPv6 字面量带方括号, 先剥掉再比较回环 (如 tcp://[::1]:2375)
+		// IPv6 字面量带方括号, 先剥掉 (如 tcp://[::1]:2375)
 		if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") && len(host) >= 2 {
 			host = host[1 : len(host)-1]
 		}
-		if host == "localhost" || host == "127.0.0.1" || host == "0.0.0.0" || host == "::1" {
+		// IP 字面量: 用 netip 规范化后再判回环/私网等。
+		// 关键: netip 可解析 IPv4-mapped IPv6(如 ::ffff:127.0.0.1),
+		// Unmap() 后规范化为 127.0.0.1, IsLoopback() 命中 —— 旧实现仅与 "::1"
+		// 字面比较, 该形态可绕过回环封锁。
+		if addr, err := netip.ParseAddr(host); err == nil {
+			addr = addr.Unmap()
+			if addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast() || addr.IsMulticast() || addr.IsUnspecified() {
+				return false
+			}
+			return true
+		}
+		// 主机名: 去掉尾点 FQDN 后比较回环别名, 并尽力解析验证非回环
+		// (注意 DNS rebinding 的 TOCTOU 限制: 校验时解析与连接时解析可能不同,
+		// 这里是尽力而为的纵深防御)。
+		if strings.TrimSuffix(host, ".") == "localhost" {
 			return false
+		}
+		if ips, err := net.LookupHost(host); err == nil {
+			for _, ipStr := range ips {
+				if addr, aerr := netip.ParseAddr(ipStr); aerr == nil {
+					addr = addr.Unmap()
+					if addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast() || addr.IsUnspecified() {
+						return false
+					}
+				}
+			}
 		}
 		return true
 	}

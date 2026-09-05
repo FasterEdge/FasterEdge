@@ -227,6 +227,36 @@ func (a *AlgDistAbility) Check(atom *types.Atom) error {
 func (a *AlgDistAbility) Mount(atom *types.Atom) error { return a.Check(atom) }
 
 // Unmount 等待所有状态同步 watcher 退出,保证 AlgDistJob 状态收敛。
+// isValidAlgDistComponent 校验算法 name/version: 仅字母数字._-, 拒绝 "/" ".."
+// 等路径穿越字符与 "@"(键分隔符)等污染字符。
+func isValidAlgDistComponent(s string) bool {
+	if s == "" || len(s) > 128 {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// isValidAlgDistRemotePath 校验远端目标路径: 必须绝对路径且无 ".." 组件
+// (防远端写路径穿越, 如 name 含 "/" 或 remote 含 "../" 逃出目标目录)。
+func isValidAlgDistRemotePath(p string) bool {
+	if !strings.HasPrefix(p, "/") {
+		return false
+	}
+	for _, seg := range strings.Split(p, "/") {
+		if seg == ".." {
+			return false
+		}
+	}
+	return true
+}
+
 func (a *AlgDistAbility) Unmount(_ context.Context, _ *types.Atom) error {
 	a.watcherWG.Wait()
 	return nil
@@ -249,6 +279,10 @@ func (a *AlgDistAbility) Command(atom *types.Atom, act string, args any) types.C
 		source := strings.TrimSpace(typed.SourcePath)
 		if name == "" || version == "" || source == "" {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: name/version/source required: %w", act, types.ErrInvalidArguments)}
+		}
+		// 组件名白名单: 仅字母数字._-(拒绝 "/" 与 "..", 防远端路径穿越/键污染)
+		if !isValidAlgDistComponent(name) || !isValidAlgDistComponent(version) {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: name/version may only contain letters, digits, '.', '_', '-': %w", act, types.ErrInvalidArguments)}
 		}
 		key := algKey(name, version)
 		alg := &AlgDistAlgorithm{
@@ -325,8 +359,13 @@ func (a *AlgDistAbility) Command(atom *types.Atom, act string, args any) types.C
 		if name == "" || version == "" || target == "" {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: name/version/target required: %w", act, types.ErrInvalidArguments)}
 		}
+		if !isValidAlgDistComponent(name) || !isValidAlgDistComponent(version) {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: name/version may only contain letters, digits, '.', '_', '-': %w", act, types.ErrInvalidArguments)}
+		}
 		if remote == "" {
 			remote = "/algorithms/" + name + "-" + version
+		} else if !isValidAlgDistRemotePath(remote) {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: remote path must be absolute and contain no '..' components: %w", act, types.ErrInvalidArguments)}
 		}
 		a.mu.RLock()
 		alg, ok := a.algs[algKey(name, version)]

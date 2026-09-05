@@ -36,6 +36,8 @@ func TestConfigFileAbilityRejectsMissingDependencies(t *testing.T) {
 
 func TestConfigFileAbilitySetGetPath(t *testing.T) {
 	a := NewConfigFileAbility()
+	root := t.TempDir()
+	a.SetRoot(root)
 	atom := newConfigFileAtom(t)
 	if out := a.Command(atom, ConfigFileCommandSetPath, "raw-string"); !errors.Is(out.Err, types.ErrInvalidArguments) {
 		t.Fatalf("set wrong type error = %v", out.Err)
@@ -46,22 +48,28 @@ func TestConfigFileAbilitySetGetPath(t *testing.T) {
 	if out := a.Command(atom, ConfigFileCommandSetPath, ConfigFilePathArg{Path: "  "}); !errors.Is(out.Err, types.ErrInvalidArguments) {
 		t.Fatalf("set blank path error = %v", out.Err)
 	}
-	wantPath := filepath.Clean("/tmp/cfg.json")
-	if out := a.Command(atom, ConfigFileCommandSetPath, ConfigFilePathArg{Path: "/tmp/cfg.json"}); out.Err != nil {
+	// 逃逸路径必须拒绝(任意文件读写防线)
+	if out := a.Command(atom, ConfigFileCommandSetPath, ConfigFilePathArg{Path: "../../etc/passwd"}); !errors.Is(out.Err, types.ErrInvalidArguments) {
+		t.Fatalf("set escape path error = %v", out.Err)
+	}
+	if out := a.Command(atom, ConfigFileCommandSetPath, ConfigFilePathArg{Path: "sub/cfg.json"}); out.Err != nil {
 		t.Fatal(out.Err)
 	}
 	if out := a.Command(atom, ConfigFileCommandGetPath, struct{}{}); !errors.Is(out.Err, types.ErrInvalidArguments) {
 		t.Fatalf("get with args error = %v", out.Err)
 	}
+	wantPath := filepath.Join(root, "sub", "cfg.json")
 	if out := a.Command(atom, ConfigFileCommandGetPath, nil); out.Err != nil {
 		t.Fatal(out.Err)
 	} else if out.Value != wantPath {
-		t.Fatalf("get path = %q", out.Value)
+		t.Fatalf("get path = %q, want %q", out.Value, wantPath)
 	}
 }
 
 func TestConfigFileAbilityExists(t *testing.T) {
 	a := NewConfigFileAbility()
+	root := t.TempDir()
+	a.SetRoot(root)
 	atom := newConfigFileAtom(t)
 	if out := a.Command(atom, ConfigFileCommandExists, "raw-string"); !errors.Is(out.Err, types.ErrInvalidArguments) {
 		t.Fatalf("exists wrong type error = %v", out.Err)
@@ -69,7 +77,11 @@ func TestConfigFileAbilityExists(t *testing.T) {
 	if out := a.Command(atom, ConfigFileCommandExists, ConfigFilePathArg{Path: ""}); !errors.Is(out.Err, types.ErrInvalidArguments) {
 		t.Fatalf("exists empty error = %v", out.Err)
 	}
-	tmpFile := filepath.Join(t.TempDir(), "exists.json")
+	// 逃逸路径拒绝
+	if out := a.Command(atom, ConfigFileCommandExists, ConfigFilePathArg{Path: "../secret.json"}); !errors.Is(out.Err, types.ErrInvalidArguments) {
+		t.Fatalf("exists escape error = %v", out.Err)
+	}
+	tmpFile := filepath.Join(root, "exists.json")
 	if out := a.Command(atom, ConfigFileCommandExists, ConfigFilePathArg{Path: tmpFile}); out.Err != nil {
 		t.Fatal(out.Err)
 	} else if out.Value.(bool) {
@@ -89,6 +101,7 @@ func TestConfigFileAbilityLoadSave(t *testing.T) {
 	a := NewConfigFileAbility()
 	atom := newConfigFileAtom(t)
 	dir := t.TempDir()
+	a.SetRoot(dir)
 	path := filepath.Join(dir, "config.json")
 	// 类型错误
 	if out := a.Command(atom, ConfigFileCommandLoad, "raw-string"); !errors.Is(out.Err, types.ErrInvalidArguments) {

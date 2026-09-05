@@ -5,11 +5,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/FasterEdge/FasterEdge/types"
+)
+
+const (
+	// mqttMaxPayloadBytes 是单条消息负载的上限(1 MiB),防恶意 broker/调用方
+	// 通过无限大 payload 造成内存耗尽(队列长度有界但字节数原本无界)。
+	mqttMaxPayloadBytes = 1 << 20
 )
 
 const (
@@ -131,6 +139,9 @@ func newMQTTQueue(max int) *mqttQueue {
 }
 
 func (q *mqttQueue) push(m MQTTMessage) bool {
+	if len(m.Payload) > mqttMaxPayloadBytes {
+		return false
+	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if q.closed {
@@ -274,6 +285,15 @@ func (m *MQTTAbility) Unmount(ctx context.Context, _ *types.Atom) error {
 	case err := <-result:
 		return err
 	case <-ctx.Done():
+		// Disconnect 阻塞时等待一个有限窗口让 goroutine 退出, 避免每次
+		// Unmount 泄漏一个 goroutine + 底层连接。Go 无法强制终止 goroutine,
+		// 但窗口期给了正常慢连接退出机会。
+		timer := time.NewTimer(2 * time.Second)
+		defer timer.Stop()
+		select {
+		case <-result:
+		case <-timer.C:
+		}
 		return ctx.Err()
 	}
 }
@@ -396,6 +416,9 @@ func (m *MQTTAbility) Command(atom *types.Atom, act string, args any) types.Comm
 		if typed.Qos > MQTTQos2 {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: invalid qos: %w", act, types.ErrInvalidArguments)}
 		}
+		if len(typed.Payload) > mqttMaxPayloadBytes {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: payload exceeds %d bytes: %w", act, mqttMaxPayloadBytes, types.ErrInvalidArguments)}
+		}
 		m.mu.RLock()
 		transport := m.transport
 		m.mu.RUnlock()
@@ -418,8 +441,10 @@ func (m *MQTTAbility) Command(atom *types.Atom, act string, args any) types.Comm
 		if typed.Qos > MQTTQos2 {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: invalid qos: %w", act, types.ErrInvalidArguments)}
 		}
-		// Reserve topic/queue while holding the write lock so Unmount can't
-		// detach and a concurrent subscribe recreate the queue afterwards.
+		// 锁内做状态检查与队列占位, transport.Subscribe(网络往返)在锁外执行:
+		// 旧实现整段持有写锁, 若 transport 回调路径调用 PushMessage(RLock)
+		// 且恰有消息到达, 会形成"回调等锁 -> SUBACK 无人处理 -> Subscribe 永不返回"
+		// 的死锁, 慢 broker 也会让所有 MQTT 操作全局串行停顿。
 		m.mu.Lock()
 		if m.closing {
 			m.mu.Unlock()
@@ -434,12 +459,17 @@ func (m *MQTTAbility) Command(atom *types.Atom, act string, args any) types.Comm
 			m.mu.Unlock()
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: no transport: %w", act, types.ErrInvalidArguments)}
 		}
+		m.queues[topic] = newMQTTQueue(typed.MaxQueue)
+		m.mu.Unlock()
 		if err := transport.Subscribe(topic, typed.Qos); err != nil {
+			m.mu.Lock()
+			if q, ok := m.queues[topic]; ok {
+				q.close()
+				delete(m.queues, topic)
+			}
 			m.mu.Unlock()
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %v", act, types.ErrInvalidArguments, err)}
 		}
-		m.queues[topic] = newMQTTQueue(typed.MaxQueue)
-		m.mu.Unlock()
 		return types.CommandOutput{Name: act, Value: topic}
 	case MQTTCommandUnsubscribe:
 		typed, ok := args.(MQTTTopicArg)
@@ -498,6 +528,9 @@ func (m *MQTTAbility) Command(atom *types.Atom, act string, args any) types.Comm
 
 // isAcceptableBrokerURL 限制 MQTT URL 必须是 tcp/tls/ssl/ws/wss 协议,且 host 不为本地回环。
 // 这与 TimeAbility / CloudRoleAbility 的网络策略一致(私网 broker 允许, 回环拒绝)。
+// host 提取使用标准 URL 解析取 Hostname(): 旧实现按最后一个冒号切分会把
+// userinfo 手法(tcp://alice@127.0.0.1:1883)提取成 "alice@127.0.0.1" 绕过回环名单;
+// IP 字面量经 netip 规范化(IPv4-mapped IPv6)后再判回环。
 func isAcceptableBrokerURL(u string) bool {
 	if u == "" {
 		return false
@@ -517,7 +550,23 @@ func isAcceptableBrokerURL(u string) bool {
 			if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") && len(host) >= 2 {
 				host = host[1 : len(host)-1]
 			}
-			if host == "" || host == "localhost" || host == "127.0.0.1" || host == "0.0.0.0" || host == "::1" {
+			if host == "" {
+				return false
+			}
+			// userinfo 防护: 标准 URL 解析后 Hostname() 不含 userinfo
+			if parsed, err := url.Parse(u); err == nil && parsed.Hostname() != "" {
+				host = parsed.Hostname()
+			}
+			// IP 字面量: netip 规范化后判回环/未指定
+			if addr, aerr := netip.ParseAddr(host); aerr == nil {
+				addr = addr.Unmap()
+				if addr.IsLoopback() || addr.IsUnspecified() {
+					return false
+				}
+				return true
+			}
+			// 主机名: 去掉尾点 FQDN 后比较回环别名
+			if strings.TrimSuffix(host, ".") == "localhost" {
 				return false
 			}
 			return true

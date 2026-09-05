@@ -19,11 +19,11 @@ func TestRoleAbilityRejectsWrongAndBlankSetRoleArguments(t *testing.T) {
 
 func TestRoleAbilitySetAndGetRole(t *testing.T) {
 	r := &RoleAbility{}
-	if out := r.Command(nil, CommandSetRole, RoleAbilityArgs{Role: "worker"}); out.Err != nil {
+	if out := r.Command(nil, CommandSetRole, RoleAbilityArgs{Role: RoleCloud}); out.Err != nil {
 		t.Fatal(out.Err)
 	}
 	out := r.Command(nil, CommandGetRole, nil)
-	if out.Err != nil || out.Value != "worker" {
+	if out.Err != nil || out.Value != RoleCloud {
 		t.Fatalf("get role = %#v, error %v", out.Value, out.Err)
 	}
 }
@@ -38,7 +38,7 @@ func TestRoleAbilityConcurrentCommands(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			<-start
-			if out := r.Command(nil, CommandSetRole, RoleAbilityArgs{Role: "worker"}); out.Err != nil {
+			if out := r.Command(nil, CommandSetRole, RoleAbilityArgs{Role: RoleEdge}); out.Err != nil {
 				errs <- out.Err
 			}
 			if out := r.Command(nil, CommandGetRole, nil); out.Err != nil {

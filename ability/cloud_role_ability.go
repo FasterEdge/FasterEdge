@@ -3,6 +3,9 @@ package ability
 
 import (
 	"fmt"
+	"net"
+	"net/netip"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -282,33 +285,29 @@ func normalizeStatus(s CloudRoleStatus) CloudRoleStatus {
 	return CloudRoleStatusUnknown
 }
 
-// isAcceptableControllerURL 限制 controller 必须是 http(s)://host[:port][/path] 形式,拒绝本地回环、私网、链路本地。
-// 这与 TimeAbility 的网络策略一致,降低 SSRF 风险。
+// isAcceptableControllerURL 限制 controller 必须是 http(s)://host[:port][/path] 形式,
+// 拒绝本地回环、私网、链路本地(与 TimeAbility 网络策略一致, 降低 SSRF 风险)。
+// 旧实现仅与 4 个字面量比较, 私网/链路本地/IPv4-mapped IPv6(userinfo 手法)
+// 全部可绕过, 与注释宣称的策略完全不符。
 func isAcceptableControllerURL(u string) bool {
 	lower := strings.ToLower(u)
 	if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
 		return false
 	}
-	rest := u
-	if i := strings.Index(lower, "://"); i >= 0 {
-		rest = u[i+3:]
-	}
-	host := rest
-	if i := strings.IndexAny(rest, "/?#"); i >= 0 {
-		host = rest[:i]
-	}
-	if i := strings.LastIndex(host, ":"); i >= 0 {
-		host = host[:i]
-	}
-	if host == "" {
+	parsed, err := url.Parse(u)
+	if err != nil || parsed.Hostname() == "" || parsed.User != nil {
 		return false
 	}
-	// IPv6 字面量带方括号, 先剥掉再比较回环 (如 http://[::1]:8080)
-	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") && len(host) >= 2 {
-		host = host[1 : len(host)-1]
+	host := parsed.Hostname()
+	// IP 字面量: netip 规范化(IPv4-mapped IPv6)后复用 addressPolicy.validateIP
+	// 拒绝回环/私网/链路本地/组播/未指定/CGNAT/特殊用段。
+	if addr, aerr := netip.ParseAddr(host); aerr == nil {
+		addr = addr.Unmap()
+		ip := net.IP(addr.AsSlice())
+		return (addressPolicy{allowPrivate: false}).validateIP(ip) == nil
 	}
-	if host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "0.0.0.0" {
-		return false
-	}
-	return true
+	// 主机名字面回环别名拒绝。其余主机名不在存储期解析: DNS rebinding 的 TOCTOU
+	// 使存储期解析价值有限, 且会拒绝对离线/内网域名; 真正拨号时应像
+	// TimeAbility 的 addressPolicy.dialContext 那样对解析结果二次校验。
+	return strings.TrimSuffix(strings.ToLower(host), ".") != "localhost"
 }

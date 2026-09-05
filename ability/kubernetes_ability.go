@@ -20,6 +20,9 @@ const (
 	K8sCommandGet        = "get"
 	K8sCommandScale      = "scale"
 	K8sCommandGetLogs    = "get_logs"
+
+	// k8sMaxLogTail 是 get_logs 的日志行数上界,防 transport 无限拉取。
+	k8sMaxLogTail = 1000
 )
 
 // K8sContext 描述 K8s 集群上下文。
@@ -27,6 +30,14 @@ type K8sContext struct {
 	Cluster    string
 	Namespace  string
 	Kubeconfig string
+}
+
+// K8sContextView 是 get_context/set_context 对外暴露的安全视图:
+// Kubeconfig 原文(通常含 client-certificate-data/client-key-data/token)永不回读。
+type K8sContextView struct {
+	Cluster              string
+	Namespace            string
+	KubeconfigConfigured bool
 }
 
 // K8sContextArgs 是 set_context 的参数。
@@ -144,14 +155,22 @@ func (k *K8sAbility) Command(atom *types.Atom, act string, args any) types.Comma
 		k.mu.Lock()
 		k.ctx = K8sContext{Cluster: strings.TrimSpace(typed.Cluster), Namespace: typed.Namespace, Kubeconfig: typed.Kubeconfig}
 		k.mu.Unlock()
-		return types.CommandOutput{Name: act, Value: k.ctx}
+		return types.CommandOutput{Name: act, Value: K8sContextView{
+			Cluster:              k.ctx.Cluster,
+			Namespace:            k.ctx.Namespace,
+			KubeconfigConfigured: strings.TrimSpace(k.ctx.Kubeconfig) != "",
+		}}
 	case K8sCommandGetContext:
 		if args != nil {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
 		}
 		k.mu.RLock()
 		defer k.mu.RUnlock()
-		return types.CommandOutput{Name: act, Value: k.ctx}
+		return types.CommandOutput{Name: act, Value: K8sContextView{
+			Cluster:              k.ctx.Cluster,
+			Namespace:            k.ctx.Namespace,
+			KubeconfigConfigured: strings.TrimSpace(k.ctx.Kubeconfig) != "",
+		}}
 	case K8sCommandApply:
 		typed, ok := args.(K8sApplyArgs)
 		if !ok {
@@ -275,6 +294,15 @@ func (k *K8sAbility) Command(atom *types.Atom, act string, args any) types.Comma
 		if typed.Tail < 0 {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: tail must be non-negative: %w", act, types.ErrInvalidArguments)}
 		}
+		// Tail 钳制上界: 避免 0(或任意大值)被 transport 解释为"全部日志"导致
+		// 无限日志拉取(内存/带宽 DoS)。默认取 100 行,与 docker 侧一致。
+		tail := typed.Tail
+		if tail == 0 {
+			tail = 100
+		}
+		if tail > k8sMaxLogTail {
+			tail = k8sMaxLogTail
+		}
 		ns := strings.TrimSpace(typed.Namespace)
 		if ns == "" {
 			ns = k.currentNamespace()
@@ -285,7 +313,7 @@ func (k *K8sAbility) Command(atom *types.Atom, act string, args any) types.Comma
 		if transport == nil {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: no transport: %w", act, types.ErrInvalidArguments)}
 		}
-		logs, err := transport.Logs(strings.TrimSpace(typed.Pod), ns, typed.Tail)
+		logs, err := transport.Logs(strings.TrimSpace(typed.Pod), ns, tail)
 		if err != nil {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %v", act, types.ErrInvalidArguments, err)}
 		}

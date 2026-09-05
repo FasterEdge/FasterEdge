@@ -119,7 +119,9 @@ func TestSmokeEveryAbility(t *testing.T) {
 	cfgData, _ := atom.Data("ConfigData")
 	mustCommand(t, cfgData, atom, data.ConfigCommandSet, data.ConfigSetArgs{Key: "smoke.key", Value: "v"})
 	cfa, _ := atom.Ability("ConfigFileAbility")
-	path := filepath.Join(t.TempDir(), "smoke.json")
+	cfRoot := t.TempDir()
+	cfa.(*ability.ConfigFileAbility).SetRoot(cfRoot)
+	path := filepath.Join(cfRoot, "smoke.json")
 	mustCommand(t, cfa, atom, ability.ConfigFileCommandSave, ability.ConfigFileSaveArgs{Path: path, Overwrite: true})
 	if _, err := os.Stat(path); err != nil {
 		t.Fatal(err)
@@ -233,11 +235,13 @@ func TestCombinationConfigFile(t *testing.T) {
 	}
 	cfgData, _ := atom.Data("ConfigData")
 	cfa, _ := atom.Ability("ConfigFileAbility")
+	cfRoot := t.TempDir()
+	cfa.(*ability.ConfigFileAbility).SetRoot(cfRoot)
 	// 写若干项
 	mustCommand(t, cfgData, atom, data.ConfigCommandSet, data.ConfigSetArgs{Key: "server.port", Value: "8080"})
 	mustCommand(t, cfgData, atom, data.ConfigCommandSet, data.ConfigSetArgs{Key: "server.host", Value: "0.0.0.0"})
 	// 落盘
-	path := filepath.Join(t.TempDir(), "app.json")
+	path := filepath.Join(cfRoot, "app.json")
 	mustCommand(t, cfa, atom, ability.ConfigFileCommandSave, ability.ConfigFileSaveArgs{Path: path, Overwrite: true})
 	// 清空内存态
 	mustCommand(t, cfgData, atom, data.ConfigCommandDelete, data.ConfigDeleteArgs{Key: "server.port"})

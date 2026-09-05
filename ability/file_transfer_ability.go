@@ -45,6 +45,9 @@ const (
 	FileTransferStatusCanceled  FileTransferStatus = "canceled"
 )
 
+// maxConcurrentTransfers 是同时运行的传输 goroutine 上限,防洪泛。
+const maxConcurrentTransfers = 16
+
 // FileTransfer 描述一次传输的元数据。
 type FileTransfer struct {
 	ID         string
@@ -317,6 +320,12 @@ func (a *FileTransferAbility) Command(atom *types.Atom, act string, args any) ty
 		if a.closing {
 			a.mu.Unlock()
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, fileTransferClosingError)}
+		}
+		// 并发传输上限(对照 CmdAbility maxConc=16): 每次传输一个 goroutine,
+		// 无上限时调用方可洪泛出无限 goroutine/内存。
+		if a.running.Load() >= maxConcurrentTransfers {
+			a.mu.Unlock()
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: too many concurrent transfers (max %d): %w", act, maxConcurrentTransfers, types.ErrInvalidArguments)}
 		}
 		a.seq++
 		id := fmt.Sprintf("tx-%d", a.seq)

@@ -45,6 +45,13 @@ func (f *fakeSerialTransport) Close(port string) error {
 	return nil
 }
 
+func (f *fakeSerialTransport) ApplyConfig(port string, cfg SerialConfig) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.opened[port] = cfg
+	return nil
+}
+
 func (f *fakeSerialTransport) Write(port string, data []byte) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
