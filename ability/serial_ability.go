@@ -84,7 +84,15 @@ type SerialAbility struct {
 	openPorts map[string]SerialConfig
 	transport SerialTransport
 	lister    SerialPortLister
+	closing   bool // Unmount 置位后拒绝 open/set_config/close
 }
+
+const (
+	// maxSerialReadBytes 是 read 命令单次读取的字节上限(对齐 CmdAbility
+	// 1MiB 输出上限): 旧实现 Length 无上限, 真实 transport 按 length 分配
+	// 缓冲时, 已认证对端可传 Length=MaxInt 造成内存 DoS。
+	maxSerialReadBytes = 1 << 20
+)
 
 func NewSerialAbility() *SerialAbility {
 	return &SerialAbility{openPorts: make(map[string]SerialConfig)}
@@ -126,9 +134,12 @@ func (s *SerialAbility) Mount(atom *types.Atom) error {
 }
 
 // Unmount 关闭所有已打开端口并清空记录, 防止 atom 拆除/回滚时串口 fd 泄漏
-// (旧实现未实现 Unmounter, 框架永不调用 Close)。
+// (旧实现未实现 Unmounter, 框架永不调用 Close)。closing 标志在快照前置位,
+// 此后并发 open 被拒绝, 保证快照覆盖全部端口——旧实现快照后锁外 Close
+// 期间新 open 写入的端口既不被 Close 也不被 delete, fd 永久泄漏。
 func (s *SerialAbility) Unmount(ctx context.Context, atom *types.Atom) error {
 	s.mu.Lock()
+	s.closing = true
 	ports := make([]string, 0, len(s.openPorts))
 	for p := range s.openPorts {
 		ports = append(ports, p)
@@ -171,7 +182,15 @@ func (s *SerialAbility) Command(atom *types.Atom, act string, args any) types.Co
 		}
 		s.mu.Lock()
 		transport := s.transport
+		closing := s.closing
+		_, alreadyOpen := s.openPorts[port]
 		s.mu.Unlock()
+		if closing {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: ability is closing: %w", act, types.ErrInvalidArguments)}
+		}
+		if alreadyOpen {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: port %q already open: %w", act, port, types.ErrInvalidArguments)}
+		}
 		if transport == nil {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: no transport set: %w", act, types.ErrInvalidArguments)}
 		}
@@ -179,6 +198,13 @@ func (s *SerialAbility) Command(atom *types.Atom, act string, args any) types.Co
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: open: %w: %v", act, types.ErrInvalidArguments, err)}
 		}
 		s.mu.Lock()
+		// 双开防护: 两个并发 open 同端口时 transport.Open 可双双成功,
+		// 但 map 只留一份——后到者回滚关闭自身连接, 防首个 fd 无人管理。
+		if _, dup := s.openPorts[port]; dup || s.closing {
+			s.mu.Unlock()
+			_ = transport.Close(port)
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: port %q already open or closing: %w", act, port, types.ErrInvalidArguments)}
+		}
 		s.openPorts[port] = typed.Config
 		s.mu.Unlock()
 		return types.CommandOutput{Name: act, Value: port}
@@ -191,9 +217,15 @@ func (s *SerialAbility) Command(atom *types.Atom, act string, args any) types.Co
 		s.mu.Lock()
 		transport := s.transport
 		_, open := s.openPorts[port]
+		closing := s.closing
 		s.mu.Unlock()
 		if !open {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: port %q not open: %w", act, port, types.ErrInvalidArguments)}
+		}
+		if closing {
+			// Unmount 已接管清理, 拒绝并发 close(避免与 Unmount 的
+			// 快照后 Close 竞态)。
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: ability is closing: %w", act, types.ErrInvalidArguments)}
 		}
 		if transport != nil {
 			if err := transport.Close(port); err != nil {
@@ -249,6 +281,9 @@ func (s *SerialAbility) Command(atom *types.Atom, act string, args any) types.Co
 		if typed.Length <= 0 {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: length must be positive: %w", act, types.ErrInvalidArguments)}
 		}
+		if typed.Length > maxSerialReadBytes {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: length exceeds max %d: %w", act, maxSerialReadBytes, types.ErrInvalidArguments)}
+		}
 		if typed.Timeout < 0 {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: timeout must be non-negative: %w", act, types.ErrInvalidArguments)}
 		}
@@ -283,9 +318,13 @@ func (s *SerialAbility) Command(atom *types.Atom, act string, args any) types.Co
 		s.mu.Lock()
 		_, open := s.openPorts[port]
 		transport := s.transport
+		closing := s.closing
 		s.mu.Unlock()
 		if !open {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: port %q not open: %w", act, port, types.ErrInvalidArguments)}
+		}
+		if closing {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: ability is closing: %w", act, types.ErrInvalidArguments)}
 		}
 		// 配置必须真正下发到 transport, 否则新波特率等参数静默失效
 		// (旧实现只更新本地记录, 硬件仍按旧配置运行)。

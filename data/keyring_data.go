@@ -18,6 +18,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -373,7 +374,14 @@ func (k *KeyringData) Command(_ *types.Atom, act string, args any) types.Command
 		if err != nil {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, err)}
 		}
-		return types.CommandOutput{Name: act, Value: *tok}
+		_ = tok
+		// IssueToken 返回共享 *KeyringToken: 此处若直接 *tok 则是锁外解引用
+		// Revoked 字段, 与 RevokeToken/RevokeAll 构成数据竞争——经快照拷贝返回。
+		snap, ok := k.TokenSnapshot(subject)
+		if !ok {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
+		}
+		return types.CommandOutput{Name: act, Value: snap}
 	case KeyringCommandRevokeToken:
 		typed, ok := args.(KeyringRevokeTokenArgs)
 		if !ok || strings.TrimSpace(typed.Subject) == "" {
@@ -472,8 +480,18 @@ func (k *KeyringData) SaveSnapshot(path string) error {
 		cleanup()
 		return fmt.Errorf("keyring snapshot: rename: %w", err)
 	}
-	if d, err := os.Open(dir); err == nil {
-		_ = d.Sync()
+	if d, err := os.Open(dir); err != nil {
+		return fmt.Errorf("keyring snapshot: open dir for sync: %w", err)
+	} else {
+		// 目录 fsync 是 POSIX 持久化语义(确保 rename 目录项落盘)。
+		// Windows 不支持目录 fsync(Sync 恒返回 Access denied)——
+		// 属已知平台限制, 降级忽略; 文件 fsync + rename 原子性仍成立。
+		if runtime.GOOS != "windows" {
+			if serr := d.Sync(); serr != nil {
+				_ = d.Close()
+				return fmt.Errorf("keyring snapshot: dir fsync: %w", serr)
+			}
+		}
 		_ = d.Close()
 	}
 	return nil
@@ -524,11 +542,25 @@ func (k *KeyringData) LoadSnapshot(path string) error {
 	if err != nil || len(secret) == 0 {
 		return errors.New("keyring snapshot: missing or invalid secret")
 	}
+	// 密钥长度与 set_secret 的 16 字节下限一致: 弱密钥(如 4 字节)可直接
+	// 被暴力穷举, 加载路径旧实现不校验。
+	if len(secret) < 16 {
+		return fmt.Errorf("keyring snapshot: secret too short (%d bytes, need >= 16)", len(secret))
+	}
 	tokens := make(map[string]*KeyringToken, len(snap.Tokens))
+	now := time.Now()
 	for i := range snap.Tokens {
 		tok := snap.Tokens[i]
 		if strings.TrimSpace(tok.Subject) == "" {
 			return fmt.Errorf("keyring snapshot: tokens[%d] has empty subject", i)
+		}
+		// 时间窗校验: 签发时间非零、过期晚于签发、且不超未来 maxTokenTTL
+		// (旧实现接受 9999 年的"永久"令牌, 绕过签发路径的 TTL 上限)。
+		if tok.IssuedAt.IsZero() || !tok.ExpiresAt.After(tok.IssuedAt) {
+			return fmt.Errorf("keyring snapshot: tokens[%d] has invalid time window", i)
+		}
+		if tok.ExpiresAt.After(now.Add(maxTokenTTL)) {
+			return fmt.Errorf("keyring snapshot: tokens[%d] expires beyond max ttl", i)
 		}
 		if _, exists := tokens[tok.Subject]; exists {
 			return fmt.Errorf("keyring snapshot: duplicate subject %q", tok.Subject)
@@ -543,6 +575,14 @@ func (k *KeyringData) LoadSnapshot(path string) error {
 	ttl := snap.DefaultTokenTTL
 	if ttl <= 0 {
 		ttl = 24 * time.Hour
+	}
+	if ttl > maxTokenTTL {
+		// 被篡改快照的超大默认 TTL 会让后续 IssueToken(subject,0) 命中
+		// 上限报错——钳制到上限。
+		ttl = maxTokenTTL
+	}
+	if snap.TotalIssued < 0 || snap.RevokedCount < 0 || snap.RevokedCount > snap.TotalIssued {
+		return fmt.Errorf("keyring snapshot: inconsistent counters (total=%d revoked=%d)", snap.TotalIssued, snap.RevokedCount)
 	}
 	k.mu.Lock()
 	k.secret = append([]byte(nil), secret...)
@@ -582,6 +622,9 @@ func (k *KeyringData) JSONMarshal() ([]byte, error) {
 // Sign 计算给定 subject + expiresAt 的 HMAC 签名,返回 base64 字符串。
 // 该函数供 OneKeyAbility 使用,签名内容是 subject|issuedAt.UnixNano|expiresAt.UnixNano。
 func (k *KeyringData) Sign(tok *KeyringToken) string {
+	if tok == nil {
+		return ""
+	}
 	secret := k.Secret()
 	mac := hmac.New(sha256.New, secret)
 	payload := fmt.Sprintf("%s|%d|%d", tok.Subject, tok.IssuedAt.UnixNano(), tok.ExpiresAt.UnixNano())

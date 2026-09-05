@@ -223,7 +223,9 @@ func (t *TSNAbility) Command(atom *types.Atom, act string, args any) types.Comma
 		t.mu.Lock()
 		t.timeAware = TSNTimeAwareArgs{Enabled: typed.Enabled, BaseTime: typed.BaseTime, CycleTime: typed.CycleTime, GateStates: gs}
 		t.mu.Unlock()
-		return types.CommandOutput{Name: act, Value: TSNTimeAwareArgs{Enabled: typed.Enabled, BaseTime: typed.BaseTime, CycleTime: typed.CycleTime, GateStates: gs}}
+		// 返回值另拷贝: 旧实现返回与存储共享底层数组的 gs, 调用方修改
+		// 返回值会污染状态。
+		return types.CommandOutput{Name: act, Value: TSNTimeAwareArgs{Enabled: typed.Enabled, BaseTime: typed.BaseTime, CycleTime: typed.CycleTime, GateStates: append([]byte(nil), gs...)}}
 	case TSNCommandGetTimeAware:
 		if args != nil {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}

@@ -164,6 +164,10 @@ func (q *mqttQueue) close() {
 }
 
 func (q *mqttQueue) drain(max int, timeout time.Duration) []MQTTMessage {
+	if max < 0 {
+		// 防御: 负值会在 q.buf[:max] 处 slice panic
+		max = 0
+	}
 	deadline := time.Now().Add(timeout)
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -370,6 +374,18 @@ func (m *MQTTAbility) Command(atom *types.Atom, act string, args any) types.Comm
 		if err := transport.Connect(); err != nil {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %v", act, types.ErrInvalidArguments, err)}
 		}
+		// 断线重连(clean session)后 broker 端订阅清空: 恢复本地队列对应的
+		// 全部订阅, 否则消息静默永久丢失。恢复统一用 QoS0(能力层不记录
+		// 订阅时用的 QoS; 需要 QoS1/2 的场景应由 transport 层做持久订阅)。
+		m.mu.RLock()
+		topics := make([]string, 0, len(m.queues))
+		for t := range m.queues {
+			topics = append(topics, t)
+		}
+		m.mu.RUnlock()
+		for _, t := range topics {
+			_ = transport.Subscribe(t, 0)
+		}
 		return types.CommandOutput{Name: act, Value: true}
 	case MQTTCommandDisconnect:
 		if args != nil {
@@ -413,6 +429,16 @@ func (m *MQTTAbility) Command(atom *types.Atom, act string, args any) types.Comm
 		if topic == "" {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: empty topic: %w", act, types.ErrInvalidArguments)}
 		}
+		if len(topic) > 65535 {
+			// MQTT UTF-8 字符串上限: 超长 topic 会被参考 transport 的
+			// uint16 长度字段截断成畸形包。
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: topic too long: %w", act, types.ErrInvalidArguments)}
+		}
+		if strings.ContainsAny(topic, "+#") {
+			// 发布不允许通配符(MQTT 规范): 向 broker 发布含 +/# 的 topic
+			// 会污染订阅匹配面。
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: publish topic must not contain wildcards: %w", act, types.ErrInvalidArguments)}
+		}
 		if typed.Qos > MQTTQos2 {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: invalid qos: %w", act, types.ErrInvalidArguments)}
 		}
@@ -437,6 +463,9 @@ func (m *MQTTAbility) Command(atom *types.Atom, act string, args any) types.Comm
 		topic := strings.TrimSpace(typed.Topic)
 		if topic == "" {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: empty topic: %w", act, types.ErrInvalidArguments)}
+		}
+		if len(topic) > 65535 {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: topic too long: %w", act, types.ErrInvalidArguments)}
 		}
 		if typed.Qos > MQTTQos2 {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: invalid qos: %w", act, types.ErrInvalidArguments)}
@@ -471,11 +500,16 @@ func (m *MQTTAbility) Command(atom *types.Atom, act string, args any) types.Comm
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %v", act, types.ErrInvalidArguments, err)}
 		}
 		// Subscribe 成功后确保队列存在: 占位队列可能被并发 Unsubscribe
-		// 删除(其 transport.Unsubscribe 与本次 Subscribe 竞争), 缺失则补建,
-		// 否则订阅成功但无队列会丢消息。
+		// 删除(其 transport.Unsubscribe 与本次 Subscribe 竞争)。若已被删除,
+		// 本次 wire 订阅即成"无主订阅"(broker 已订阅但无人收消息)——撤销
+		// wire 订阅并明确失败, 避免幽灵订阅/静默丢消息。
 		m.mu.Lock()
 		if _, ok := m.queues[topic]; !ok {
-			m.queues[topic] = newMQTTQueue(typed.MaxQueue)
+			m.mu.Unlock()
+			if transport != nil {
+				_ = transport.Unsubscribe(topic)
+			}
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: subscription cancelled concurrently: %w", act, types.ErrInvalidArguments)}
 		}
 		m.mu.Unlock()
 		return types.CommandOutput{Name: act, Value: topic}
@@ -523,6 +557,10 @@ func (m *MQTTAbility) Command(atom *types.Atom, act string, args any) types.Comm
 		if typed.Timeout < 0 {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: timeout must be non-negative: %w", act, types.ErrInvalidArguments)}
 		}
+		if typed.Max < 0 {
+			// 负值 Max 会让 drain 的 q.buf[:max] 触发 slice panic(旧实现只查 Timeout)
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: max must be non-negative: %w", act, types.ErrInvalidArguments)}
+		}
 		m.mu.RLock()
 		q, ok := m.queues[topic]
 		m.mu.RUnlock()
@@ -561,8 +599,13 @@ func isAcceptableBrokerURL(u string) bool {
 			if host == "" {
 				return false
 			}
-			// userinfo 防护: 标准 URL 解析后 Hostname() 不含 userinfo
+			// userinfo 防护: 标准 URL 解析后 Hostname() 不含 userinfo。
+			// URL 内嵌凭据(tcp://alice:pass@host:1883)会经 get_broker 原样
+			// 回显泄露密码——直接拒绝, 凭据应走 set_credentials 通道。
 			if parsed, err := url.Parse(u); err == nil && parsed.Hostname() != "" {
+				if parsed.User != nil {
+					return false
+				}
 				host = parsed.Hostname()
 			}
 			// IP 字面量: netip 规范化后判回环/未指定

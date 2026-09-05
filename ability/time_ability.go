@@ -61,6 +61,7 @@ type TimeAbility struct {
 	networkPolicy     addressPolicy
 	httpTimeout       time.Duration
 	ntpTimeout        time.Duration
+	maxSyncOffset     time.Duration // >0 时网络对时源偏差超限拒绝; 0=不限制
 	maxResponseBytes  int64
 	minimumTick       time.Duration
 	defaultNetworkURL string
@@ -72,6 +73,7 @@ type TimeAbility struct {
 type timeAbilityConfig struct {
 	allowPrivate                        bool
 	httpTimeout, ntpTimeout             time.Duration
+	maxSyncOffset                       time.Duration
 	maxResponseBytes                    int64
 	minimumTick                         time.Duration
 	defaultNetworkURL, defaultNTPServer string
@@ -96,6 +98,23 @@ func WithNTPTimeout(v time.Duration) TimeOption {
 			return types.ErrInvalidArguments
 		}
 		c.ntpTimeout = v
+		return nil
+	}
+}
+
+// WithMaxSyncOffset 设置网络对时(NTP/HTTP)的偏差合理性上限: 源时间与本地
+// 时钟偏差超过该值即拒绝。默认 48h(兼容 RTC 失效的大步进); 传 0 显式关闭
+// 限制(内部用 -1 哨兵与"未设置"区分, 避免被 ensureDefaults 覆盖)。
+func WithMaxSyncOffset(v time.Duration) TimeOption {
+	return func(c *timeAbilityConfig) error {
+		if v < 0 {
+			return types.ErrInvalidArguments
+		}
+		if v == 0 {
+			c.maxSyncOffset = -1
+			return nil
+		}
+		c.maxSyncOffset = v
 		return nil
 	}
 }
@@ -127,7 +146,7 @@ func NewTimeAbility(options ...TimeOption) (*TimeAbility, error) {
 			return nil, fmt.Errorf("%w", err)
 		}
 	}
-	return &TimeAbility{httpTimeout: c.httpTimeout, ntpTimeout: c.ntpTimeout, maxResponseBytes: c.maxResponseBytes, minimumTick: c.minimumTick, defaultNetworkURL: c.defaultNetworkURL, defaultNTPServer: c.defaultNTPServer, networkPolicy: addressPolicy{allowPrivate: c.allowPrivate}}, nil
+	return &TimeAbility{httpTimeout: c.httpTimeout, ntpTimeout: c.ntpTimeout, maxSyncOffset: c.maxSyncOffset, maxResponseBytes: c.maxResponseBytes, minimumTick: c.minimumTick, defaultNetworkURL: c.defaultNetworkURL, defaultNTPServer: c.defaultNTPServer, networkPolicy: addressPolicy{allowPrivate: c.allowPrivate}}, nil
 }
 
 var _ types.Ability = (*TimeAbility)(nil)
@@ -150,6 +169,10 @@ func (t *TimeAbility) ensureDefaults() {
 		}
 		if t.ntpTimeout == 0 {
 			t.ntpTimeout = 5 * time.Second
+		}
+		if t.maxSyncOffset == 0 {
+			// 默认 48h: 兼容 RTC 失效大步进, 同时拒绝注入任意偏差的可信外源
+			t.maxSyncOffset = 48 * time.Hour
 		}
 		if t.maxResponseBytes == 0 {
 			t.maxResponseBytes = 64 << 10
@@ -232,6 +255,9 @@ func (t *TimeAbility) Command(atom *types.Atom, act string, args any) types.Comm
 		if err != nil {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, err)}
 		}
+		if err := t.checkSyncOffset(ts); err != nil {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, err)}
+		}
 		t.setSync(ts, "net:"+a.URL)
 		return types.CommandOutput{Name: act, Value: t.snapshot()}
 	case TimeCommandSyncNTP:
@@ -252,6 +278,9 @@ func (t *TimeAbility) Command(atom *types.Atom, act string, args any) types.Comm
 		defer t.releaseSyncSlot()
 		ts, err := t.fetchNTPTime(a.Address)
 		if err != nil {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, err)}
+		}
+		if err := t.checkSyncOffset(ts); err != nil {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, err)}
 		}
 		t.setSync(ts, "ntp:"+a.Address)
@@ -340,6 +369,28 @@ func (t *TimeAbility) acquireSyncSlot() bool {
 	}
 }
 func (t *TimeAbility) releaseSyncSlot() { <-t.sem }
+
+// checkSyncOffset 校验网络对时源返回时间与本地时钟的偏差不超过 maxSyncOffset
+// (>0 时)。旧实现三时间源均可注入任意偏差(如伪造 HTTP 响应或恶意 NTP
+// 服务器返回 2030 年的时间); NTP resp.Validate() 只校验服务器内部一致性,
+// 不限制 |ClockOffset|。
+func (t *TimeAbility) checkSyncOffset(ts time.Time) error {
+	t.mu.RLock()
+	limit := t.maxSyncOffset
+	t.mu.RUnlock()
+	if limit <= 0 {
+		return nil
+	}
+	now := t.clock.Now()
+	off := ts.Sub(now)
+	if off < 0 {
+		off = -off
+	}
+	if off > limit {
+		return fmt.Errorf("time source offset %s exceeds max %s: %w", off.Round(time.Second), limit, types.ErrInvalidArguments)
+	}
+	return nil
+}
 func (t *TimeAbility) currentTime() (time.Time, string, error) {
 	mono := t.clock.Monotonic()
 	t.mu.RLock()

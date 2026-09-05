@@ -125,6 +125,12 @@ func (o *OneKeyAbility) AuthenticateCommand(ctx context.Context, atom *types.Ato
 			return "", fmt.Errorf("%w: %s is restricted to local in-process calls", types.ErrAuthenticationFailed, command)
 		}
 	}
+	// set_role 同属部署态配置: 任意已认证对端可远程翻转 cloud/edge 角色
+	// 开关(同一 atom 可同时注册两侧角色能力)——与 OneKey 管理命令一样
+	// 仅限本地进程内调用。
+	if component == "RoleAbility" && command == "set_role" {
+		return "", fmt.Errorf("%w: set_role is restricted to local in-process calls", types.ErrAuthenticationFailed)
+	}
 	return subject, nil
 }
 

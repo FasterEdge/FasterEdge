@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -24,7 +25,28 @@ const (
 	FileTransferCommandGet           = "get_transfer"
 	FileTransferCommandCancel        = "cancel"
 	FileTransferCommandClearFinished = "clear_finished"
+
+	// maxTransferBytes 是单次传输的字节上限(1 GiB): 防超大文件/设备文件
+	// (如 /dev/zero)撑爆内存与带宽。
+	maxTransferBytes = 1 << 30
 )
+
+// isValidAbsoluteRemotePath 校验远端路径(按 POSIX 语义, 与部署平台无关):
+// 必须以 "/" 开头、逐段无 ".."、无 Windows 反斜杠分隔符。与
+// algorithm_distribution 的远端路径校验同纪律, 防远端路径穿越(远端 transport
+// 按该路径解析时逃出目标目录)。注意: 不能用本机 filepath.IsAbs——在
+// Windows 上 "/r" 会被判为相对路径而误拒。
+func isValidAbsoluteRemotePath(p string) bool {
+	if p == "" || strings.ContainsRune(p, '\\') || !strings.HasPrefix(p, "/") {
+		return false
+	}
+	for _, seg := range strings.Split(p, "/") {
+		if seg == ".." {
+			return false
+		}
+	}
+	return true
+}
 
 // FileTransferDirection 标识传输方向。
 type FileTransferDirection string
@@ -275,6 +297,22 @@ func (a *FileTransferAbility) Command(atom *types.Atom, act string, args any) ty
 		if local == "" || remote == "" {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: empty path: %w", act, types.ErrInvalidArguments)}
 		}
+		// 本地路径策略: 仅接受绝对路径, Clean 归一化后必须仍为绝对路径
+		// (即不含可逃逸的 ".." 段), 且拒绝符号链接(防链接指向 /etc/shadow 等)。
+		// 旧实现零校验——真实 transport 注入时任意本地文件可被读取外传或
+		// 覆盖写入。
+		localClean := filepath.Clean(local)
+		if !filepath.IsAbs(localClean) {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: local path must be absolute: %w", act, types.ErrInvalidArguments)}
+		}
+		if li, err := os.Lstat(localClean); err == nil && li.Mode()&os.ModeSymlink != 0 {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: local path must not be a symlink: %w", act, types.ErrInvalidArguments)}
+		}
+		// 远端路径策略: 绝对路径 + 无 ".." 段 + 无 Windows 分隔符
+		// (与 algorithm_distribution 的远端路径校验同纪律)。
+		if !isValidAbsoluteRemotePath(remote) {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: remote path must be absolute without traversal: %w", act, types.ErrInvalidArguments)}
+		}
 		// 解析本次调用的目标对端:优先取本次入参,其次取共享 target。
 		// 共享 target 字段仅在 set_target 时变更;per-call target 不会修改它,避免并发竞争。
 		a.mu.RLock()
@@ -308,11 +346,18 @@ func (a *FileTransferAbility) Command(atom *types.Atom, act string, args any) ty
 		}
 		size := int64(0)
 		if direction == FileTransferDirectionUpload {
-			if info, err := os.Stat(local); err == nil {
-				size = info.Size()
-			} else {
+			info, err := os.Stat(localClean)
+			if err != nil {
 				return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: stat local: %w: %v", act, types.ErrInvalidArguments, err)}
 			}
+			if !info.Mode().IsRegular() {
+				return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: local path must be a regular file: %w", act, types.ErrInvalidArguments)}
+			}
+			// 传输大小上限: 防超大文件/设备文件(如 /dev/zero)撑爆内存与带宽。
+			if info.Size() > maxTransferBytes {
+				return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: file size %d exceeds max %d: %w", act, info.Size(), maxTransferBytes, types.ErrInvalidArguments)}
+			}
+			size = info.Size()
 		}
 		// Reserve worker slot under the write lock so Unmount cannot observe
 		// a state where workers are launched after Wait has been entered.
@@ -323,8 +368,7 @@ func (a *FileTransferAbility) Command(atom *types.Atom, act string, args any) ty
 		}
 		// 并发传输上限(对照 CmdAbility maxConc=16): 每次传输一个 goroutine,
 		// 无上限时调用方可洪泛出无限 goroutine/内存。
-		if a.running.Load() >= maxConcurrentTransfers {
-			a.mu.Unlock()
+		if a.running.Load() >= maxConcurrentTransfers {			a.mu.Unlock()
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: too many concurrent transfers (max %d): %w", act, maxConcurrentTransfers, types.ErrInvalidArguments)}
 		}
 		a.seq++

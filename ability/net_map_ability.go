@@ -4,6 +4,7 @@ package ability
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"sort"
 	"strings"
 	"sync"
@@ -242,6 +243,12 @@ func (a *NetMapAbility) lookup(name, addr string) (NetMapPeer, bool, error) {
 }
 
 // isValidPeerAddress 允许 host:port / 纯 IP / 主机名(不含协议前缀、不含路径)。
+// 网络策略与 docker/mqtt/cloud 统一: IP 字面量经 netip 规范化后拒绝
+// 回环/未指定/组播/链路本地(169.254.169.254 等 SSRF 种子)——旧实现仅语法
+// 校验, 127.0.0.1/224.0.0.1 均可入库, 注入 transport 按 peer.Address 连接
+// 即构成 SSRF。私网段(10.x/192.168.x)是合法 edge 内网地址, 与 mqtt 策略
+// 一致放行。主机名存储期不 DNS 解析(TOCTOU), 仅拒绝尾点 localhost,
+// 拨号层应二次校验(与 cloud_role 的 addressPolicy 同模式)。
 func isValidPeerAddress(addr string) bool {
 	if addr == "" {
 		return false
@@ -249,23 +256,48 @@ func isValidPeerAddress(addr string) bool {
 	if strings.ContainsAny(addr, " /\\?#") {
 		return false
 	}
+	host := addr
 	// 若是 host:port 形式,要求端口可解析
 	if strings.LastIndex(addr, ":") > 0 {
-		_, _, err := net.SplitHostPort(addr)
+		h, _, err := net.SplitHostPort(addr)
 		if err != nil {
 			return false
 		}
-		return true
+		host = h
 	}
-	// 纯 IP
-	if ip := net.ParseIP(addr); ip != nil {
-		return true
+	// 剥 IPv6 方括号
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") && len(host) >= 2 {
+		host = host[1 : len(host)-1]
+	}
+	if host == "" {
+		return false
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return isDialablePeerIP(ip)
 	}
 	// 主机名(仅允许字母数字、点、连字符、下划线)
-	for _, r := range addr {
+	if strings.TrimSuffix(strings.ToLower(host), ".") == "localhost" {
+		return false
+	}
+	for _, r := range host {
 		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '.' || r == '-' || r == '_' {
 			continue
 		}
+		return false
+	}
+	return true
+}
+
+// isDialablePeerIP 经 netip 规范化(IPv4-mapped IPv6)后拒绝回环/未指定/组播/
+// 链路本地地址。私网与公网地址均放行(edge 节点常位于内网)。
+func isDialablePeerIP(ip net.IP) bool {
+	addr, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return false
+	}
+	addr = addr.Unmap()
+	if addr.IsLoopback() || addr.IsUnspecified() || addr.IsMulticast() ||
+		addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast() {
 		return false
 	}
 	return true

@@ -4,6 +4,7 @@ package ability
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -244,9 +245,13 @@ func isValidAlgDistComponent(s string) bool {
 }
 
 // isValidAlgDistRemotePath 校验远端目标路径: 必须绝对路径且无 ".." 组件
-// (防远端写路径穿越, 如 name 含 "/" 或 remote 含 "../" 逃出目标目录)。
+// (防远端写路径穿越, 如 name 含 "/" 或 remote 含 "../" 逃出目标目录);
+// 同时拒绝 Windows 反斜杠分隔符("/a\..\b" 在 Windows 语义下可绕过 ".." 检查)。
 func isValidAlgDistRemotePath(p string) bool {
 	if !strings.HasPrefix(p, "/") {
+		return false
+	}
+	if strings.ContainsRune(p, '\\') {
 		return false
 	}
 	for _, seg := range strings.Split(p, "/") {
@@ -283,6 +288,13 @@ func (a *AlgDistAbility) Command(atom *types.Atom, act string, args any) types.C
 		// 组件名白名单: 仅字母数字._-(拒绝 "/" 与 "..", 防远端路径穿越/键污染)
 		if !isValidAlgDistComponent(name) || !isValidAlgDistComponent(version) {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: name/version may only contain letters, digits, '.', '_', '-': %w", act, types.ErrInvalidArguments)}
+		}
+		// SourcePath 是本机文件(register 时读取、distribute 时作为 LocalPath
+		// 上传)——必须绝对路径(本机语义, 兼容 Windows 盘符路径), 且 Clean
+		// 归一化后无 ".." 逃逸。旧实现仅非空检查——配合 distribute 的
+		// LocalPath 透传, 构成"注册→分发→任意本地文件外传"链。
+		if sourceClean := filepath.Clean(source); !filepath.IsAbs(sourceClean) {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: source path must be absolute: %w", act, types.ErrInvalidArguments)}
 		}
 		key := algKey(name, version)
 		alg := &AlgDistAlgorithm{

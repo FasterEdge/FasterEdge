@@ -428,7 +428,12 @@ func (a *Atom) RunAll(ctx context.Context, shutdown time.Duration) error {
 			case res := <-results:
 				delete(pending, res.name)
 				if res.err != nil && !canceled {
-					if !errors.Is(res.err, context.Canceled) && !errors.Is(res.err, context.DeadlineExceeded) {
+					// 仅 context.Canceled 视为良性退出信号(被 cancel 的
+					// runner 正常返回); DeadlineExceeded 只能源于 runner
+					// 自身内部 deadline(child ctx 无 deadline, 父 ctx 过期
+					// 由 L420 分支捕获)——旧实现把它一并排除, 导致单
+					// runner 返回 DeadlineExceeded 时 RunAll 返回 nil 伪成功。
+					if !errors.Is(res.err, context.Canceled) {
 						runErr = res.err
 					}
 					cancel()
@@ -513,8 +518,6 @@ func safeRun(r Runner, ctx context.Context, atom *Atom, name string) (err error)
 }
 
 func (a *Atom) unmountWithTimeout(base context.Context, mounted []namedComponent, timeout time.Duration) error {
-	ctx, cancel := context.WithTimeout(base, timeout)
-	defer cancel()
 	var errs []error
 	for i := len(mounted) - 1; i >= 0; i-- {
 		m := mounted[i]
@@ -522,15 +525,21 @@ func (a *Atom) unmountWithTimeout(base context.Context, mounted []namedComponent
 		if !ok {
 			continue
 		}
+		// 每个组件独立的卸载预算: 旧实现共享一个 WithTimeout(base),
+		// 单个挂死组件(或已取消的 base ctx)会立即命中 Done 并 return,
+		// 中止整条逆序卸载链——其余组件(如 Modbus/Serial 的 Close)永不
+		// 执行, 且 UnmountAll 随即清空 mounted 置 AtomFailed, 无重试路径。
+		compCtx, compCancel := context.WithTimeout(base, timeout)
 		result := make(chan error, 1)
 		go func() {
+			defer compCancel()
 			result <- a.observe(m.name, "", PhaseUnmount, func() (err error) {
 				defer func() {
 					if v := recover(); v != nil {
 						err = NewComponentPanicError(m.name, "unmount", v)
 					}
 				}()
-				if err = u.Unmount(ctx, a); err != nil {
+				if err = u.Unmount(compCtx, a); err != nil {
 					return &ComponentError{Name: m.name, Phase: "unmount", Err: err}
 				}
 				return nil
@@ -541,8 +550,10 @@ func (a *Atom) unmountWithTimeout(base context.Context, mounted []namedComponent
 			if err != nil {
 				errs = append(errs, err)
 			}
-		case <-ctx.Done():
-			return errors.Join(append(errs, &ShutdownTimeoutError{Timeout: timeout, Phase: "unmount", Components: []string{m.name}})...)
+		case <-compCtx.Done():
+			// 仅记录该组件超时并继续卸载剩余组件(goroutine 随 compCtx
+			// 取消自行收敛; 缓冲 chan 保证发送侧不阻塞)。
+			errs = append(errs, &ShutdownTimeoutError{Timeout: timeout, Phase: "unmount", Components: []string{m.name}})
 		}
 	}
 	return errors.Join(errs...)

@@ -216,3 +216,37 @@ func TestTimeAbilityFetchNetworkTimeAcceptsNoZoneDatetime(t *testing.T) {
 		t.Fatalf("got %s want %s", ts2, want)
 	}
 }
+
+func TestTimeAbilityMaxSyncOffset(t *testing.T) {
+	c := &taskFakeClock{wall: time.Date(2026, 8, 9, 0, 0, 0, 0, time.UTC)}
+	base := c.Now()
+	// 默认 48h 上限(ensureDefaults 设置; 直接构造需先初始化)
+	a := &TimeAbility{clock: c}
+	a.ensureDefaults()
+	if err := a.checkSyncOffset(base.Add(24 * time.Hour)); err != nil {
+		t.Fatalf("within limit: %v", err)
+	}
+	if err := a.checkSyncOffset(base.Add(49 * time.Hour)); !errors.Is(err, types.ErrInvalidArguments) {
+		t.Fatalf("beyond limit error = %v", err)
+	}
+	if err := a.checkSyncOffset(base.Add(-49 * time.Hour)); !errors.Is(err, types.ErrInvalidArguments) {
+		t.Fatalf("negative beyond limit error = %v", err)
+	}
+	// 显式关闭(哨兵 -1): 任意偏差放行
+	a2 := &TimeAbility{clock: c, maxSyncOffset: -1}
+	if err := a2.checkSyncOffset(base.Add(10 * 365 * 24 * time.Hour)); err != nil {
+		t.Fatalf("disabled limit: %v", err)
+	}
+	// WithMaxSyncOffset(0) 也必须等效关闭(不被 ensureDefaults 覆盖为 48h)
+	ta, err := NewTimeAbility(WithMaxSyncOffset(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ta.ensureDefaults()
+	ta.mu.RLock()
+	off := ta.maxSyncOffset
+	ta.mu.RUnlock()
+	if off != -1 {
+		t.Fatalf("WithMaxSyncOffset(0) got %v, want sentinel -1", off)
+	}
+}

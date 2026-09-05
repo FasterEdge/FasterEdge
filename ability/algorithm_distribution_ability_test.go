@@ -50,15 +50,15 @@ func TestAlgDistAbilityRegisterAndList(t *testing.T) {
 	if out := d.Command(atom, AlgDistCommandRegister, AlgDistRegisterArgs{}); !errors.Is(out.Err, types.ErrInvalidArguments) {
 		t.Fatalf("register empty error = %v", out.Err)
 	}
-	// 正常注册
+	// 正常注册(SourcePath 必须是本机绝对路径——register 不 stat, 无需真实存在)
 	if out := d.Command(atom, AlgDistCommandRegister, AlgDistRegisterArgs{
-		Name: "edge-detector", Version: "1.0.0", SourcePath: "/tmp/edge-detector.so", ContentType: "application/wasm",
+		Name: "edge-detector", Version: "1.0.0", SourcePath: filepath.Join(t.TempDir(), "edge-detector.so"), ContentType: "application/wasm",
 	}); out.Err != nil {
 		t.Fatal(out.Err)
 	}
 	// 重复
 	if out := d.Command(atom, AlgDistCommandRegister, AlgDistRegisterArgs{
-		Name: "edge-detector", Version: "1.0.0", SourcePath: "/tmp/x",
+		Name: "edge-detector", Version: "1.0.0", SourcePath: filepath.Join(t.TempDir(), "x"),
 	}); !errors.Is(out.Err, types.ErrInvalidArguments) {
 		t.Fatalf("register duplicate error = %v", out.Err)
 	}
