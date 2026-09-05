@@ -318,7 +318,10 @@ func (m *ModbusAbility) executeWrite(act string, funcCode ModbusFunctionCode, pd
 		if len(got) > 5 {
 			got = got[:5]
 		}
-		return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: write echo mismatch (got % x, want % x): %w", act, got, pdu[1:5], types.ErrInvalidArguments)}
+		// 回显不匹配是设备/链路运行期行为(伪造/损坏响应), 非参数校验失败——
+		// 与同函数短响应/异常码/截断一致用 ErrOperationFailed(旧实现误用
+		// ErrInvalidArguments, 上层按哨兵分流会把运行期故障误判为调用方错误)。
+		return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: write echo mismatch (got % x, want % x): %w", act, got, pdu[1:5], types.ErrOperationFailed)}
 	}
 	return types.CommandOutput{Name: act, Value: true}
 }

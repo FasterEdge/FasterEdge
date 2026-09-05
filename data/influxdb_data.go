@@ -36,6 +36,13 @@ func (d *InfluxDBData) Check(*types.Atom) error { return nil }
 func (d *InfluxDBData) Mount(*types.Atom) error { return nil }
 func (d *InfluxDBData) ListCommands() []string  { return databaseSecretCommands() }
 func (d *InfluxDBData) Command(_ *types.Atom, act string, args any) types.CommandOutput {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	// mu 同时串行化 Command 路径与 Setter 路径: 旧实现只给 Setter 持 mu,
+	// Command(configure) 直接走 store——setter 的 public()→configure()
+	// 读改写区间可与并发 configure 命令互踩, 配置整体丢失(文件头注释
+	// 声称修复的"互相覆盖"在混用路径下仍存在)。锁序与 setter 一致
+	// (mu 先于 store 内部锁), 无死锁。
 	switch act {
 	case DatabaseCommandConfigure:
 		typed, ok := args.(InfluxDBConfigureArgs)

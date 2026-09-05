@@ -111,8 +111,8 @@ func TestConfigFileAbilityLoadSave(t *testing.T) {
 	if out := a.Command(atom, ConfigFileCommandLoad, ConfigFileLoadArgs{Path: ""}); !errors.Is(out.Err, types.ErrInvalidArguments) {
 		t.Fatalf("load empty path error = %v", out.Err)
 	}
-	// 文件不存在,strict=true
-	if out := a.Command(atom, ConfigFileCommandLoad, ConfigFileLoadArgs{Path: path, Strict: true}); !errors.Is(out.Err, types.ErrInvalidArguments) {
+	// 文件不存在,strict=true → 运行期操作失败(与参数校验区分, 双 %w 链到 fs 错误)
+	if out := a.Command(atom, ConfigFileCommandLoad, ConfigFileLoadArgs{Path: path, Strict: true}); !errors.Is(out.Err, types.ErrOperationFailed) {
 		t.Fatalf("load missing strict error = %v", out.Err)
 	}
 	// 文件不存在,strict=false → 返回当前快照
@@ -196,5 +196,45 @@ func TestConfigFileAbilityUnknownCommand(t *testing.T) {
 	atom := newConfigFileAtom(t)
 	if out := a.Command(atom, "nope", nil); !errors.Is(out.Err, types.ErrUnsupportedCommand) {
 		t.Fatalf("unknown error = %v", out.Err)
+	}
+}
+
+// TestConfigFileRejectsSymlinkEscape: 词法 confine 不防符号链接——root 内
+// planted symlink 指向 root 外时, os.Open/os.WriteFile 会跟随链接读写任意
+// 文件。逐组件 Lstat 拒绝必须同时覆盖文件本体与中间目录(父目录链接)。
+func TestConfigFileRejectsSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "target.json")
+	if err := os.WriteFile(outside, []byte(`{"leak":"1"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// 文件本体是符号链接
+	link := filepath.Join(root, "config.json")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlink unsupported on this platform: %v", err)
+	}
+	a := NewConfigFileAbility()
+	a.SetRoot(root)
+	atom := newConfigFileAtom(t)
+	if out := a.Command(atom, ConfigFileCommandLoad, ConfigFileLoadArgs{Path: "config.json", Strict: true}); !errors.Is(out.Err, types.ErrInvalidArguments) {
+		t.Fatalf("load through symlink file error = %v (must reject, not read outside file)", out.Err)
+	}
+	if out := a.Command(atom, ConfigFileCommandSave, ConfigFileSaveArgs{Path: "config.json", Overwrite: true}); !errors.Is(out.Err, types.ErrInvalidArguments) {
+		t.Fatalf("save through symlink file error = %v (must reject, not overwrite outside file)", out.Err)
+	}
+	// 中间目录是符号链接(如 root/sub → 外部目录)
+	subLink := filepath.Join(root, "sub")
+	if err := os.Symlink(t.TempDir(), subLink); err != nil {
+		t.Skipf("symlink unsupported on this platform: %v", err)
+	}
+	if out := a.Command(atom, ConfigFileCommandLoad, ConfigFileLoadArgs{Path: "sub/cfg.json", Strict: true}); !errors.Is(out.Err, types.ErrInvalidArguments) {
+		t.Fatalf("load through symlink dir error = %v (must reject)", out.Err)
+	}
+	// confine 直接层面同样拒绝(保护 set_path/exists 路径)
+	if _, err := a.confine("config.json"); !errors.Is(err, types.ErrInvalidArguments) {
+		t.Fatalf("confine symlink error = %v", err)
+	}
+	if _, err := a.confine("sub/cfg.json"); !errors.Is(err, types.ErrInvalidArguments) {
+		t.Fatalf("confine symlink dir error = %v", err)
 	}
 }

@@ -93,7 +93,34 @@ func (a *ConfigFileAbility) confine(p string) (string, error) {
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
 		return "", fmt.Errorf("path %q escapes root %q: %w", p, root, types.ErrInvalidArguments)
 	}
+	// 词法 confine 不防符号链接: root 内 planted symlink 指向 root 外时,
+	// os.Open/os.WriteFile/os.Stat 跟随链接读写 root 之外的文件(load 读
+	// 任意文件, save(Overwrite=true) 截断/覆写任意进程可写文件)——逐组件
+	// Lstat 拒绝链接(root 本身不查——它是用户显式配置的基目录)。
+	if err := rejectSymlinkComponents(root, joined); err != nil {
+		return "", fmt.Errorf("path %q rejected: %v: %w", p, err, types.ErrInvalidArguments)
+	}
 	return joined, nil
+}
+
+// rejectSymlinkComponents 检查 joined(root 内) 的每个路径组件(不含 root
+// 本身)是否为符号链接。
+func rejectSymlinkComponents(root, joined string) error {
+	rel, err := filepath.Rel(root, joined)
+	if err != nil {
+		return err
+	}
+	if rel == "." {
+		return nil
+	}
+	cur := root
+	for _, seg := range strings.Split(rel, string(os.PathSeparator)) {
+		cur = filepath.Join(cur, seg)
+		if li, lerr := os.Lstat(cur); lerr == nil && li.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("path component %q is a symlink", cur)
+		}
+	}
+	return nil
 }
 
 func (a *ConfigFileAbility) GetName() string { return "ConfigFileAbility" }
@@ -192,17 +219,18 @@ func (a *ConfigFileAbility) Command(atom *types.Atom, act string, args any) type
 		f, err := os.Open(cleaned)
 		if err != nil {
 			if typed.Strict {
-				return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: read %s: %w: %v", act, cleaned, types.ErrInvalidArguments, err)}
+				// 文件 I/O 运行期失败(含 ErrNotExist)是操作失败——双 %w 链底层
+				return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: read %s: %w: %w", act, cleaned, types.ErrOperationFailed, err)}
 			}
 			return types.CommandOutput{Name: act, Value: cfg.Snapshot()}
 		}
 		defer f.Close()
 		raw, err := io.ReadAll(io.LimitReader(f, configFileMaxBytes+1))
 		if err != nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: read %s: %w: %v", act, cleaned, types.ErrInvalidArguments, err)}
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: read %s: %w: %w", act, cleaned, types.ErrOperationFailed, err)}
 		}
 		if len(raw) > configFileMaxBytes {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: file %s exceeds %d bytes: %w", act, cleaned, configFileMaxBytes, types.ErrInvalidArguments)}
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: file %s exceeds %d bytes: %w", act, cleaned, configFileMaxBytes, types.ErrOperationFailed)}
 		}
 		parsed, perr := parseFlatJSON(raw)
 		if perr != nil {
@@ -246,13 +274,13 @@ func (a *ConfigFileAbility) Command(atom *types.Atom, act string, args any) type
 		}
 		payload, err := cfg.JSONMarshal()
 		if err != nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: marshal: %w: %v", act, types.ErrInvalidArguments, err)}
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: marshal: %w: %w", act, types.ErrOperationFailed, err)}
 		}
 		if err := os.MkdirAll(filepath.Dir(cleaned), 0o755); err != nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: mkdir: %w: %v", act, types.ErrInvalidArguments, err)}
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: mkdir: %w: %w", act, types.ErrOperationFailed, err)}
 		}
 		if err := os.WriteFile(cleaned, payload, 0o644); err != nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: write: %w: %v", act, types.ErrInvalidArguments, err)}
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: write: %w: %w", act, types.ErrOperationFailed, err)}
 		}
 		a.mu.Lock()
 		a.path = cleaned

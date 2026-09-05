@@ -97,6 +97,12 @@ func (o *OneKeyAbility) Mount(atom *types.Atom) error { return o.Check(atom) }
 // 管理命令(issue_token/revoke_token/revoke_all/rotate)仅限本地进程内调用:
 // 任何持有效令牌的对端若可远程调用, 即可签发任意 subject 的令牌冒充任意
 // 节点, 或做吊销/轮换 DoS。verify_token 必须远程可达(认证依赖它)。
+//
+// 信任边界: 拦截清单(下方 122-155 行)覆盖 OneKey 管理命令、RoleAbility
+// set_role、KeyringData 写命令、Cmd/Sh/Bash set_allowlist——其余写面
+// (ConfigFileAbility 的 load/save/set_path、Docker/K8s、file_transfer 等)
+// 仍可被任意已认证对端远程调用, 属防御纵深的设计取舍。新增高危写命令时
+// 应同步评估是否加入本地限制清单。
 func (o *OneKeyAbility) AuthenticateCommand(ctx context.Context, atom *types.Atom, credential any, component, command string, args any) (string, error) {
 	_ = component
 	_ = args
@@ -292,6 +298,12 @@ func DecodeFromTransmission(s string) (OneKeyToken, error) {
 		return OneKeyToken{}, err
 	}
 	signature := parts[len(parts)-1]
+	// HMAC-SHA256 RawURL base64 为 43 字符; 无上限时超大 token 串会先被
+	// 完整 base64 解码再比对(内存/CPU 消耗仅受传输层消息上限约束)。
+	// 128 字符上界覆盖未来算法更换余量。
+	if len(signature) > 128 {
+		return OneKeyToken{}, fmt.Errorf("signature too long: %w", types.ErrInvalidArguments)
+	}
 	if _, err := base64.RawURLEncoding.DecodeString(signature); err != nil {
 		return OneKeyToken{}, fmt.Errorf("bad signature encoding: %w", types.ErrInvalidArguments)
 	}

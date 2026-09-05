@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/beevik/ntp"
+
+	"github.com/FasterEdge/FasterEdge/types"
 )
 
 // ntpQuerier is the narrow seam used by TimeAbility so tests never need the network.
@@ -115,7 +117,7 @@ func (t *TimeAbility) fetchNTPTime(address string) (time.Time, error) {
 		GetSystemTime: clock.Now,
 	})
 	if err != nil {
-		return time.Time{}, fmt.Errorf("NTP query %s: %w", server, err)
+		return time.Time{}, fmt.Errorf("NTP query %s: %w: %w", server, types.ErrOperationFailed, err)
 	}
 	if resp == nil {
 		return time.Time{}, errors.New("NTP query returned nil response")

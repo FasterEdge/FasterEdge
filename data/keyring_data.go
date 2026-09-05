@@ -148,7 +148,8 @@ func (k *KeyringData) Mount(_ *types.Atom) error {
 		// 默认随机生成 32 字节密钥,避免明文落盘但保证开箱即用
 		buf := make([]byte, 32)
 		if _, err := rand.Read(buf); err != nil {
-			return fmt.Errorf("KeyringData mount: %w", err)
+			// 熵源不可用是运行期故障——补哨兵(旧实现无哨兵, 调用方无法分类)
+			return fmt.Errorf("KeyringData mount: %w: %w", types.ErrOperationFailed, err)
 		}
 		k.secret = buf
 		k.lastRotatedAt = time.Now()
@@ -210,7 +211,11 @@ func (k *KeyringData) IssueToken(subject string, ttl time.Duration) (*KeyringTok
 		return nil, fmt.Errorf("issue token: subject is not valid UTF-8: %w", types.ErrInvalidArguments)
 	}
 	if ttl <= 0 {
+		// defaultTokenTTL 由 LoadSnapshot 在锁内写入——锁外读与并发
+		// 加载构成数据竞争(旧实现直接读字段)。
+		k.mu.RLock()
 		ttl = k.defaultTokenTTL
+		k.mu.RUnlock()
 	}
 	if ttl > maxTokenTTL {
 		return nil, fmt.Errorf("issue token: ttl %s exceeds max %s: %w", ttl, maxTokenTTL, types.ErrInvalidArguments)
@@ -352,7 +357,8 @@ func (k *KeyringData) Command(_ *types.Atom, act string, args any) types.Command
 		}
 		buf := make([]byte, 32)
 		if _, err := rand.Read(buf); err != nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %v", act, types.ErrInvalidArguments, err)}
+			// rand.Read 运行期故障(熵源不可用)是操作失败而非参数校验
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %w", act, types.ErrOperationFailed, err)}
 		}
 		k.SetSecret(buf)
 		return types.CommandOutput{Name: act, Value: k.SecretFingerprint()}
@@ -394,11 +400,19 @@ func (k *KeyringData) Command(_ *types.Atom, act string, args any) types.Command
 		if !ok || strings.TrimSpace(typed.Subject) == "" {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
 		}
-		ok, tok := k.RevokeToken(strings.TrimSpace(typed.Subject))
-		if !ok {
+		revoked, _ := k.RevokeToken(strings.TrimSpace(typed.Subject))
+		if !revoked {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: no active token for subject: %w", act, types.ErrInvalidArguments)}
 		}
-		return types.CommandOutput{Name: act, Value: *tok}
+		// 与 IssueToken 命令同纪律: RevokeToken 返回共享指针——锁外解引用
+		// Revoked/时间字段依赖 write-once 不变量(脆弱易回归), 经快照拷贝返回。
+		snap, snapOK := k.TokenSnapshot(strings.TrimSpace(typed.Subject))
+		if !snapOK {
+			// RevokeToken 成功但快照缺失只有一种可能: 并发 RevokeAll 清表——
+			// 仍返回吊销成功(已无令牌), 不暴露内部态。
+			return types.CommandOutput{Name: act, Value: typed.Subject}
+		}
+		return types.CommandOutput{Name: act, Value: snap}
 	case KeyringCommandRevokeAll:
 		if args != nil {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
