@@ -909,9 +909,10 @@ func main() {
 		}
 	}
 
-	// AlgDistAbility
-	if a, ok := extAtom.Ability("AlgDistAbility"); ok {
-		o := a.Command(extAtom, ability.AlgDistCommandRegister, ability.AlgDistRegisterArgs{Name: "denoise", Version: "1.0", SourcePath: "/alg/denoise.py", ContentType: "python"})
+	// AlgDistAbility (注册名 AlgorithmDistributionAbility——曾误用 "AlgDistAbility"
+	// 导致本段静默跳过, 假覆盖)
+	if a, ok := extAtom.Ability("AlgorithmDistributionAbility"); ok {
+		o := a.Command(extAtom, ability.AlgDistCommandRegister, ability.AlgDistRegisterArgs{Name: "denoise", Version: "1.0", SourcePath: filepath.Join(os.TempDir(), "denoise.py"), ContentType: "python"})
 		report("AlgDist/register", "denoise@1.0", o.Err)
 		o = a.Command(extAtom, ability.AlgDistCommandList, nil)
 		report("AlgDist/list", fmt.Sprintf("%v", o.Value), o.Err)
@@ -921,16 +922,17 @@ func main() {
 		report("AlgDist/unregister", "denoise@1.0", o.Err)
 	}
 
-	// InfluxAbility (配置类, 不需要真实 InfluxDB)
-	if a, ok := extAtom.Ability("InfluxAbility"); ok {
-		o := a.Command(extAtom, ability.InfluxCommandSetEndpoint, ability.InfluxConfigArgs{Value: "http://127.0.0.1:8086"})
-		report("Influx/set_endpoint", "http://127.0.0.1:8086", o.Err)
+	// InfluxAbility (配置类, 不需要真实 InfluxDB; 注册名 InfluxDBAbility——
+	// 曾误用 "InfluxAbility" 导致本段静默跳过, 假覆盖; endpoint 校验拒回环/私有地址)
+	if a, ok := extAtom.Ability("InfluxDBAbility"); ok {
+		o := a.Command(extAtom, ability.InfluxCommandSetEndpoint, ability.InfluxConfigArgs{Value: "https://influx.example.com"})
+		report("Influx/set_endpoint", "https://influx.example.com", o.Err)
 		o = a.Command(extAtom, ability.InfluxCommandSetBucket, ability.InfluxConfigArgs{Value: "telemetry"})
 		report("Influx/set_bucket", "telemetry", o.Err)
 		o = a.Command(extAtom, ability.InfluxCommandGetConfig, nil)
 		// set 后 get_config 关键字段往返(旧实现只打印——set 变 no-op 也 PASS)
 		if cfg, ok := o.Value.(ability.InfluxConfig); ok {
-			if cfg.Endpoint != "http://127.0.0.1:8086" || cfg.Bucket != "telemetry" {
+			if cfg.Endpoint != "https://influx.example.com" || cfg.Bucket != "telemetry" {
 				report("Influx/get_config", fmt.Sprintf("%+v", cfg), fmt.Errorf("get_config round-trip mismatch: %+v", cfg))
 			} else {
 				report("Influx/get_config", fmt.Sprintf("endpoint=%s bucket=%s", cfg.Endpoint, cfg.Bucket), nil)

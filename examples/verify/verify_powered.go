@@ -15,12 +15,18 @@ import (
 // 命令按"正确拒绝"段(PASS); 值段断言具体类型与关键字段, 不静默 PASS。
 func verifyPoweredExtras(atom, extAtom *types.Atom) {
 	// --- AlgDistAbility: distribute/list_distribute/cancel(骨架模式可完整测) ---
-	if a, ok := extAtom.Ability("AlgDistAbility"); ok {
-		o := a.Command(extAtom, ability.AlgDistCommandRegister, ability.AlgDistRegisterArgs{Name: "fe-verify-dist", Version: "2.0", SourcePath: "/tmp/fe-verify-dist.py", ContentType: "python"})
+	// 注意: 注册名是 GetName() 的 "AlgorithmDistributionAbility"(与 extExpected
+	// 清单一致)——曾误用 "AlgDistAbility" 导致段静默跳过(假覆盖), 已修正。
+	if a, ok := extAtom.Ability("AlgorithmDistributionAbility"); ok {
+		// register 只校验绝对路径, 但 distribute 的 upload 会 os.Stat 源文件
+		// ——必须先落地真实文件(骨架模式仍不实际传输)。
+		distSrc := filepath.Join(os.TempDir(), "fe-verify-dist.py")
+		_ = os.WriteFile(distSrc, []byte("def run():\n    return 42\n"), 0o644)
+		o := a.Command(extAtom, ability.AlgDistCommandRegister, ability.AlgDistRegisterArgs{Name: "fe-verify-dist", Version: "2.0", SourcePath: distSrc, ContentType: "python"})
 		report("AlgDist/register-dist", "fe-verify-dist@2.0", o.Err)
 		// distribute 完整生命周期: 骨架模式(FileTransfer 无 transport)下
 		// upload 立即 Completed, watcher 收敛 job 终态——可端到端验证。
-		o = a.Command(extAtom, ability.AlgDistCommandDistribute, ability.AlgDistDistributeArgs{Name: "fe-verify-dist", Version: "2.0", Target: "edge-2"})
+		o = a.Command(extAtom, ability.AlgDistCommandDistribute, ability.AlgDistDistributeArgs{Name: "fe-verify-dist", Version: "2.0", Target: "peer-b"})
 		if o.Err != nil {
 			report("AlgDist/distribute", fmt.Sprintf("%v", o.Err), o.Err)
 		} else if id, ok := o.Value.(string); ok && id != "" {
@@ -130,7 +136,9 @@ func verifyPoweredExtras(atom, extAtom *types.Atom) {
 
 	// --- InfluxAbility: set_token/set_org/get_endpoint/list_series/delete_series
 	//     + write/query/ping 无 transport 正确拒绝 ---
-	if a, ok := extAtom.Ability("InfluxAbility"); ok {
+	// 注意: 注册名是 GetName() 的 "InfluxDBAbility"(与 extExpected 清单一致)
+	// ——曾误用 "InfluxAbility" 导致段静默跳过(假覆盖), 已修正。
+	if a, ok := extAtom.Ability("InfluxDBAbility"); ok {
 		o := a.Command(extAtom, ability.InfluxCommandSetToken, ability.InfluxConfigArgs{Value: "0123456789abcdef"})
 		report("Influx/set_token", "len=16", o.Err)
 		o = a.Command(extAtom, ability.InfluxCommandSetOrg, ability.InfluxConfigArgs{Value: "feorg"})
@@ -150,13 +158,20 @@ func verifyPoweredExtras(atom, extAtom *types.Atom) {
 		} else {
 			report("Influx/get_config-after-set", fmt.Sprintf("%T", o.Value), fmt.Errorf("get_config returned %T (want ability.InfluxConfig)", o.Value))
 		}
+		// get_endpoint 往返(extAtom 实例独立, 先 set 再断言; 校验拒回环/私有地址)
+		o = a.Command(extAtom, ability.InfluxCommandSetEndpoint, ability.InfluxConfigArgs{Value: "https://influx.example.com"})
+		report("Influx/set_endpoint2", "https://influx.example.com", o.Err)
 		o = a.Command(extAtom, ability.InfluxCommandGetEndpoint, nil)
-		if got, ok := o.Value.(string); ok && got != "" {
-			report("Influx/get_endpoint", got, nil)
+		if got, ok := o.Value.(string); ok {
+			if got != "https://influx.example.com" {
+				report("Influx/get_endpoint", fmt.Sprintf("%q", got), fmt.Errorf("get_endpoint mismatch: want %q", "https://influx.example.com"))
+			} else {
+				report("Influx/get_endpoint", got, nil)
+			}
 		} else if o.Err != nil {
 			report("Influx/get_endpoint", fmt.Sprintf("%v", o.Value), o.Err)
 		} else {
-			report("Influx/get_endpoint", fmt.Sprintf("%T %v", o.Value, o.Value), fmt.Errorf("get_endpoint returned %T (want non-empty string)", o.Value))
+			report("Influx/get_endpoint", fmt.Sprintf("%T %v", o.Value, o.Value), fmt.Errorf("get_endpoint returned %T (want string)", o.Value))
 		}
 		// 无 transport: write/query/ping 必须正确拒绝(骨架能力无注入 transport)
 		o = a.Command(extAtom, ability.InfluxCommandWrite, ability.InfluxWriteArgs{Points: []ability.InfluxPoint{{Measurement: "m1", Fields: map[string]any{"v": 1.0}}}})
@@ -171,6 +186,17 @@ func verifyPoweredExtras(atom, extAtom *types.Atom) {
 			report("Influx/write-empty-points", "应拒绝但成功", fmt.Errorf("empty points accepted"))
 		} else {
 			report("Influx/write-empty-points", "正确拒绝", nil)
+		}
+		// write 超 influxMaxPoints(1024) → 拒绝
+		tooMany := make([]ability.InfluxPoint, 1025)
+		for i := range tooMany {
+			tooMany[i] = ability.InfluxPoint{Measurement: "m", Fields: map[string]any{"v": 1}}
+		}
+		o = a.Command(extAtom, ability.InfluxCommandWrite, ability.InfluxWriteArgs{Points: tooMany})
+		if o.Err == nil {
+			report("Influx/write-too-many", "应拒绝但成功", fmt.Errorf("1025 points accepted"))
+		} else {
+			report("Influx/write-too-many", "正确拒绝", nil)
 		}
 		o = a.Command(extAtom, ability.InfluxCommandQuery, ability.InfluxQueryArgs{Query: "SELECT * FROM m"})
 		if o.Err == nil {
@@ -285,6 +311,13 @@ func verifyPoweredExtras(atom, extAtom *types.Atom) {
 			report("K8s/scale-no-transport", "应拒绝但成功", fmt.Errorf("scale accepted without transport"))
 		} else {
 			report("K8s/scale-no-transport", "正确拒绝", nil)
+		}
+		// scale 负 replicas → 拒绝(参数校验先于 transport)
+		o = a.Command(extAtom, ability.K8sCommandScale, ability.K8sScaleArgs{Deployment: "deploy/nginx", Replicas: -1})
+		if o.Err == nil {
+			report("K8s/scale-negative", "应拒绝但成功", fmt.Errorf("negative replicas accepted"))
+		} else {
+			report("K8s/scale-negative", "正确拒绝", nil)
 		}
 		o = a.Command(extAtom, ability.K8sCommandDelete, ability.K8sGetArgs{Kind: "pod", Name: "fe-x"})
 		if o.Err == nil {
