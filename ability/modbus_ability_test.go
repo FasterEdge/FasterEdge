@@ -296,6 +296,32 @@ func TestModbusAbilityWriteMulti(t *testing.T) {
 	}
 }
 
+// TestModbusAbilityWriteEchoMismatchIsOperationFailed: 回显不匹配是设备/链路
+// 运行期行为——哨兵必须是 ErrOperationFailed(第九轮修复: 旧实现误用
+// ErrInvalidArguments, 上层按哨兵分流会把运行期故障误判为调用方错误)。
+func TestModbusAbilityWriteEchoMismatchIsOperationFailed(t *testing.T) {
+	m := NewModbusAbility()
+	atom := newModbusAtom(t)
+	// 功能码对但回显载荷与请求不符(伪造/损坏响应)
+	ft := &fakeModbusTransport{resp: []byte{0x06, 0x00, 0x10, 0xDE, 0xAD}}
+	m.SetTransport(ft)
+	if out := m.Command(atom, ModbusCommandWriteHolding, ModbusWriteHoldingArgs{Address: 0x10, Value: 0x1234}); !errors.Is(out.Err, types.ErrOperationFailed) {
+		t.Fatalf("echo mismatch error = %v (want ErrOperationFailed)", out.Err)
+	}
+	// 短响应(<5 字节): 拒绝且不 panic(旧实现格式化 resp[:5] 越界)
+	ft = &fakeModbusTransport{resp: []byte{0x06, 0x00, 0x10}}
+	m.SetTransport(ft)
+	if out := m.Command(atom, ModbusCommandWriteHolding, ModbusWriteHoldingArgs{Address: 0x10, Value: 0x1234}); !errors.Is(out.Err, types.ErrOperationFailed) {
+		t.Fatalf("short echo error = %v (want ErrOperationFailed)", out.Err)
+	}
+	// 功能码异常(0x86 = 0x80|0x06)
+	ft = &fakeModbusTransport{resp: []byte{0x86, 0x02}}
+	m.SetTransport(ft)
+	if out := m.Command(atom, ModbusCommandWriteHolding, ModbusWriteHoldingArgs{Address: 0x10, Value: 0x1234}); !errors.Is(out.Err, types.ErrOperationFailed) {
+		t.Fatalf("device exception error = %v (want ErrOperationFailed)", out.Err)
+	}
+}
+
 func TestModbusAbilityUnknownCommand(t *testing.T) {
 	m := NewModbusAbility()
 	atom := newModbusAtom(t)

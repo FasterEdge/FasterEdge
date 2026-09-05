@@ -437,3 +437,60 @@ func TestKeyringRejectsNonUTF8Subject(t *testing.T) {
 		t.Fatalf("subject = %q", tok.Subject)
 	}
 }
+
+// TestKeyringConcurrentLoadSnapshotAndIssueTTLDefault: IssueToken 在 ttl<=0
+// 时读取 defaultTokenTTL(LoadSnapshot 在锁内写入该字段)——第九轮修复了
+// 该无锁读竞争。无 -race 环境下的行为回归: 并发加载与默认 TTL 签发不
+// panic 且最终可正常加载(与 -race 检测器配合可捕获字段级竞争)。
+func TestKeyringConcurrentLoadSnapshotAndIssueTTLDefault(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "keyring.json")
+	seed := NewKeyringData()
+	if err := seed.Mount(nil); err != nil {
+		t.Fatal(err)
+	}
+	seed.SetSecret([]byte("seed-secret-for-concurrent-load"))
+	if _, err := seed.IssueToken("seed-peer", time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := seed.SaveSnapshot(path); err != nil {
+		t.Fatal(err)
+	}
+
+	k := NewKeyringData()
+	if err := k.Mount(nil); err != nil {
+		t.Fatal(err)
+	}
+	const workers = 8
+	var wg sync.WaitGroup
+	wg.Add(workers + 1)
+	for i := 0; i < workers; i++ {
+		go func(worker int) {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				sub := "peer-" + intString(worker) + "-" + intString(j)
+				// ttl<=0 触发 defaultTokenTTL 读取路径; 与并发 LoadSnapshot
+				// 交错时 subject 可能已存在而被拒绝——属竞态合法结果, 忽略
+				_, _ = k.IssueToken(sub, 0)
+			}
+		}(i)
+	}
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 30; i++ {
+			if err := k.LoadSnapshot(path); err != nil {
+				t.Errorf("load[%d]: %v", i, err)
+				return
+			}
+		}
+	}()
+	wg.Wait()
+
+	// 最终状态必须可正常快照与加载(无撕裂/损坏)
+	if err := k.SaveSnapshot(path); err != nil {
+		t.Fatalf("final save: %v", err)
+	}
+	loaded := NewKeyringData()
+	if err := loaded.LoadSnapshot(path); err != nil {
+		t.Fatalf("final load: %v", err)
+	}
+}
