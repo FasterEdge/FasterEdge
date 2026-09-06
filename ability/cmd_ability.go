@@ -541,7 +541,6 @@ func (c *CmdAbility) waitJob(a CmdWaitArgs) types.CommandOutput {
 		Duration:  time.Since(job.Started),
 		Truncated: job.Truncated,
 	}
-	c.mu.RUnlock()
 	return types.CommandOutput{Name: CmdCommandWait, Value: result}
 }
 
