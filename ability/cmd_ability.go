@@ -499,7 +499,6 @@ func (c *CmdAbility) waitJob(a CmdWaitArgs) types.CommandOutput {
 	c.mu.RLock()
 	job, ok := c.jobs[jobID]
 	wait := a.Wait
-	closing := c.closing
 	c.mu.RUnlock()
 	if !ok {
 		return types.CommandOutput{Name: CmdCommandWait, Err: fmt.Errorf("%s: job %q not found: %w", CmdCommandWait, jobID, types.ErrInvalidArguments)}
@@ -519,9 +518,16 @@ func (c *CmdAbility) waitJob(a CmdWaitArgs) types.CommandOutput {
 		}
 	}
 	c.mu.RLock()
-	if !job.Done {
-		c.mu.RUnlock()
-		_ = closing
+	done := job.Done
+	shuttingDown := c.closing
+	c.mu.RUnlock()
+	if !done {
+		// 关闭窗口内 wait 不再视为"任务仍在运行"的普通失败: Unmount 正在
+		// 取消全部运行中 job, 结果不可用——返回能力关闭哨兵, 便于调用方
+		// (如远程对端/编排器)区分"等超时"与"子系统正在下线"。
+		if shuttingDown {
+			return types.CommandOutput{Name: CmdCommandWait, Err: fmt.Errorf("%s: job %q: %w", CmdCommandWait, jobID, cmdClosingError)}
+		}
 		return types.CommandOutput{Name: CmdCommandWait, Err: fmt.Errorf("%s: job %q still running: %w", CmdCommandWait, jobID, types.ErrInvalidArguments)}
 	}
 	result := CmdResult{

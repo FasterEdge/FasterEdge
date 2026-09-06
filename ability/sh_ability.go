@@ -134,13 +134,11 @@ func (s *ShAbility) SetAllowed(allowed []string) {
 func (s *ShAbility) refreshUnderlyingAllowlist() {
 	s.mu.RLock()
 	shell := s.shell
-	hasAllow := len(s.allowlist) > 0
 	s.mu.RUnlock()
 	// 始终允许 sh -c 调用;子命令约束通过 ShAbility 自己的匹配检查来强制。
 	s.cmd.SetAllowlist([]CmdAllowlistEntry{
 		{Name: shell, ArgsPrefix: []string{"-c"}, MaxArgs: 2},
 	})
-	_ = hasAllow
 }
 
 // hasShellChaining 检测命令中"引号外"是否含 shell 链接/重定向/替换元字符。

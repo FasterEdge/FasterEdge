@@ -565,20 +565,25 @@ func main() {
 			o := a.Command(atom, ability.ConfigFileCommandSave, ability.ConfigFileSaveArgs{Path: cfgPath, Overwrite: true})
 			report("ConfigFileAbility/save", cfgPath, o.Err)
 			atom2 := fasteredge.InitStandardAtom()
-			_ = fasteredge.PreRunAtom(atom2)
-			o = a.Command(atom2, ability.ConfigFileCommandLoad, ability.ConfigFileLoadArgs{Path: cfgPath, Strict: false})
-			if o.Err != nil {
-				report("ConfigFileAbility/load", "", o.Err)
-			} else if d, ok := atom2.Data("ConfigData"); ok {
-				g := d.Command(atom2, data.ConfigCommandGet, data.ConfigGetArgs{Key: "node.role"})
-				// 断言落盘→重载后值真实恢复(而非只查 Err): save/load 为 no-op
-				// 往返时 value 恒空, 只查 Err==nil 是假 PASS。
-				if g.Err != nil {
-					report("ConfigFileAbility/load-reload", "node.role", g.Err)
-				} else if v, _ := g.Value.(string); v != "edge" {
-					report("ConfigFileAbility/load-reload", fmt.Sprintf("node.role=%q", v), fmt.Errorf("reloaded value mismatch"))
-				} else {
-					report("ConfigFileAbility/load-reload", fmt.Sprintf("node.role=%v", v), nil)
+			if err := fasteredge.PreRunAtom(atom2); err != nil {
+				// 旧实现 _ = PreRunAtom 吞错: 挂载失败时 atom2 停在 Created,
+				// 后续 load 若误判成功会得出"配置落盘→重载成功"的假 PASS。
+				report("ConfigFileAbility/load-pre-run", "", err)
+			} else {
+				o = a.Command(atom2, ability.ConfigFileCommandLoad, ability.ConfigFileLoadArgs{Path: cfgPath, Strict: false})
+				if o.Err != nil {
+					report("ConfigFileAbility/load", "", o.Err)
+				} else if d, ok := atom2.Data("ConfigData"); ok {
+					g := d.Command(atom2, data.ConfigCommandGet, data.ConfigGetArgs{Key: "node.role"})
+					// 断言落盘→重载后值真实恢复(而非只查 Err): save/load 为 no-op
+					// 往返时 value 恒空, 只查 Err==nil 是假 PASS。
+					if g.Err != nil {
+						report("ConfigFileAbility/load-reload", "node.role", g.Err)
+					} else if v, _ := g.Value.(string); v != "edge" {
+						report("ConfigFileAbility/load-reload", fmt.Sprintf("node.role=%q", v), fmt.Errorf("reloaded value mismatch"))
+					} else {
+						report("ConfigFileAbility/load-reload", fmt.Sprintf("node.role=%v", v), nil)
+					}
 				}
 			}
 		}
