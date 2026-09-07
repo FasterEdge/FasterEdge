@@ -2,6 +2,7 @@
 package ability
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/netip"
@@ -357,7 +358,10 @@ func isValidDockerEndpoint(u string) bool {
 		if strings.TrimSuffix(host, ".") == "localhost" {
 			return false
 		}
-		if ips, err := net.LookupHost(host); err == nil {
+		// DNS 解析加超时保护: 慢/挂死的解析器不应阻塞校验路径。
+		lookupCtx, lookupCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer lookupCancel()
+		if ips, err := net.DefaultResolver.LookupHost(lookupCtx, host); err == nil {
 			for _, ipStr := range ips {
 				if addr, aerr := netip.ParseAddr(ipStr); aerr == nil {
 					addr = addr.Unmap()
