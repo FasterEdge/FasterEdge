@@ -214,6 +214,15 @@ func (d *DockerAbility) Command(atom *types.Atom, act string, args any) types.Co
 		if strings.TrimSpace(typed.Image) == "" {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: image required: %w", act, types.ErrInvalidArguments)}
 		}
+		// 与 pull_image / simpleContainerAction 一致: create 的镜像引用与
+		// 容器名同样走白名单——旧实现仅查 Image 非空, 同一能力内校验不一致
+		// (JSON body 无 query 注入面, 但畸形引用/名称应尽早以参数错误拒绝)。
+		if !isValidDockerImageRef(strings.TrimSpace(typed.Image)) {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: invalid image reference: %w", act, types.ErrInvalidArguments)}
+		}
+		if typed.Name != "" && !isValidDockerIDOrName(typed.Name) {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: invalid container name: %w", act, types.ErrInvalidArguments)}
+		}
 		// 端口声明校验: "host:container" 或 "container", 端口 1-65535 且为纯数字。
 		// 旧实现任意透传("99999"/"0"/"host:80:extra" 均可), 可绑定任意宿主
 		// 端口(含 22)构成宿主逃逸面。
