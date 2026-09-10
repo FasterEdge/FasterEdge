@@ -257,10 +257,15 @@ func isValidPeerAddress(addr string) bool {
 		return false
 	}
 	host := addr
-	// 若是 host:port 形式,要求端口可解析
+	// 若是 host:port 形式,要求端口可解析且为 1..65535 纯数字
+	// (旧实现仅 SplitHostPort 拆格式,"host:abc"/"host:0"/"host:99999"
+	// 均可入库, 拨号时才失败——与 data.validateAddress 的端口纪律对齐)。
 	if strings.LastIndex(addr, ":") > 0 {
-		h, _, err := net.SplitHostPort(addr)
+		h, port, err := net.SplitHostPort(addr)
 		if err != nil {
+			return false
+		}
+		if !isValidPeerPort(port) {
 			return false
 		}
 		host = h
@@ -286,6 +291,21 @@ func isValidPeerAddress(addr string) bool {
 		return false
 	}
 	return true
+}
+
+// isValidPeerPort 校验端口为 1..65535 的纯数字。
+func isValidPeerPort(port string) bool {
+	if port == "" || len(port) > 5 {
+		return false
+	}
+	var n uint32
+	for _, r := range port {
+		if r < '0' || r > '9' {
+			return false
+		}
+		n = n*10 + uint32(r-'0')
+	}
+	return n >= 1 && n <= 65535
 }
 
 // isDialablePeerIP 经 netip 规范化(IPv4-mapped IPv6)后拒绝回环/未指定/组播/
