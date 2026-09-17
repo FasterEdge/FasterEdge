@@ -213,6 +213,12 @@ func TestK8sAbilityListGetDelete(t *testing.T) {
 	if out := k.Command(atom, K8sCommandDelete, K8sDeleteArgs{Kind: "Pod", Name: ""}); !errors.Is(out.Err, types.ErrInvalidArguments) {
 		t.Fatalf("delete empty error = %v", out.Err)
 	}
+	if out := k.Command(atom, K8sCommandDelete, K8sDeleteArgs{Kind: "Pod", Name: "a/b"}); !errors.Is(out.Err, types.ErrInvalidArguments) {
+		t.Fatalf("delete traversal name error = %v", out.Err)
+	}
+	if out := k.Command(atom, K8sCommandDelete, K8sDeleteArgs{Kind: "Pod", Name: "../secret"}); !errors.Is(out.Err, types.ErrInvalidArguments) {
+		t.Fatalf("delete dotdot name error = %v", out.Err)
+	}
 	if out := k.Command(atom, K8sCommandDelete, K8sDeleteArgs{Kind: "!", Name: "x"}); !errors.Is(out.Err, types.ErrInvalidArguments) {
 		t.Fatalf("delete bad kind error = %v", out.Err)
 	}
@@ -231,6 +237,9 @@ func TestK8sAbilityScale(t *testing.T) {
 	}
 	if out := k.Command(atom, K8sCommandScale, K8sScaleArgs{}); !errors.Is(out.Err, types.ErrInvalidArguments) {
 		t.Fatalf("scale empty error = %v", out.Err)
+	}
+	if out := k.Command(atom, K8sCommandScale, K8sScaleArgs{Deployment: "../x", Replicas: 1}); !errors.Is(out.Err, types.ErrInvalidArguments) {
+		t.Fatalf("scale traversal error = %v", out.Err)
 	}
 	if out := k.Command(atom, K8sCommandScale, K8sScaleArgs{Deployment: "web", Replicas: -1}); !errors.Is(out.Err, types.ErrInvalidArguments) {
 		t.Fatalf("scale negative error = %v", out.Err)
@@ -255,6 +264,9 @@ func TestK8sAbilityGetLogs(t *testing.T) {
 	}
 	if out := k.Command(atom, K8sCommandGetLogs, K8sLogsArgs{}); !errors.Is(out.Err, types.ErrInvalidArguments) {
 		t.Fatalf("logs empty error = %v", out.Err)
+	}
+	if out := k.Command(atom, K8sCommandGetLogs, K8sLogsArgs{Pod: "a?watch=true"}); !errors.Is(out.Err, types.ErrInvalidArguments) {
+		t.Fatalf("logs injection pod error = %v", out.Err)
 	}
 	if out := k.Command(atom, K8sCommandGetLogs, K8sLogsArgs{Pod: "p", Tail: -1}); !errors.Is(out.Err, types.ErrInvalidArguments) {
 		t.Fatalf("logs negative tail error = %v", out.Err)

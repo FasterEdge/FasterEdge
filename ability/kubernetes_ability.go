@@ -231,7 +231,7 @@ func (k *K8sAbility) Command(atom *types.Atom, act string, args any) types.Comma
 		if !ok {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
 		}
-		if !isValidK8sKind(typed.Kind) || strings.TrimSpace(typed.Name) == "" {
+		if !isValidK8sKind(typed.Kind) || !isValidK8sKind(strings.TrimSpace(typed.Name)) {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: invalid kind/name: %w", act, types.ErrInvalidArguments)}
 		}
 		ns := strings.TrimSpace(typed.Namespace)
@@ -287,7 +287,7 @@ func (k *K8sAbility) Command(atom *types.Atom, act string, args any) types.Comma
 		if !ok {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
 		}
-		if !isValidK8sKind(typed.Kind) || strings.TrimSpace(typed.Name) == "" {
+		if !isValidK8sKind(typed.Kind) || !isValidK8sKind(strings.TrimSpace(typed.Name)) {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: invalid kind/name: %w", act, types.ErrInvalidArguments)}
 		}
 		ns := strings.TrimSpace(typed.Namespace)
@@ -315,8 +315,8 @@ func (k *K8sAbility) Command(atom *types.Atom, act string, args any) types.Comma
 		if !ok {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
 		}
-		if strings.TrimSpace(typed.Deployment) == "" {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: deployment required: %w", act, types.ErrInvalidArguments)}
+		if !isValidK8sKind(strings.TrimSpace(typed.Deployment)) {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: invalid deployment: %w", act, types.ErrInvalidArguments)}
 		}
 		if typed.Replicas < 0 {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: replicas must be non-negative: %w", act, types.ErrInvalidArguments)}
@@ -345,8 +345,8 @@ func (k *K8sAbility) Command(atom *types.Atom, act string, args any) types.Comma
 		if !ok {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
 		}
-		if strings.TrimSpace(typed.Pod) == "" {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: pod required: %w", act, types.ErrInvalidArguments)}
+		if !isValidK8sKind(strings.TrimSpace(typed.Pod)) {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: invalid pod: %w", act, types.ErrInvalidArguments)}
 		}
 		if typed.Tail < 0 {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: tail must be non-negative: %w", act, types.ErrInvalidArguments)}
@@ -410,6 +410,10 @@ func (k *K8sAbility) k8sBegin(act string) (context.Context, func(), types.Comman
 	return ctx, func() { cancel(); k.running.Add(-1) }, types.CommandOutput{}
 }
 
+// isValidK8sKind 校验 K8s Kind 与资源名(名称白名单): 允许 [a-zA-Z0-9.-]、
+// 至少一个字母数字、最长 253。Name/Deployment/Pod 同样经 transport 拼进
+// API URL path(/api/v1/namespaces/{ns}/pods/{name}), 白名单拒绝 / \ .. ? #
+// 等分隔符——路径穿越/查询注入的第一道闸(与 DockerAbility 容器名白名单同纪律)。
 func isValidK8sKind(s string) bool {
 	if s == "" || len(s) > 253 {
 		return false
