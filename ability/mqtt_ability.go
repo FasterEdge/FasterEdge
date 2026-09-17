@@ -148,7 +148,9 @@ func (q *mqttQueue) push(m MQTTMessage) bool {
 		return false
 	}
 	if len(q.buf) >= q.max {
-		// 队列满,丢弃最早
+		// 队列满,丢弃最早; 清零被丢弃元素以释放其 payload 字节引用
+		// (否则底层数组前部持续引用已消费 payload, 造成有界内存滞留)
+		q.buf[0] = MQTTMessage{}
 		q.buf = q.buf[1:]
 	}
 	q.buf = append(q.buf, m)
@@ -176,6 +178,7 @@ func (q *mqttQueue) drain(max int, timeout time.Duration) []MQTTMessage {
 			max = len(q.buf)
 		}
 		out := append([]MQTTMessage(nil), q.buf[:max]...)
+		clear(q.buf[:max])
 		q.buf = q.buf[max:]
 		return out
 	}
@@ -199,6 +202,7 @@ func (q *mqttQueue) drain(max int, timeout time.Duration) []MQTTMessage {
 		max = len(q.buf)
 	}
 	out := append([]MQTTMessage(nil), q.buf[:max]...)
+	clear(q.buf[:max])
 	q.buf = q.buf[max:]
 	return out
 }
