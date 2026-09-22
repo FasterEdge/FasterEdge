@@ -1,0 +1,11 @@
+.git
+.gitignore
+.idea
+.tmp
+.gocache
+*.md
+LICENSE
+concept.png
+**/*_test.go
+**/node_modules
+**/dist

@@ -36,6 +36,9 @@ go.work.sum
 # Examples verify tool build output
 /verify
 
+# Examples demo build output
+/dist/
+
 # ============================================
 # OS / Editor / IDE 噪音屏蔽
 # ============================================
