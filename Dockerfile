@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-FROM golang:1.25-alpine AS build
+FROM golang:1.26-alpine AS build
 ENV GOPROXY=https://goproxy.cn,direct \
     GOSUMDB=sum.golang.google.cn
 WORKDIR /src
