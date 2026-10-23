@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -34,7 +35,12 @@ func newDockerTransport(endpoint string) (*dockerUnixTransport, error) {
 			return d.DialContext(ctx, "unix", sockPath)
 		},
 	}
-	return &dockerUnixTransport{endpoint: endpoint, client: &http.Client{Transport: tr}}, nil
+	return &dockerUnixTransport{endpoint: endpoint, client: &http.Client{
+		Transport: tr,
+		// daemon 卡死时旧实现无限阻塞(无客户端超时, main.go 传入的 5s
+		// 仅成为 API 查询参数); 30s 与 CmdAbility 命令超时基线一致。
+		Timeout: 30 * time.Second,
+	}}, nil
 }
 
 // do 发送 Docker Engine API 请求并返回响应体; 非 2xx 返回带状态码的错误。
@@ -49,9 +55,13 @@ func (t *dockerUnixTransport) do(method, path string, body []byte) ([]byte, erro
 		return nil, err
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
+	// 响应体限 1MiB: 旧实现 io.ReadAll 无界, 异常 daemon 响应可撑爆内存。
+	data, err := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
 	if err != nil {
 		return nil, err
+	}
+	if len(data) > 1<<20 {
+		return nil, fmt.Errorf("docker api %s %s: response exceeds 1MiB", method, path)
 	}
 	if resp.StatusCode >= 300 && resp.StatusCode != 304 {
 		return nil, fmt.Errorf("docker api %s %s: status %d: %s", method, path, resp.StatusCode, strings.TrimSpace(string(data)))
@@ -113,7 +123,7 @@ func (t *dockerUnixTransport) List(all bool) ([]ability.DockerContainer, error) 
 }
 
 func (t *dockerUnixTransport) Start(idOrName string) error {
-	_, err := t.do("POST", "/containers/"+idOrName+"/start", nil)
+	_, err := t.do("POST", "/containers/"+url.PathEscape(idOrName)+"/start", nil)
 	return err
 }
 
@@ -122,7 +132,7 @@ func (t *dockerUnixTransport) Stop(idOrName string, timeout time.Duration) error
 	if secs <= 0 {
 		secs = 10
 	}
-	_, err := t.do("POST", "/containers/"+idOrName+"/stop?t="+strconv.Itoa(secs), nil)
+	_, err := t.do("POST", "/containers/"+url.PathEscape(idOrName)+"/stop?t="+strconv.Itoa(secs), nil)
 	return err
 }
 
@@ -131,7 +141,7 @@ func (t *dockerUnixTransport) Restart(idOrName string, timeout time.Duration) er
 	if secs <= 0 {
 		secs = 10
 	}
-	_, err := t.do("POST", "/containers/"+idOrName+"/restart?t="+strconv.Itoa(secs), nil)
+	_, err := t.do("POST", "/containers/"+url.PathEscape(idOrName)+"/restart?t="+strconv.Itoa(secs), nil)
 	return err
 }
 
@@ -140,17 +150,22 @@ func (t *dockerUnixTransport) Remove(idOrName string, force bool) error {
 	if force {
 		forceFlag = 1
 	}
-	_, err := t.do("DELETE", "/containers/"+idOrName+"?force="+strconv.Itoa(forceFlag), nil)
+	// PathEscape + ability 层白名单双重防护: 旧实现把 idOrName 原样拼进
+	// path, "../volumes/myapp-data" 经 daemon 路径清理后 DELETE /volumes/...
+	// 即删除命名卷(数据丢失)。
+	_, err := t.do("DELETE", "/containers/"+url.PathEscape(idOrName)+"?force="+strconv.Itoa(forceFlag), nil)
 	return err
 }
 
 func (t *dockerUnixTransport) Pull(reference string) error {
-	_, err := t.do("POST", "/images/create?fromImage="+reference, nil)
+	// QueryEscape: 旧实现把 reference 原样拼进 fromImage, "nginx&tag=1.2.3"
+	// 可注入额外 query 参数、拉取与审计记录不符的镜像。
+	_, err := t.do("POST", "/images/create?fromImage="+url.QueryEscape(reference), nil)
 	return err
 }
 
 func (t *dockerUnixTransport) Inspect(idOrName string) (ability.DockerContainer, error) {
-	data, err := t.do("GET", "/containers/"+idOrName+"/json", nil)
+	data, err := t.do("GET", "/containers/"+url.PathEscape(idOrName)+"/json", nil)
 	if err != nil {
 		return ability.DockerContainer{}, err
 	}
@@ -178,7 +193,7 @@ func (t *dockerUnixTransport) Logs(idOrName string, tail int) (string, error) {
 	if tail <= 0 {
 		tail = 100
 	}
-	data, err := t.do("GET", fmt.Sprintf("/containers/%s/logs?stdout=1&stderr=1&tail=%d", idOrName, tail), nil)
+	data, err := t.do("GET", fmt.Sprintf("/containers/%s/logs?stdout=1&stderr=1&tail=%d", url.PathEscape(idOrName), tail), nil)
 	if err != nil {
 		return "", err
 	}

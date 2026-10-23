@@ -93,9 +93,18 @@ func (o *OneKeyAbility) Mount(atom *types.Atom) error { return o.Check(atom) }
 // AuthenticateCommand implements types.CommandAuthenticator. The current
 // OneKey protocol authenticates node identity globally; component/command/args
 // are accepted for future authorization policies but are not signed today.
+//
+// 管理命令(issue_token/revoke_token/revoke_all/rotate)仅限本地进程内调用:
+// 任何持有效令牌的对端若可远程调用, 即可签发任意 subject 的令牌冒充任意
+// 节点, 或做吊销/轮换 DoS。verify_token 必须远程可达(认证依赖它)。
+//
+// 信任边界: 拦截清单(下方 122-155 行)覆盖 OneKey 管理命令、RoleAbility
+// set_role、KeyringData 写命令、Cmd/Sh/Bash set_allowlist——其余写面
+// (ConfigFileAbility 的 load/save/set_path、Docker/K8s、file_transfer 等)
+// 仍可被任意已认证对端远程调用, 属防御纵深的设计取舍。新增高危写命令时
+// 应同步评估是否加入本地限制清单。
 func (o *OneKeyAbility) AuthenticateCommand(ctx context.Context, atom *types.Atom, credential any, component, command string, args any) (string, error) {
 	_ = component
-	_ = command
 	_ = args
 	if ctx == nil {
 		return "", types.ErrNilContext
@@ -114,6 +123,40 @@ func (o *OneKeyAbility) AuthenticateCommand(ctx context.Context, atom *types.Ato
 	subject, ok := out.Value.(string)
 	if !ok || strings.TrimSpace(subject) == "" {
 		return "", types.ErrAuthenticationFailed
+	}
+	name := o.GetName()
+	if component == name {
+		switch command {
+		case OneKeyCommandIssueToken, OneKeyCommandRevokeToken, OneKeyCommandRevokeAll, OneKeyCommandRotate:
+			return "", fmt.Errorf("%w: %s is restricted to local in-process calls", types.ErrAuthenticationFailed, command)
+		}
+	}
+	// set_role 同属部署态配置: 任意已认证对端可远程翻转 cloud/edge 角色
+	// 开关(同一 atom 可同时注册两侧角色能力)——与 OneKey 管理命令一样
+	// 仅限本地进程内调用。
+	if component == "RoleAbility" && command == "set_role" {
+		return "", fmt.Errorf("%w: set_role is restricted to local in-process calls", types.ErrAuthenticationFailed)
+	}
+	// KeyringData 的密钥/令牌管理命令同样仅限本地进程内调用(旧实现只拦了
+	// OneKeyAbility 的四个命令, 兜底分支对其余 component/command 全放行):
+	// 任何持有效令牌的对端可经 AuthenticatedCommand(cred, "KeyringData",
+	// "set_secret", ...) 置换共享密钥为自选值, 再用所知密钥离线 Sign 出任意
+	// subject 的伪造令牌(身份伪造); rotate/revoke_all 即全局认证 DoS。
+	// list_tokens/status 为读面, 保持远程可达。
+	if component == "KeyringData" {
+		switch command {
+		case data.KeyringCommandSetSecret, data.KeyringCommandRotate,
+			data.KeyringCommandIssueToken, data.KeyringCommandRevokeToken,
+			data.KeyringCommandRevokeAll:
+			return "", fmt.Errorf("%w: %s is restricted to local in-process calls", types.ErrAuthenticationFailed, command)
+		}
+	}
+	// Cmd/Sh/Bash 的 set_allowlist 是能力授予面: 远程改写白名单后可经 run
+	// 执行任意命令(allowlist 以 Name 精确匹配 shell 条目即放行)——绕过
+	// 命令执行的安全边界演化为远程 RCE。set_allowlist 仅限本地; run 保持
+	// 远程可达但受 allowlist 约束。
+	if (component == "CmdAbility" || component == "ShAbility" || component == "BashAbility") && command == "set_allowlist" {
+		return "", fmt.Errorf("%w: set_allowlist is restricted to local in-process calls", types.ErrAuthenticationFailed)
 	}
 	return subject, nil
 }
@@ -168,7 +211,9 @@ func (o *OneKeyAbility) Command(atom *types.Atom, act string, args any) types.Co
 		if typed.IssuedAt.IsZero() || typed.ExpiresAt.IsZero() || !typed.ExpiresAt.After(typed.IssuedAt) || typed.ExpiresAt.Before(now) || typed.IssuedAt.After(now.Add(time.Minute)) {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: invalid token lifetime: %w", act, types.ErrInvalidArguments)}
 		}
-		stored, ok := keyring.LookupToken(subject)
+		// TokenSnapshot 返回值拷贝: LookupToken 返回共享指针, 锁外读
+		// Revoked/IssuedAt/ExpiresAt 会与 RevokeToken/RevokeAll 构成数据竞争。
+		stored, ok := keyring.TokenSnapshot(subject)
 		if !ok {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: unknown subject: %w", act, types.ErrInvalidArguments)}
 		}
@@ -253,6 +298,12 @@ func DecodeFromTransmission(s string) (OneKeyToken, error) {
 		return OneKeyToken{}, err
 	}
 	signature := parts[len(parts)-1]
+	// HMAC-SHA256 RawURL base64 为 43 字符; 无上限时超大 token 串会先被
+	// 完整 base64 解码再比对(内存/CPU 消耗仅受传输层消息上限约束)。
+	// 128 字符上界覆盖未来算法更换余量。
+	if len(signature) > 128 {
+		return OneKeyToken{}, fmt.Errorf("signature too long: %w", types.ErrInvalidArguments)
+	}
 	if _, err := base64.RawURLEncoding.DecodeString(signature); err != nil {
 		return OneKeyToken{}, fmt.Errorf("bad signature encoding: %w", types.ErrInvalidArguments)
 	}

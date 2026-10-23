@@ -18,11 +18,13 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/FasterEdge/FasterEdge/types"
 )
@@ -32,6 +34,11 @@ const (
 	keyringSnapshotMajor   = 1
 	keyringSnapshotMaxSize = int64(4 << 20) // 4 MiB
 	keyringSnapshotPerm    = os.FileMode(0o600)
+
+	// maxTokenTTL 是单次签发令牌的最大 TTL(30 天)。
+	// 旧实现无上限: 显式超大 TTL(如 876000h)可签发约 292 年的"永久"令牌,
+	// 使吊销/轮换丧失意义。
+	maxTokenTTL = 30 * 24 * time.Hour
 )
 
 const (
@@ -141,7 +148,8 @@ func (k *KeyringData) Mount(_ *types.Atom) error {
 		// 默认随机生成 32 字节密钥,避免明文落盘但保证开箱即用
 		buf := make([]byte, 32)
 		if _, err := rand.Read(buf); err != nil {
-			return fmt.Errorf("KeyringData mount: %w", err)
+			// 熵源不可用是运行期故障——补哨兵(旧实现无哨兵, 调用方无法分类)
+			return fmt.Errorf("KeyringData mount: %w: %w", types.ErrOperationFailed, err)
 		}
 		k.secret = buf
 		k.lastRotatedAt = time.Now()
@@ -196,8 +204,21 @@ func (k *KeyringData) IssueToken(subject string, ttl time.Duration) (*KeyringTok
 	if subject == "" {
 		return nil, fmt.Errorf("issue token: %w", types.ErrInvalidArguments)
 	}
+	// 非 UTF-8 subject 经快照 JSON 落盘会静默腐蚀为 U+FFFD, 往返后
+	// LookupToken/Verify 失效、腐蚀重合还会触发 duplicate subject 整盘拒载
+	// ——签发即拒绝(与 ConfigData 值校验一致)。
+	if !utf8.ValidString(subject) {
+		return nil, fmt.Errorf("issue token: subject is not valid UTF-8: %w", types.ErrInvalidArguments)
+	}
 	if ttl <= 0 {
+		// defaultTokenTTL 由 LoadSnapshot 在锁内写入——锁外读与并发
+		// 加载构成数据竞争(旧实现直接读字段)。
+		k.mu.RLock()
 		ttl = k.defaultTokenTTL
+		k.mu.RUnlock()
+	}
+	if ttl > maxTokenTTL {
+		return nil, fmt.Errorf("issue token: ttl %s exceeds max %s: %w", ttl, maxTokenTTL, types.ErrInvalidArguments)
 	}
 	now := time.Now()
 	k.mu.Lock()
@@ -255,11 +276,26 @@ func (k *KeyringData) ActiveToken(subject string) (*KeyringToken, bool) {
 }
 
 // LookupToken 返回指定 subject 的令牌条目(不做有效性过滤,供校验时使用)。
+// 注意: 返回共享指针, 调用方不得在锁外读取可变字段(Revoked 等),
+// 否则与 RevokeToken/RevokeAll 构成数据竞争——请改用 TokenSnapshot。
 func (k *KeyringData) LookupToken(subject string) (*KeyringToken, bool) {
 	k.mu.RLock()
 	defer k.mu.RUnlock()
 	t, ok := k.tokens[subject]
 	return t, ok
+}
+
+// TokenSnapshot 返回指定 subject 的令牌**值拷贝**, 供校验路径在锁外安全读取
+// (Revoked/IssuedAt/ExpiresAt), 与 LookupToken 的共享指针不同, 不与
+// RevokeToken/RevokeAll 构成数据竞争。
+func (k *KeyringData) TokenSnapshot(subject string) (KeyringToken, bool) {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	t, ok := k.tokens[subject]
+	if !ok {
+		return KeyringToken{}, false
+	}
+	return *t, true
 }
 
 // Snapshot 返回状态与令牌表的深拷贝副本(按 Subject 排序)。
@@ -321,7 +357,8 @@ func (k *KeyringData) Command(_ *types.Atom, act string, args any) types.Command
 		}
 		buf := make([]byte, 32)
 		if _, err := rand.Read(buf); err != nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %v", act, types.ErrInvalidArguments, err)}
+			// rand.Read 运行期故障(熵源不可用)是操作失败而非参数校验
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %w", act, types.ErrOperationFailed, err)}
 		}
 		k.SetSecret(buf)
 		return types.CommandOutput{Name: act, Value: k.SecretFingerprint()}
@@ -350,17 +387,32 @@ func (k *KeyringData) Command(_ *types.Atom, act string, args any) types.Command
 		if err != nil {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, err)}
 		}
-		return types.CommandOutput{Name: act, Value: *tok}
+		_ = tok
+		// IssueToken 返回共享 *KeyringToken: 此处若直接 *tok 则是锁外解引用
+		// Revoked 字段, 与 RevokeToken/RevokeAll 构成数据竞争——经快照拷贝返回。
+		snap, ok := k.TokenSnapshot(subject)
+		if !ok {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
+		}
+		return types.CommandOutput{Name: act, Value: snap}
 	case KeyringCommandRevokeToken:
 		typed, ok := args.(KeyringRevokeTokenArgs)
 		if !ok || strings.TrimSpace(typed.Subject) == "" {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
 		}
-		ok, tok := k.RevokeToken(strings.TrimSpace(typed.Subject))
-		if !ok {
+		revoked, _ := k.RevokeToken(strings.TrimSpace(typed.Subject))
+		if !revoked {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: no active token for subject: %w", act, types.ErrInvalidArguments)}
 		}
-		return types.CommandOutput{Name: act, Value: *tok}
+		// 与 IssueToken 命令同纪律: RevokeToken 返回共享指针——锁外解引用
+		// Revoked/时间字段依赖 write-once 不变量(脆弱易回归), 经快照拷贝返回。
+		snap, snapOK := k.TokenSnapshot(strings.TrimSpace(typed.Subject))
+		if !snapOK {
+			// RevokeToken 成功但快照缺失只有一种可能: 并发 RevokeAll 清表——
+			// 仍返回吊销成功(已无令牌), 不暴露内部态。
+			return types.CommandOutput{Name: act, Value: typed.Subject}
+		}
+		return types.CommandOutput{Name: act, Value: snap}
 	case KeyringCommandRevokeAll:
 		if args != nil {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
@@ -449,8 +501,18 @@ func (k *KeyringData) SaveSnapshot(path string) error {
 		cleanup()
 		return fmt.Errorf("keyring snapshot: rename: %w", err)
 	}
-	if d, err := os.Open(dir); err == nil {
-		_ = d.Sync()
+	if d, err := os.Open(dir); err != nil {
+		return fmt.Errorf("keyring snapshot: open dir for sync: %w", err)
+	} else {
+		// 目录 fsync 是 POSIX 持久化语义(确保 rename 目录项落盘)。
+		// Windows 不支持目录 fsync(Sync 恒返回 Access denied)——
+		// 属已知平台限制, 降级忽略; 文件 fsync + rename 原子性仍成立。
+		if runtime.GOOS != "windows" {
+			if serr := d.Sync(); serr != nil {
+				_ = d.Close()
+				return fmt.Errorf("keyring snapshot: dir fsync: %w", serr)
+			}
+		}
 		_ = d.Close()
 	}
 	return nil
@@ -501,11 +563,30 @@ func (k *KeyringData) LoadSnapshot(path string) error {
 	if err != nil || len(secret) == 0 {
 		return errors.New("keyring snapshot: missing or invalid secret")
 	}
+	// 密钥长度与 set_secret 的 16 字节下限一致: 弱密钥(如 4 字节)可直接
+	// 被暴力穷举, 加载路径旧实现不校验。
+	if len(secret) < 16 {
+		return fmt.Errorf("keyring snapshot: secret too short (%d bytes, need >= 16)", len(secret))
+	}
 	tokens := make(map[string]*KeyringToken, len(snap.Tokens))
 	for i := range snap.Tokens {
 		tok := snap.Tokens[i]
 		if strings.TrimSpace(tok.Subject) == "" {
 			return fmt.Errorf("keyring snapshot: tokens[%d] has empty subject", i)
+		}
+		if !utf8.ValidString(tok.Subject) {
+			return fmt.Errorf("keyring snapshot: tokens[%d] subject is not valid UTF-8", i)
+		}
+		// 时间窗校验: 签发时间非零、过期晚于签发、且 TTL 窗不超 maxTokenTTL。
+		// 旧实现锚定加载时刻墙上时钟(now.Add(maxTokenTTL)): RTC 回拨(边缘
+		// 设备时钟复位/NTP 向后纠正)后, 自身 SaveSnapshot 产出的合法快照
+		// (如 30 天 TTL 的新令牌)会因"过期时间晚于 now+30d"被整体拒载——
+		// 含 secret, 节点拒启。TTL 窗与时钟无关, 同样能挡伪永久令牌。
+		if tok.IssuedAt.IsZero() || !tok.ExpiresAt.After(tok.IssuedAt) {
+			return fmt.Errorf("keyring snapshot: tokens[%d] has invalid time window", i)
+		}
+		if tok.ExpiresAt.Sub(tok.IssuedAt) > maxTokenTTL {
+			return fmt.Errorf("keyring snapshot: tokens[%d] ttl exceeds max %s", i, maxTokenTTL)
 		}
 		if _, exists := tokens[tok.Subject]; exists {
 			return fmt.Errorf("keyring snapshot: duplicate subject %q", tok.Subject)
@@ -520,6 +601,14 @@ func (k *KeyringData) LoadSnapshot(path string) error {
 	ttl := snap.DefaultTokenTTL
 	if ttl <= 0 {
 		ttl = 24 * time.Hour
+	}
+	if ttl > maxTokenTTL {
+		// 被篡改快照的超大默认 TTL 会让后续 IssueToken(subject,0) 命中
+		// 上限报错——钳制到上限。
+		ttl = maxTokenTTL
+	}
+	if snap.TotalIssued < 0 || snap.RevokedCount < 0 || snap.RevokedCount > snap.TotalIssued {
+		return fmt.Errorf("keyring snapshot: inconsistent counters (total=%d revoked=%d)", snap.TotalIssued, snap.RevokedCount)
 	}
 	k.mu.Lock()
 	k.secret = append([]byte(nil), secret...)
@@ -559,6 +648,9 @@ func (k *KeyringData) JSONMarshal() ([]byte, error) {
 // Sign 计算给定 subject + expiresAt 的 HMAC 签名,返回 base64 字符串。
 // 该函数供 OneKeyAbility 使用,签名内容是 subject|issuedAt.UnixNano|expiresAt.UnixNano。
 func (k *KeyringData) Sign(tok *KeyringToken) string {
+	if tok == nil {
+		return ""
+	}
 	secret := k.Secret()
 	mac := hmac.New(sha256.New, secret)
 	payload := fmt.Sprintf("%s|%d|%d", tok.Subject, tok.IssuedAt.UnixNano(), tok.ExpiresAt.UnixNano())
@@ -569,6 +661,12 @@ func (k *KeyringData) Sign(tok *KeyringToken) string {
 // Verify 校验 subject + issuedAt + expiresAt + signature 是否与当前密钥一致。
 func (k *KeyringData) Verify(subject string, issuedAt, expiresAt time.Time, signature string) bool {
 	secret := k.Secret()
+	if len(secret) == 0 {
+		// 密钥未就绪(未挂载): 空密钥 HMAC 是确定性可计算的, 任意签名都可被伪造
+		// 匹配——必须拒绝(fail-closed), 否则未 PreRun 即对外提供认证服务的
+		// 进程, 其认证边界形同虚设(伪造任意 subject 令牌)。
+		return false
+	}
 	mac := hmac.New(sha256.New, secret)
 	payload := fmt.Sprintf("%s|%d|%d", subject, issuedAt.UnixNano(), expiresAt.UnixNano())
 	mac.Write([]byte(payload))

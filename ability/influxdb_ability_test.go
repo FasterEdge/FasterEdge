@@ -147,7 +147,7 @@ func TestInfluxAbilityPing(t *testing.T) {
 		t.Fatal(out.Err)
 	}
 	ft.pingErr = errors.New("net down")
-	if out := i.Command(atom, InfluxCommandPing, nil); !errors.Is(out.Err, types.ErrInvalidArguments) {
+	if out := i.Command(atom, InfluxCommandPing, nil); !errors.Is(out.Err, types.ErrOperationFailed) {
 		t.Fatalf("ping error = %v", out.Err)
 	}
 }
@@ -200,9 +200,9 @@ func TestInfluxAbilityWrite(t *testing.T) {
 	} else if list, _ := out.Value.([]string); len(list) != 1 || list[0] != "cpu" {
 		t.Fatalf("series = %v", list)
 	}
-	// write error
+	// write error(运行期故障——ErrOperationFailed, 旧实现误包 ErrInvalidArguments)
 	ft.writeErr = errors.New("disk full")
-	if out := i.Command(atom, InfluxCommandWrite, InfluxWriteArgs{Points: []InfluxPoint{{Measurement: "m", Fields: map[string]any{"v": 1.0}}}}); !errors.Is(out.Err, types.ErrInvalidArguments) {
+	if out := i.Command(atom, InfluxCommandWrite, InfluxWriteArgs{Points: []InfluxPoint{{Measurement: "m", Fields: map[string]any{"v": 1.0}}}}); !errors.Is(out.Err, types.ErrOperationFailed) {
 		t.Fatalf("write error = %v", out.Err)
 	}
 }
@@ -225,7 +225,7 @@ func TestInfluxAbilityQuery(t *testing.T) {
 		t.Fatalf("rows = %v", rows)
 	}
 	ft.queryErr = errors.New("syntax")
-	if out := i.Command(atom, InfluxCommandQuery, InfluxQueryArgs{Query: "bad"}); !errors.Is(out.Err, types.ErrInvalidArguments) {
+	if out := i.Command(atom, InfluxCommandQuery, InfluxQueryArgs{Query: "bad"}); !errors.Is(out.Err, types.ErrOperationFailed) {
 		t.Fatalf("query err = %v", out.Err)
 	}
 	// 无 transport

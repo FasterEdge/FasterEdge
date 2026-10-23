@@ -299,3 +299,55 @@ func TestOneKeyAbilityEncodeDecode(t *testing.T) {
 		t.Fatalf("dotted decoded = %#v", dec2)
 	}
 }
+
+// TestOneKeyAbilityRemoteRestrictedCommands 回归第五轮高危缺口: AuthenticateCommand
+// 旧实现只拦 OneKeyAbility 四个管理命令与 set_role, 兜底对其余 component/command
+// 全放行——持任意有效令牌的对端可远程置换共享密钥(伪造任意 subject 身份)、
+// 吊销全集群令牌(认证 DoS)、改写 Cmd/Sh/Bash 白名单(远程 RCE)。
+// 现 KeyringData 密钥/令牌管理命令与 set_allowlist 均仅限本地进程内调用。
+func TestOneKeyAbilityRemoteRestrictedCommands(t *testing.T) {
+	o := NewOneKeyAbility()
+	atom := newOneKeyAtom(t)
+	if err := atom.AddAbility(o); err != nil {
+		t.Fatal(err)
+	}
+	if err := atom.SetCommandAuthenticator(o); err != nil {
+		t.Fatal(err)
+	}
+	if err := atom.MountAll(); err != nil {
+		t.Fatal(err)
+	}
+	out := o.Command(atom, OneKeyCommandIssueToken, OneKeyIssueTokenArgs{Subject: "edge-1", TTL: time.Hour})
+	if out.Err != nil {
+		t.Fatal(out.Err)
+	}
+	tok, ok := out.Value.(OneKeyToken)
+	if !ok {
+		t.Fatalf("issue value = %#v", out.Value)
+	}
+	cred := OneKeyVerifyTokenArgs{Subject: tok.Subject, IssuedAt: tok.IssuedAt, ExpiresAt: tok.ExpiresAt, Signature: tok.Signature}
+
+	// KeyringData 密钥/令牌管理命令: 远程拒绝
+	for _, cmd := range []string{
+		data.KeyringCommandSetSecret, data.KeyringCommandRotate,
+		data.KeyringCommandIssueToken, data.KeyringCommandRevokeToken,
+		data.KeyringCommandRevokeAll,
+	} {
+		if r := atom.AuthenticatedCommand(cred, "KeyringData", cmd, nil); !errors.Is(r.Err, types.ErrAuthenticationFailed) {
+			t.Fatalf("KeyringData/%s: err=%v (want ErrAuthenticationFailed)", cmd, r.Err)
+		}
+	}
+	// Cmd/Sh/Bash set_allowlist: 远程拒绝
+	for _, name := range []string{"CmdAbility", "ShAbility", "BashAbility"} {
+		if r := atom.AuthenticatedCommand(cred, name, "set_allowlist", nil); !errors.Is(r.Err, types.ErrAuthenticationFailed) {
+			t.Fatalf("%s/set_allowlist: err=%v (want ErrAuthenticationFailed)", name, r.Err)
+		}
+	}
+	// 读面与 verify_token 保持远程可达
+	if r := atom.AuthenticatedCommand(cred, "KeyringData", data.KeyringCommandListTokens, nil); r.Err != nil {
+		t.Fatalf("KeyringData/list_tokens: %v", r.Err)
+	}
+	if r := atom.AuthenticatedCommand(cred, "OneKeyAbility", OneKeyCommandVerifyToken, cred); r.Err != nil {
+		t.Fatalf("OneKeyAbility/verify_token: %v", r.Err)
+	}
+}

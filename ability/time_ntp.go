@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/beevik/ntp"
+
+	"github.com/FasterEdge/FasterEdge/types"
 )
 
 // ntpQuerier is the narrow seam used by TimeAbility so tests never need the network.
@@ -85,9 +87,15 @@ func (t *TimeAbility) fetchNTPTime(address string) (time.Time, error) {
 	if err != nil {
 		return time.Time{}, err
 	}
+	t.mu.RLock()
+	timeout := t.ntpTimeout
+	t.mu.RUnlock()
 	// Resolve and validate every result before handing control to the client;
 	// the policy-aware dialer then connects only to numeric addresses.
-	ips, err := t.networkPolicy.resolve(context.Background(), ntpHost(server))
+	// DNS 解析必须带超时: context.Background() 在黑洞 DNS 下永久挂死 sync_ntp。
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	ips, err := t.networkPolicy.resolve(ctx, ntpHost(server))
 	if err != nil {
 		return time.Time{}, err
 	}
@@ -109,7 +117,7 @@ func (t *TimeAbility) fetchNTPTime(address string) (time.Time, error) {
 		GetSystemTime: clock.Now,
 	})
 	if err != nil {
-		return time.Time{}, fmt.Errorf("NTP query %s: %w", server, err)
+		return time.Time{}, fmt.Errorf("NTP query %s: %w: %w", server, types.ErrOperationFailed, err)
 	}
 	if resp == nil {
 		return time.Time{}, errors.New("NTP query returned nil response")

@@ -11,7 +11,10 @@ import "fmt"
 type DependencyKind uint8
 
 const (
-	DependencyData DependencyKind = iota
+	// 零值 0 是无效 Kind: 从 1 起编号, 组件漏填 Kind 不再静默声明为
+	// data 依赖(旧实现 iota 从 0 起, 零值=DependencyData——漏填时若名字
+	// 恰好命中 data 组件则"正确"运行, 掩盖声明错误)。
+	DependencyData DependencyKind = iota + 1
 	DependencyAbility
 )
 

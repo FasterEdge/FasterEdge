@@ -2,6 +2,7 @@ package FasterEdge
 
 import (
 	"errors"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -161,7 +162,9 @@ func TestIntegrationConfigFileRoundTrip(t *testing.T) {
 		t.Fatal(out.Err)
 	}
 	fa, _ := atom.Ability("ConfigFileAbility")
-	path := t.TempDir() + "/config.json"
+	cfRoot := t.TempDir()
+	fa.(*ability.ConfigFileAbility).SetRoot(cfRoot)
+	path := filepath.Join(cfRoot, "config.json")
 	if out := fa.Command(atom, ability.ConfigFileCommandSave, ability.ConfigFileSaveArgs{Path: path, Overwrite: true}); out.Err != nil {
 		t.Fatal(out.Err)
 	}

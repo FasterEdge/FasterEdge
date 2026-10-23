@@ -12,7 +12,9 @@
 package main
 
 import (
+	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -20,6 +22,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -32,6 +35,7 @@ import (
 type modbusTCPTransport struct {
 	conn net.Conn
 	seq  atomic.Uint32
+	mu   sync.Mutex // 串行化 Send: 旧实现并发 Send 的响应会串线
 }
 
 func newModbusTCPTransport(addr string) (*modbusTCPTransport, error) {
@@ -43,6 +47,13 @@ func newModbusTCPTransport(addr string) (*modbusTCPTransport, error) {
 }
 
 func (t *modbusTCPTransport) Send(unitID uint8, pdu []byte) ([]byte, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	// 每次事务设置读写 deadline: 假从站接受连接不回包时旧实现永久挂起
+	// (ModbusAbility 自身无兜底超时)。
+	if err := t.conn.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		return nil, err
+	}
 	// MBAP 头: 事务ID(2) + 协议ID(2) + 长度(2) + 单元ID(1), 之后是 PDU
 	tid := uint16(t.seq.Add(1))
 	mbap := make([]byte, 7)
@@ -59,8 +70,10 @@ func (t *modbusTCPTransport) Send(unitID uint8, pdu []byte) ([]byte, error) {
 		return nil, err
 	}
 	plen := int(binary.BigEndian.Uint16(hdr[4:6])) - 1
-	if plen < 0 {
-		return nil, fmt.Errorf("bad mbap length")
+	// MBAP 长度字段 = 单元ID(1) + PDU; 最大合法 PDU 253 字节(协议上限),
+	// 损坏/恶意响应报大长度会驱动 readFull 等 64KB——直接拒绝。
+	if plen < 0 || plen > 254 {
+		return nil, fmt.Errorf("bad mbap length %d", plen)
 	}
 	resp := make([]byte, plen)
 	if _, err := readFull(t.conn, resp); err != nil {
@@ -147,6 +160,45 @@ func main() {
 		}
 	}
 
+	// 组件枚举与 InitStandardAtom 一致性: verify 各段全部用 if x, ok := 静默
+	// 跳过——删掉任一组件整段验证会无声消失仍 "ALL PASS"。期望清单缺失即 FAIL。
+	expectedMain := []string{
+		"BaseAbility", "RoleAbility", "TimeAbility", "OneKeyAbility", "CmdAbility",
+		"ShAbility", "BashAbility", "NetMapAbility", "ConfigFileAbility",
+		"BaseData", "ConfigData", "NetMapData", "KeyringData",
+	}
+	cm := make(map[string]struct{}, len(components))
+	for _, n := range components {
+		cm[n] = struct{}{}
+	}
+	for _, want := range expectedMain {
+		if _, ok := cm[want]; !ok {
+			msg := "期望组件缺失(verify 漏测面): " + want
+			fmt.Printf("  [FAIL] %s\n", msg)
+			failCount++
+			failDetails = append(failDetails, msg)
+		}
+	}
+	for _, n := range components {
+		known := false
+		for _, w := range expectedMain {
+			if n == w {
+				known = true
+				break
+			}
+		}
+		// 数据库类 data 组件在 extAtom 段(dbVerify)验证, 不算漏测
+		for _, w := range []string{"InfluxDBData", "MongoDBData", "MySQLData", "PostgreSQLData", "RedisData", "SQLiteData"} {
+			if n == w {
+				known = true
+				break
+			}
+		}
+		if !known {
+			fmt.Printf("  [WARN] 组件未纳入 verify 断言: %s\n", n)
+		}
+	}
+
 	// 2. 逐个组件验证
 	fmt.Println("\n=== 逐个执行命令 ===")
 
@@ -203,7 +255,10 @@ func main() {
 			o = d.Command(atom, data.NetMapCommandSetDefaultIface, data.NetMapSetDefaultIfaceArgs{Name: ifaces[0].Name})
 			report("NetMapData/set_default_iface", ifaces[0].Name, o.Err)
 		} else {
-			report("NetMapData/interfaces", fmt.Sprintf("%v", o.Value), o.Err)
+			// 旧实现: 类型断言失败或空结果时把 o.Err 传给 report——o.Err 为
+			// nil(返回垃圾类型/空结果)时假 PASS, set_default_iface 随之消失。
+			// 真实主机必有 ≥1 接口——断言失败即 FAIL。
+			report("NetMapData/interfaces", "type/empty mismatch", fmt.Errorf("interfaces returned %T (want []data.NetMapInterface with len>0)", o.Value))
 		}
 	}
 
@@ -220,7 +275,12 @@ func main() {
 		o := a.Command(atom, ability.CommandSetRole, ability.RoleAbilityArgs{Role: "edge"})
 		report("RoleAbility/set_role", "edge", o.Err)
 		o = a.Command(atom, ability.CommandGetRole, nil)
-		report("RoleAbility/get_role", fmt.Sprintf("%v", o.Value), o.Err)
+		// 断言 get_role 反映 set_role(旧实现只打印——set 变 no-op 也 PASS)
+		if v, _ := o.Value.(string); v != "edge" {
+			report("RoleAbility/get_role", fmt.Sprintf("%v", o.Value), fmt.Errorf("get_role mismatch: want %q", "edge"))
+		} else {
+			report("RoleAbility/get_role", fmt.Sprintf("%v", o.Value), o.Err)
+		}
 		o = a.Command(atom, ability.CommandDescribe, nil)
 		report("RoleAbility/describe", fmt.Sprintf("%v", o.Value), o.Err)
 	}
@@ -241,7 +301,15 @@ func main() {
 		report("TimeAbility/sync_manual", manual, o.Err)
 		o = a.Command(atom, ability.TimeCommandGetTime, nil)
 		if snap, ok := o.Value.(ability.TimeSnapshot); ok {
-			report("TimeAbility/get_time-after-manual", fmt.Sprintf("now=%s src=%s", snap.Time.Format(time.RFC3339), snap.Source), o.Err)
+			// 断言 get_time 真实反映 sync_manual 的值: sync_manual 回归为
+			// no-op 时 snap.Time 仍是系统时间(与 manual 差 ~2h), 只查 Err==nil 是假 PASS。
+			manualT, _ := time.Parse(time.RFC3339Nano, manual)
+			delta := snap.Time.Sub(manualT)
+			if delta < -2*time.Second || delta > 2*time.Second {
+				report("TimeAbility/get_time-after-manual", fmt.Sprintf("now=%s src=%s", snap.Time.Format(time.RFC3339), snap.Source), fmt.Errorf("get_time did not reflect sync_manual (delta=%v)", delta))
+			} else {
+				report("TimeAbility/get_time-after-manual", fmt.Sprintf("now=%s src=%s", snap.Time.Format(time.RFC3339), snap.Source), nil)
+			}
 		} else {
 			report("TimeAbility/get_time-after-manual", fmt.Sprintf("%v", o.Value), o.Err)
 		}
@@ -301,31 +369,65 @@ func main() {
 		if o.Err != nil {
 			report("OneKeyAbility/issue", "", o.Err)
 		} else {
-			tok, _ := o.Value.(ability.OneKeyToken)
-			report("OneKeyAbility/issue", fmt.Sprintf("sig=%s... exp=%s", tok.Signature[:8], tok.ExpiresAt.Format(time.RFC3339)), nil)
-			wire := ability.EncodeForTransmission(tok)
-			dec, err := ability.DecodeFromTransmission(wire)
-			if err != nil {
-				report("OneKeyAbility/wire-encode", "", err)
+			tok, okTok := o.Value.(ability.OneKeyToken)
+			if !okTok || len(tok.Signature) < 8 {
+				report("OneKeyAbility/issue", "返回值类型/签名异常", fmt.Errorf("unexpected token value"))
 			} else {
-				v := a.Command(atom, ability.OneKeyCommandVerifyToken, ability.OneKeyVerifyTokenArgs{
-					Subject: dec.Subject, IssuedAt: dec.IssuedAt, ExpiresAt: dec.ExpiresAt, Signature: dec.Signature,
-				})
-				report("OneKeyAbility/verify", fmt.Sprintf("subject=%s", v.Value), v.Err)
+				report("OneKeyAbility/issue", fmt.Sprintf("sig=%s... exp=%s", tok.Signature[:8], tok.ExpiresAt.Format(time.RFC3339)), nil)
+				wire := ability.EncodeForTransmission(tok)
+				dec, err := ability.DecodeFromTransmission(wire)
+				if err != nil {
+					report("OneKeyAbility/wire-encode", "", err)
+				} else {
+					v := a.Command(atom, ability.OneKeyCommandVerifyToken, ability.OneKeyVerifyTokenArgs{
+						Subject: dec.Subject, IssuedAt: dec.IssuedAt, ExpiresAt: dec.ExpiresAt, Signature: dec.Signature,
+					})
+					report("OneKeyAbility/verify", fmt.Sprintf("subject=%s", v.Value), v.Err)
+				}
+				bad := ability.OneKeyVerifyTokenArgs{Subject: tok.Subject, IssuedAt: tok.IssuedAt, ExpiresAt: tok.ExpiresAt, Signature: strings.Repeat("0", len(tok.Signature))}
+				v := a.Command(atom, ability.OneKeyCommandVerifyToken, bad)
+				if v.Err == nil {
+					report("OneKeyAbility/verify-tampered", "应失败但通过", fmt.Errorf("tampered signature accepted"))
+				} else {
+					report("OneKeyAbility/verify-tampered", "正确拒绝", nil)
+				}
+				o = a.Command(atom, ability.OneKeyCommandListTokens, nil)
+				report("OneKeyAbility/list_tokens", fmt.Sprintf("%v", o.Value), o.Err)
+				// 鉴权正路径(revoke 前): 有效令牌经 AuthenticatedCommand 应放行。
+				// 凭据是 OneKeyVerifyTokenArgs 结构(AuthenticateCommand 的类型断言要求)。
+				cred := ability.OneKeyVerifyTokenArgs{Subject: tok.Subject, IssuedAt: tok.IssuedAt, ExpiresAt: tok.ExpiresAt, Signature: tok.Signature}
+				authOK := atom.AuthenticatedCommand(cred, "BaseAbility", ability.CommandListAbilityNames, nil)
+				if authOK.Err != nil {
+					report("OneKeyAbility/auth-valid", "", fmt.Errorf("valid token rejected: %v", authOK.Err))
+				} else {
+					report("OneKeyAbility/auth-valid", "有效令牌放行", nil)
+				}
+				o = a.Command(atom, ability.OneKeyCommandRevokeToken, ability.OneKeyRevokeTokenArgs{Subject: tok.Subject})
+				report("OneKeyAbility/revoke", tok.Subject, o.Err)
+				o = a.Command(atom, ability.OneKeyCommandListTokens, nil)
+				if toks, ok := o.Value.([]data.KeyringToken); ok {
+					revoked := false
+					for _, tk := range toks {
+						if tk.Subject == tok.Subject && tk.Revoked {
+							revoked = true
+						}
+					}
+					if !revoked {
+						report("OneKeyAbility/list_after_revoke", fmt.Sprintf("%v", o.Value), fmt.Errorf("revoked flag not reflected for %s", tok.Subject))
+					} else {
+						report("OneKeyAbility/list_after_revoke", "revoked=true", nil)
+					}
+				} else {
+					report("OneKeyAbility/list_after_revoke", fmt.Sprintf("%v", o.Value), o.Err)
+				}
+				// 吊销后经 AuthenticatedCommand 重验应拒绝(与 auth-valid 同凭据)。
+				authRevoked := atom.AuthenticatedCommand(cred, "BaseAbility", ability.CommandListAbilityNames, nil)
+				if authRevoked.Err == nil {
+					report("OneKeyAbility/auth-after-revoke", "应拒绝但成功", fmt.Errorf("revoked token accepted"))
+				} else {
+					report("OneKeyAbility/auth-after-revoke", "正确拒绝", nil)
+				}
 			}
-			bad := ability.OneKeyVerifyTokenArgs{Subject: tok.Subject, IssuedAt: tok.IssuedAt, ExpiresAt: tok.ExpiresAt, Signature: strings.Repeat("0", len(tok.Signature))}
-			v := a.Command(atom, ability.OneKeyCommandVerifyToken, bad)
-			if v.Err == nil {
-				report("OneKeyAbility/verify-tampered", "应失败但通过", fmt.Errorf("tampered signature accepted"))
-			} else {
-				report("OneKeyAbility/verify-tampered", "正确拒绝", nil)
-			}
-			o = a.Command(atom, ability.OneKeyCommandListTokens, nil)
-			report("OneKeyAbility/list_tokens", fmt.Sprintf("%v", o.Value), o.Err)
-			o = a.Command(atom, ability.OneKeyCommandRevokeToken, ability.OneKeyRevokeTokenArgs{Subject: tok.Subject})
-			report("OneKeyAbility/revoke", tok.Subject, o.Err)
-			o = a.Command(atom, ability.OneKeyCommandListTokens, nil)
-			report("OneKeyAbility/list_after_revoke", fmt.Sprintf("%v", o.Value), o.Err)
 		}
 	}
 
@@ -335,9 +437,22 @@ func main() {
 		report("CmdAbility/set_allowlist", "echo", o.Err)
 		o = a.Command(atom, ability.CmdCommandRun, ability.CmdRunArgs{Name: "echo", Args: []string{"cmd-ability-ok"}, Timeout: 3 * time.Second})
 		if res, ok := o.Value.(ability.CmdResult); ok {
-			report("CmdAbility/run", fmt.Sprintf("exit=%d out=%q", res.ExitCode, res.Stdout), o.Err)
-		} else {
+			// 非零退出码/空输出也须 FAIL: execOnce 对退出码与启动失败都不返回 Err
+			if res.ExitCode < 0 {
+				// ExitCode==-1 表示 exec 启动失败(如 Windows 无 echo 可执行文件)——
+				// 环境性豁免, 不计入 PASS/FAIL(容器 Linux 下 echo 正常)。
+				fmt.Printf("  [SKIP] CmdAbility/run (exec 启动失败, 环境缺命令): %s\n", strings.TrimSpace(res.Stderr))
+			} else if res.ExitCode != 0 {
+				report("CmdAbility/run", fmt.Sprintf("exit=%d out=%q", res.ExitCode, res.Stdout), fmt.Errorf("non-zero exit code"))
+			} else if !strings.Contains(res.Stdout, "cmd-ability-ok") {
+				report("CmdAbility/run", fmt.Sprintf("exit=%d out=%q", res.ExitCode, res.Stdout), fmt.Errorf("missing expected output"))
+			} else {
+				report("CmdAbility/run", fmt.Sprintf("exit=%d out=%q", res.ExitCode, res.Stdout), nil)
+			}
+		} else if o.Err != nil {
 			report("CmdAbility/run", fmt.Sprintf("%v", o.Value), o.Err)
+		} else {
+			report("CmdAbility/run", fmt.Sprintf("%v", o.Value), fmt.Errorf("run returned %T (want ability.CmdResult)", o.Value))
 		}
 	}
 
@@ -347,9 +462,19 @@ func main() {
 		report("ShAbility/set_allowlist", "printf", o.Err)
 		o = a.Command(atom, ability.ShCommandRun, ability.ShRunArgs{Command: "printf 'sh-ok\\n'", Timeout: 3 * time.Second})
 		if res, ok := o.Value.(ability.CmdResult); ok {
-			report("ShAbility/run-allow", fmt.Sprintf("exit=%d out=%q", res.ExitCode, res.Stdout), o.Err)
-		} else {
+			if res.ExitCode < 0 {
+				fmt.Printf("  [SKIP] ShAbility/run-allow (exec 启动失败, 环境缺 sh): %s\n", strings.TrimSpace(res.Stderr))
+			} else if res.ExitCode != 0 {
+				report("ShAbility/run-allow", fmt.Sprintf("exit=%d out=%q", res.ExitCode, res.Stdout), fmt.Errorf("non-zero exit code"))
+			} else if !strings.Contains(res.Stdout, "sh-ok") {
+				report("ShAbility/run-allow", fmt.Sprintf("exit=%d out=%q", res.ExitCode, res.Stdout), fmt.Errorf("missing expected output"))
+			} else {
+				report("ShAbility/run-allow", fmt.Sprintf("exit=%d out=%q", res.ExitCode, res.Stdout), nil)
+			}
+		} else if o.Err != nil {
 			report("ShAbility/run-allow", fmt.Sprintf("%v", o.Value), o.Err)
+		} else {
+			report("ShAbility/run-allow", fmt.Sprintf("%v", o.Value), fmt.Errorf("run returned %T (want ability.CmdResult)", o.Value))
 		}
 		o = a.Command(atom, ability.ShCommandRun, ability.ShRunArgs{Command: "rm -rf /tmp/x", Timeout: 3 * time.Second})
 		if o.Err == nil {
@@ -363,9 +488,19 @@ func main() {
 	if a, ok := atom.Ability("BashAbility"); ok {
 		o := a.Command(atom, ability.BashCommandRun, ability.ShRunArgs{Command: "echo bash-ability-ok", Timeout: 3 * time.Second})
 		if res, ok := o.Value.(ability.CmdResult); ok {
-			report("BashAbility/run", fmt.Sprintf("exit=%d out=%q", res.ExitCode, res.Stdout), o.Err)
-		} else {
+			if res.ExitCode < 0 {
+				fmt.Printf("  [SKIP] BashAbility/run (exec 启动失败, 环境缺 bash): %s\n", strings.TrimSpace(res.Stderr))
+			} else if res.ExitCode != 0 {
+				report("BashAbility/run", fmt.Sprintf("exit=%d out=%q", res.ExitCode, res.Stdout), fmt.Errorf("non-zero exit code"))
+			} else if !strings.Contains(res.Stdout, "bash-ability-ok") {
+				report("BashAbility/run", fmt.Sprintf("exit=%d out=%q", res.ExitCode, res.Stdout), fmt.Errorf("missing expected output"))
+			} else {
+				report("BashAbility/run", fmt.Sprintf("exit=%d out=%q", res.ExitCode, res.Stdout), nil)
+			}
+		} else if o.Err != nil {
 			report("BashAbility/run", fmt.Sprintf("%v", o.Value), o.Err)
+		} else {
+			report("BashAbility/run", fmt.Sprintf("%v", o.Value), fmt.Errorf("run returned %T (want ability.CmdResult)", o.Value))
 		}
 	}
 
@@ -374,26 +509,83 @@ func main() {
 		o := a.Command(atom, ability.NetMapCommandRegisterPeer, ability.NetMapRegisterPeerArgs{Name: "edge-3", Address: "10.0.0.3:7000", Role: "edge"})
 		report("NetMapAbility/register_peer", "edge-3@10.0.0.3:7000", o.Err)
 		o = a.Command(atom, ability.NetMapCommandListPeers, nil)
-		report("NetMapAbility/list_peers", fmt.Sprintf("%v", o.Value), o.Err)
+		if peers, ok := o.Value.([]ability.NetMapPeer); ok {
+			found := false
+			for _, p := range peers {
+				if p.Name == "edge-3" {
+					found = true
+				}
+			}
+			if !found {
+				report("NetMapAbility/list_peers", fmt.Sprintf("%v", o.Value), fmt.Errorf("edge-3 not listed after register"))
+			} else {
+				report("NetMapAbility/list_peers", fmt.Sprintf("%d peers", len(peers)), nil)
+			}
+		} else {
+			report("NetMapAbility/list_peers", fmt.Sprintf("%v", o.Value), fmt.Errorf("list_peers returned %T (want []ability.NetMapPeer)", o.Value))
+		}
 		o = a.Command(atom, ability.NetMapCommandUnregisterPeer, ability.NetMapLookupPeerArgs{Name: "edge-3"})
 		report("NetMapAbility/unregister_peer", "edge-3", o.Err)
 		o = a.Command(atom, ability.NetMapCommandListPeers, nil)
-		report("NetMapAbility/list_after_remove", fmt.Sprintf("%v", o.Value), o.Err)
+		peers, peersOK := o.Value.([]ability.NetMapPeer)
+		if !peersOK {
+			// 类型回归时不能走 o.Err(nil → 假 PASS): 与 list_peers 段同纪律
+			report("NetMapAbility/list_after_remove", fmt.Sprintf("%v", o.Value), fmt.Errorf("list_peers returned %T (want []ability.NetMapPeer)", o.Value))
+		} else {
+			stillThere := false
+			for _, p := range peers {
+				if p.Name == "edge-3" {
+					stillThere = true
+					break
+				}
+			}
+			if stillThere {
+				report("NetMapAbility/list_after_remove", fmt.Sprintf("%v", o.Value), fmt.Errorf("edge-3 still listed after unregister"))
+			} else {
+				report("NetMapAbility/list_after_remove", fmt.Sprintf("edge-3 removed (%d peers)", len(peers)), nil)
+			}
+		}
 	}
 
 	// --- ability: ConfigFileAbility (ConfigData → JSON 落盘 → 新 atom 重载) ---
 	if a, ok := atom.Ability("ConfigFileAbility"); ok {
-		cfgPath := filepath.Join(os.TempDir(), "fe-verify-config.json")
-		o := a.Command(atom, ability.ConfigFileCommandSave, ability.ConfigFileSaveArgs{Path: cfgPath, Overwrite: true})
-		report("ConfigFileAbility/save", cfgPath, o.Err)
-		atom2 := fasteredge.InitStandardAtom()
-		_ = fasteredge.PreRunAtom(atom2)
-		o = a.Command(atom2, ability.ConfigFileCommandLoad, ability.ConfigFileLoadArgs{Path: cfgPath, Strict: false})
-		if o.Err != nil {
-			report("ConfigFileAbility/load", "", o.Err)
-		} else if d, ok := atom2.Data("ConfigData"); ok {
-			g := d.Command(atom2, data.ConfigCommandGet, data.ConfigGetArgs{Key: "node.role"})
-			report("ConfigFileAbility/load-reload", fmt.Sprintf("node.role=%v", g.Value), g.Err)
+		// 私有临时目录 + 唯一文件名: 旧实现用共享 os.TempDir()+固定名
+		// fe-verify-config.json+Overwrite:true——共享 /tmp 下的预置符号链接
+		// 会被框架 os.WriteFile 跟随覆写任意可写目标(demo 已示范 MkdirTemp
+		// 安全写法); 目录唯一则链接劫持面不存在。
+		cfgDir, err := os.MkdirTemp("", "fe-verify-config-*")
+		if err != nil {
+			report("ConfigFileAbility/save", "tempdir", err)
+		} else {
+			defer os.RemoveAll(cfgDir)
+			if s, ok := a.(interface{ SetRoot(string) }); ok {
+				s.SetRoot(cfgDir)
+			}
+			cfgPath := filepath.Join(cfgDir, "fe-verify-config.json")
+			o := a.Command(atom, ability.ConfigFileCommandSave, ability.ConfigFileSaveArgs{Path: cfgPath, Overwrite: true})
+			report("ConfigFileAbility/save", cfgPath, o.Err)
+			atom2 := fasteredge.InitStandardAtom()
+			if err := fasteredge.PreRunAtom(atom2); err != nil {
+				// 旧实现 _ = PreRunAtom 吞错: 挂载失败时 atom2 停在 Created,
+				// 后续 load 若误判成功会得出"配置落盘→重载成功"的假 PASS。
+				report("ConfigFileAbility/load-pre-run", "", err)
+			} else {
+				o = a.Command(atom2, ability.ConfigFileCommandLoad, ability.ConfigFileLoadArgs{Path: cfgPath, Strict: false})
+				if o.Err != nil {
+					report("ConfigFileAbility/load", "", o.Err)
+				} else if d, ok := atom2.Data("ConfigData"); ok {
+					g := d.Command(atom2, data.ConfigCommandGet, data.ConfigGetArgs{Key: "node.role"})
+					// 断言落盘→重载后值真实恢复(而非只查 Err): save/load 为 no-op
+					// 往返时 value 恒空, 只查 Err==nil 是假 PASS。
+					if g.Err != nil {
+						report("ConfigFileAbility/load-reload", "node.role", g.Err)
+					} else if v, _ := g.Value.(string); v != "edge" {
+						report("ConfigFileAbility/load-reload", fmt.Sprintf("node.role=%q", v), fmt.Errorf("reloaded value mismatch"))
+					} else {
+						report("ConfigFileAbility/load-reload", fmt.Sprintf("node.role=%v", v), nil)
+					}
+				}
+			}
 		}
 	}
 
@@ -424,19 +616,47 @@ func main() {
 			fmt.Printf("  [SKIP] register %s %s: %v\n", r.kind, r.name, err)
 		}
 	}
-	if err := fasteredge.PreRunAtom(extAtom); err != nil {
-		// EdgeRoleAbility(要求 role=edge) 与 CloudRoleAbility(要求 role=cloud)
-		// 在同一 atom 上必然有一个 Check 失败 —— 设计使然, 命令执行不依赖 PreRun.
-		fmt.Printf("  [NOTE] extAtom PreRun (edge+cloud 混合): %v\n", err)
-	} else {
-		ecmds := extAtom.CommandNames()
-		var ecomp []string
-		for n := range ecmds {
-			ecomp = append(ecomp, n)
-		}
-		sort.Strings(ecomp)
-		fmt.Printf("扩展后组件: %s\n", strings.Join(ecomp, ", "))
+	// ext 组件存在性清单: 与 expectedMain 同理——删掉任一扩展注册项或对应
+	// 验证段会无声消失仍 ALL PASS(旧实现只对基础 atom 有清单, 12 个扩展
+	// 能力 + 6 个 DB data 缺失无人知晓)。
+	extExpected := []string{
+		"MQTTAbility", "ModbusAbility", "EdgeRoleAbility", "CloudRoleAbility",
+		"FileTransferAbility", "AlgorithmDistributionAbility", "InfluxDBAbility", "TSNAbility",
+		"SerialAbility", "DockerAbility", "EKuiperAbility", "KubernetesAbility",
+		"InfluxDBData", "MongoDBData", "MySQLData", "PostgreSQLData", "RedisData", "SQLiteData",
 	}
+	for _, want := range extExpected {
+		if _, ok := extAtom.Ability(want); ok {
+			continue
+		}
+		if _, ok := extAtom.Data(want); ok {
+			continue
+		}
+		msg := "期望扩展组件缺失(verify 漏测面): " + want
+		fmt.Printf("  [FAIL] %s\n", msg)
+		failCount++
+		failDetails = append(failDetails, msg)
+	}
+	// extAtom 恒含 EdgeRoleAbility(要求 role=edge) 与 CloudRoleAbility
+	// (要求 role=cloud), 默认 role="" 使挂载期 Check 必有一侧失败。
+	// 旧实现只打印 [NOTE]——PreRun 意外成功时 verify 照常 ALL PASS;
+	// 该角色互斥负路径与集成 TestRoleChain 的断言对齐, 显式 FAIL 守护。
+	if err := fasteredge.PreRunAtom(extAtom); err == nil {
+		msg := "extAtom PreRun 意外成功(edge+cloud 角色互斥应失败)"
+		fmt.Printf("  [FAIL] %s\n", msg)
+		failCount++
+		failDetails = append(failDetails, msg)
+	} else {
+		fmt.Printf("  [NOTE] extAtom PreRun (edge+cloud 混合角色互斥, 预期失败): %v\n", err)
+	}
+	// 组件清单不依赖挂载——旧实现放在恒不可达的 else 分支, 移出打印。
+	ecmds := extAtom.CommandNames()
+	var ecomp []string
+	for n := range ecmds {
+		ecomp = append(ecomp, n)
+	}
+	sort.Strings(ecomp)
+	fmt.Printf("扩展后组件: %s\n", strings.Join(ecomp, ", "))
 
 	// 前置: 设 role=edge (EdgeRole 依赖), 注册 NetMap peer (FileTransfer 依赖)
 	if ra, ok := extAtom.Ability("RoleAbility"); ok {
@@ -454,12 +674,20 @@ func main() {
 	if ab, ok := extAtom.Ability("MQTTAbility"); ok {
 		ma, ok2 := ab.(*ability.MQTTAbility)
 		if !ok2 {
-			fmt.Printf("  [FAIL] MQTT 类型断言失败\n")
+			msg := "MQTT 类型断言失败"
+			fmt.Printf("  [FAIL] %s\n", msg)
 			failCount++
+			failDetails = append(failDetails, msg)
 		} else {
 			// broker 地址经 FE_MQTT_BROKER 注入 (容器 eth0 IP); isAcceptableBrokerURL 拒绝回环, 属安全设计
 			mqttURL := "tcp://" + brokerAddr()
-			_ = ab.Command(extAtom, ability.MQTTCommandSetBroker, ability.MQTTBrokerArgs{URL: mqttURL})
+			// set_broker 在默认回环地址下恒被拒(安全设计)——旧实现 _ = 吞错,
+			// set_broker 自身回归同样被掩盖; 无注入地址时明确 SKIP。
+			if os.Getenv("FE_MQTT_BROKER") != "" {
+				report("MQTT/set_broker", mqttURL, ab.Command(extAtom, ability.MQTTCommandSetBroker, ability.MQTTBrokerArgs{URL: mqttURL}).Err)
+			} else {
+				fmt.Printf("  [SKIP] MQTT/set_broker (默认回环地址被 isAcceptableBrokerURL 拒绝——需 FE_MQTT_BROKER)\n")
+			}
 			// 注入最小 MQTT 3.1.1 客户端 transport; 收到消息后回调 PushMessage
 			mt := newMQTTClientTransport("fe-verify-mqtt", func(msg ability.MQTTMessage) {
 				ma.PushMessage(msg)
@@ -469,16 +697,24 @@ func main() {
 			if mtCon.Err != nil {
 				fmt.Printf("  [SKIP] MQTT 联调 (无法连接 broker): %v\n", mtCon.Err)
 			} else {
-				report("MQTT/connect", "tcp://127.0.0.1:1883", nil)
+				report("MQTT/connect", "tcp://"+brokerAddr(), nil)
 				o := ab.Command(extAtom, ability.MQTTCommandSubscribe, ability.MQTTSubscribeArgs{Topic: "verify/topic", Qos: 1, MaxQueue: 16})
 				report("MQTT/subscribe", "verify/topic qos=1", o.Err)
 				o = ab.Command(extAtom, ability.MQTTCommandPublish, ability.MQTTPublishArgs{Topic: "verify/topic", Payload: []byte("hello-fe-mqtt"), Qos: 1})
 				report("MQTT/publish", "hello-fe-mqtt", o.Err)
 				o = ab.Command(extAtom, ability.MQTTCommandDrain, ability.MQTTPullArgs{Topic: "verify/topic", Max: 5, Timeout: 3 * time.Second})
 				if msgs, ok := o.Value.([]ability.MQTTMessage); ok {
-					report("MQTT/drain", fmt.Sprintf("got=%d payload=%q", len(msgs), string(msgs[0].Payload)), o.Err)
-				} else {
+					if len(msgs) == 0 {
+						// drain 超时无消息返回空 slice + nil err——断言 len 防
+						// msgs[0] 越界 panic, 并把"丢消息"计为 FAIL 而非崩溃。
+						report("MQTT/drain", "drain 空(消息未投递)", fmt.Errorf("no messages drained"))
+					} else {
+						report("MQTT/drain", fmt.Sprintf("got=%d payload=%q", len(msgs), string(msgs[0].Payload)), o.Err)
+					}
+				} else if o.Err != nil {
 					report("MQTT/drain", fmt.Sprintf("%v", o.Value), o.Err)
+				} else {
+					report("MQTT/drain", fmt.Sprintf("%v", o.Value), fmt.Errorf("drain returned %T (want []ability.MQTTMessage)", o.Value))
 				}
 				o = ab.Command(extAtom, ability.MQTTCommandDisconnect, nil)
 				report("MQTT/disconnect", "", o.Err)
@@ -495,8 +731,10 @@ func main() {
 		// 注入真实 TCP transport (ModbusAbility 只做协议骨架, 字节流由 transport 负责)
 		ma, ok := ab.(*ability.ModbusAbility)
 		if !ok {
-			fmt.Printf("  [FAIL] Modbus 类型断言失败\n")
+			msg := "Modbus 类型断言失败"
+			fmt.Printf("  [FAIL] %s\n", msg)
 			failCount++
+			failDetails = append(failDetails, msg)
 		} else {
 			mt, err := newModbusTCPTransport("127.0.0.1:1502")
 			if err != nil {
@@ -514,22 +752,36 @@ func main() {
 				}
 				o = ab.Command(extAtom, ability.ModbusCommandReadHolding, ability.ModbusReadArgs{Address: 10, Quantity: 1})
 				if res, ok := o.Value.(ability.ModbusReadResult); ok {
-					report("Modbus/read_holding", fmt.Sprintf("regs=%v", res.Regs), o.Err)
-				} else {
+					// 写→读值级往返(旧实现只打印 regs——从站静默忽略写入也 PASS)
+					if len(res.Regs) != 1 || res.Regs[0] != 1234 {
+						report("Modbus/read_holding", fmt.Sprintf("regs=%v", res.Regs), fmt.Errorf("write→read mismatch: want regs[0]=1234"))
+					} else {
+						report("Modbus/read_holding", fmt.Sprintf("regs=%v", res.Regs), o.Err)
+					}
+				} else if o.Err != nil {
 					report("Modbus/read_holding", fmt.Sprintf("%v", o.Value), o.Err)
+				} else {
+					report("Modbus/read_holding", fmt.Sprintf("%v", o.Value), fmt.Errorf("read_holding returned %T (want ability.ModbusReadResult)", o.Value))
 				}
 				o = ab.Command(extAtom, ability.ModbusCommandWriteCoil, ability.ModbusWriteCoilArgs{Address: 5, Value: true})
 				if o.Err != nil {
 					fmt.Printf("  [FAIL] Modbus/write_coil: %v\n", o.Err)
 					failCount++
+					failDetails = append(failDetails, fmt.Sprintf("Modbus/write_coil: %v", o.Err))
 				} else {
 					report("Modbus/write_coil", "addr=5 true", nil)
 				}
 				o = ab.Command(extAtom, ability.ModbusCommandReadCoils, ability.ModbusReadArgs{Address: 5, Quantity: 1})
 				if res, ok := o.Value.(ability.ModbusReadResult); ok {
-					report("Modbus/read_coils", fmt.Sprintf("coils=%v", res.Coils), o.Err)
-				} else {
+					if len(res.Coils) != 1 || !res.Coils[0] {
+						report("Modbus/read_coils", fmt.Sprintf("coils=%v", res.Coils), fmt.Errorf("write→read mismatch: want coils[0]=true"))
+					} else {
+						report("Modbus/read_coils", fmt.Sprintf("coils=%v", res.Coils), o.Err)
+					}
+				} else if o.Err != nil {
 					report("Modbus/read_coils", fmt.Sprintf("%v", o.Value), o.Err)
+				} else {
+					report("Modbus/read_coils", fmt.Sprintf("%v", o.Value), fmt.Errorf("read_coils returned %T (want ability.ModbusReadResult)", o.Value))
 				}
 			}
 		}
@@ -540,11 +792,34 @@ func main() {
 		o := a.Command(extAtom, ability.EdgeRoleCommandSetZone, ability.EdgeRoleSetZoneArgs{Zone: "factory-a"})
 		report("EdgeRole/set_zone", "factory-a", o.Err)
 		o = a.Command(extAtom, ability.EdgeRoleCommandGetZone, nil)
-		report("EdgeRole/get_zone", fmt.Sprintf("%v", o.Value), o.Err)
+		// 断言 get_zone 反映 set_zone(旧实现只打印——set 变 no-op 也 PASS)
+		if v, _ := o.Value.(string); v != "factory-a" {
+			report("EdgeRole/get_zone", fmt.Sprintf("%v", o.Value), fmt.Errorf("get_zone mismatch: want %q", "factory-a"))
+		} else {
+			report("EdgeRole/get_zone", fmt.Sprintf("%v", o.Value), o.Err)
+		}
 		o = a.Command(extAtom, ability.EdgeRoleCommandAddCap, ability.EdgeRoleCapabilityArg{Name: "modbus"})
 		report("EdgeRole/add_capability", "modbus", o.Err)
 		o = a.Command(extAtom, ability.EdgeRoleCommandListCaps, nil)
-		report("EdgeRole/list_capabilities", fmt.Sprintf("%v", o.Value), o.Err)
+		// add 后 list 存在性断言(旧实现只打印——add 变 no-op 也 PASS)
+		if caps, ok := o.Value.([]string); ok {
+			found := false
+			for _, c := range caps {
+				if c == "modbus" {
+					found = true
+					break
+				}
+			}
+			if !found {
+				report("EdgeRole/list_capabilities", fmt.Sprintf("%v", o.Value), fmt.Errorf("modbus not listed after add_capability"))
+			} else {
+				report("EdgeRole/list_capabilities", fmt.Sprintf("%d caps", len(caps)), nil)
+			}
+		} else if o.Err != nil {
+			report("EdgeRole/list_capabilities", fmt.Sprintf("%v", o.Value), o.Err)
+		} else {
+			report("EdgeRole/list_capabilities", fmt.Sprintf("%v", o.Value), fmt.Errorf("list_capabilities returned %T (want []string)", o.Value))
+		}
 		o = a.Command(extAtom, ability.EdgeRoleCommandDescribe, nil)
 		report("EdgeRole/describe", fmt.Sprintf("%v", o.Value), o.Err)
 		o = a.Command(extAtom, ability.EdgeRoleCommandRecordLatency, ability.EdgeRoleRecordLatencyArgs{LatencyMs: 12.5})
@@ -563,11 +838,34 @@ func main() {
 		o := a.Command(extAtom, ability.CloudRoleCommandSetController, ability.CloudRoleSetControllerArgs{URL: "https://cloud-a.example.com"})
 		report("CloudRole/set_controller", "cloud-a", o.Err)
 		o = a.Command(extAtom, ability.CloudRoleCommandGetController, nil)
-		report("CloudRole/get_controller", fmt.Sprintf("%v", o.Value), o.Err)
+		// 断言 get_controller 反映 set_controller(旧实现只打印)
+		if v, _ := o.Value.(string); v != "https://cloud-a.example.com" {
+			report("CloudRole/get_controller", fmt.Sprintf("%v", o.Value), fmt.Errorf("get_controller mismatch: want %q", "https://cloud-a.example.com"))
+		} else {
+			report("CloudRole/get_controller", fmt.Sprintf("%v", o.Value), o.Err)
+		}
 		o = a.Command(extAtom, ability.CloudRoleCommandRegister, ability.CloudRoleRegisterServiceArgs{Name: "svc-1", Version: "1.0", Endpoint: "10.0.0.9:8080"})
 		report("CloudRole/register_service", "svc-1", o.Err)
 		o = a.Command(extAtom, ability.CloudRoleCommandListServices, nil)
-		report("CloudRole/list_services", fmt.Sprintf("%v", o.Value), o.Err)
+		// register 后 list 存在性断言(旧实现只打印——register 变 no-op 也 PASS)
+		if svcs, ok := o.Value.([]ability.CloudRoleService); ok {
+			found := false
+			for _, s := range svcs {
+				if s.Name == "svc-1" {
+					found = true
+					break
+				}
+			}
+			if !found {
+				report("CloudRole/list_services", fmt.Sprintf("%v", o.Value), fmt.Errorf("svc-1 not listed after register_service"))
+			} else {
+				report("CloudRole/list_services", fmt.Sprintf("%d services", len(svcs)), nil)
+			}
+		} else if o.Err != nil {
+			report("CloudRole/list_services", fmt.Sprintf("%v", o.Value), o.Err)
+		} else {
+			report("CloudRole/list_services", fmt.Sprintf("%v", o.Value), fmt.Errorf("list_services returned %T (want []ability.CloudRoleService)", o.Value))
+		}
 		o = a.Command(extAtom, ability.CloudRoleCommandHeartbeat, nil)
 		report("CloudRole/heartbeat", "", o.Err)
 		o = a.Command(extAtom, ability.CloudRoleCommandSetStatus, ability.CloudRoleSetStatusArgs{Status: "healthy"})
@@ -576,22 +874,50 @@ func main() {
 
 	// FileTransferAbility (本地上传/下载; 框架不内置传输实现, 无 transport 时上传返回错误是预期)
 	if a, ok := extAtom.Ability("FileTransferAbility"); ok {
-		src := filepath.Join(os.TempDir(), "fe-src.bin")
+		// 唯一文件名: 固定名 fe-src.bin 在共享临时目录可被预置(低影响但同类)
+		src := filepath.Join(os.TempDir(), fmt.Sprintf("fe-src-%d.bin", time.Now().UnixNano()))
 		_ = os.WriteFile(src, []byte("file-transfer-payload-0123456789"), 0o644)
+		defer os.Remove(src)
 		o := a.Command(extAtom, ability.FileTransferCommandSetTarget, ability.FileTransferTargetArgs{PeerName: "peer-b"})
 		report("FileTransfer/set_target", "peer-b", o.Err)
-		o = a.Command(extAtom, ability.FileTransferCommandUpload, ability.FileTransferUploadArgs{LocalPath: src, RemotePath: "incoming/fe-src.bin"})
+		o = a.Command(extAtom, ability.FileTransferCommandUpload, ability.FileTransferUploadArgs{LocalPath: src, RemotePath: "/incoming/fe-src.bin"})
+		// 框架无内置 transport: 无 transport 时 upload 走骨架模式——立即返回
+		// 完成(不实际传输), 这是已记录框架语义(AlgDist 骨架可用)。旧实现
+		// "报错→[SKIP]、成功→PASS" 两种结果都不计入 FAIL——upload 回归为
+		// 硬错误(连骨架完成都不给)或空 ID 时无法告警。这里断言: 返回非空
+		// transfer ID, 且 list 可见该 transfer 处于 completed 终态。
 		if o.Err != nil {
-			fmt.Printf("  [SKIP] FileTransfer/upload (无传输实现, 框架预期): %v\n", o.Err)
+			report("FileTransfer/upload", fmt.Sprintf("%v", o.Err), o.Err)
+		} else if id, ok := o.Value.(string); !ok || strings.TrimSpace(id) == "" {
+			report("FileTransfer/upload", fmt.Sprintf("%v", o.Value), fmt.Errorf("upload returned %T %v (want non-empty transfer ID)", o.Value, o.Value))
 		} else {
-			report("FileTransfer/upload", "incoming/fe-src.bin", nil)
+			report("FileTransfer/upload", fmt.Sprintf("id=%s", id), nil)
+			o = a.Command(extAtom, ability.FileTransferCommandList, nil)
+			if transfers, ok := o.Value.([]ability.FileTransfer); ok {
+				found := false
+				for _, ft := range transfers {
+					if ft.ID == id && ft.Status == ability.FileTransferStatusCompleted {
+						found = true
+						break
+					}
+				}
+				if !found {
+					report("FileTransfer/upload-status", fmt.Sprintf("%v", o.Value), fmt.Errorf("transfer %s not completed in list", id))
+				} else {
+					report("FileTransfer/upload-status", "completed", nil)
+				}
+			} else if o.Err != nil {
+				report("FileTransfer/upload-status", fmt.Sprintf("%v", o.Value), o.Err)
+			} else {
+				report("FileTransfer/upload-status", fmt.Sprintf("%v", o.Value), fmt.Errorf("list returned %T (want []ability.FileTransfer)", o.Value))
+			}
 		}
-		_ = os.Remove(src)
 	}
 
-	// AlgDistAbility
-	if a, ok := extAtom.Ability("AlgDistAbility"); ok {
-		o := a.Command(extAtom, ability.AlgDistCommandRegister, ability.AlgDistRegisterArgs{Name: "denoise", Version: "1.0", SourcePath: "/alg/denoise.py", ContentType: "python"})
+	// AlgDistAbility (注册名 AlgorithmDistributionAbility——曾误用 "AlgDistAbility"
+	// 导致本段静默跳过, 假覆盖)
+	if a, ok := extAtom.Ability("AlgorithmDistributionAbility"); ok {
+		o := a.Command(extAtom, ability.AlgDistCommandRegister, ability.AlgDistRegisterArgs{Name: "denoise", Version: "1.0", SourcePath: filepath.Join(os.TempDir(), "denoise.py"), ContentType: "python"})
 		report("AlgDist/register", "denoise@1.0", o.Err)
 		o = a.Command(extAtom, ability.AlgDistCommandList, nil)
 		report("AlgDist/list", fmt.Sprintf("%v", o.Value), o.Err)
@@ -601,14 +927,26 @@ func main() {
 		report("AlgDist/unregister", "denoise@1.0", o.Err)
 	}
 
-	// InfluxAbility (配置类, 不需要真实 InfluxDB)
-	if a, ok := extAtom.Ability("InfluxAbility"); ok {
-		o := a.Command(extAtom, ability.InfluxCommandSetEndpoint, ability.InfluxConfigArgs{Value: "http://127.0.0.1:8086"})
-		report("Influx/set_endpoint", "http://127.0.0.1:8086", o.Err)
+	// InfluxAbility (配置类, 不需要真实 InfluxDB; 注册名 InfluxDBAbility——
+	// 曾误用 "InfluxAbility" 导致本段静默跳过, 假覆盖; endpoint 校验拒回环/私有地址)
+	if a, ok := extAtom.Ability("InfluxDBAbility"); ok {
+		o := a.Command(extAtom, ability.InfluxCommandSetEndpoint, ability.InfluxConfigArgs{Value: "https://influx.example.com"})
+		report("Influx/set_endpoint", "https://influx.example.com", o.Err)
 		o = a.Command(extAtom, ability.InfluxCommandSetBucket, ability.InfluxConfigArgs{Value: "telemetry"})
 		report("Influx/set_bucket", "telemetry", o.Err)
 		o = a.Command(extAtom, ability.InfluxCommandGetConfig, nil)
-		report("Influx/get_config", fmt.Sprintf("%v", o.Value), o.Err)
+		// set 后 get_config 关键字段往返(旧实现只打印——set 变 no-op 也 PASS)
+		if cfg, ok := o.Value.(ability.InfluxConfig); ok {
+			if cfg.Endpoint != "https://influx.example.com" || cfg.Bucket != "telemetry" {
+				report("Influx/get_config", fmt.Sprintf("%+v", cfg), fmt.Errorf("get_config round-trip mismatch: %+v", cfg))
+			} else {
+				report("Influx/get_config", fmt.Sprintf("endpoint=%s bucket=%s", cfg.Endpoint, cfg.Bucket), nil)
+			}
+		} else if o.Err != nil {
+			report("Influx/get_config", fmt.Sprintf("%v", o.Value), o.Err)
+		} else {
+			report("Influx/get_config", fmt.Sprintf("%v", o.Value), fmt.Errorf("get_config returned %T (want ability.InfluxConfig)", o.Value))
+		}
 	}
 
 	// TSNAbility (配置类)
@@ -616,7 +954,18 @@ func main() {
 		o := a.Command(extAtom, ability.TSNCommandSetInterface, ability.TSNInterfaceArg{Interface: "eth0"})
 		report("TSN/set_interface", "eth0", o.Err)
 		o = a.Command(extAtom, ability.TSNCommandGetInterface, nil)
-		report("TSN/get_interface", fmt.Sprintf("%v", o.Value), o.Err)
+		// set 后 get 相等断言(旧实现只打印——set 变 no-op 也 PASS)
+		if got, ok := o.Value.(string); ok {
+			if got != "eth0" {
+				report("TSN/get_interface", fmt.Sprintf("%q", got), fmt.Errorf("get_interface round-trip mismatch: got %q want eth0", got))
+			} else {
+				report("TSN/get_interface", got, nil)
+			}
+		} else if o.Err != nil {
+			report("TSN/get_interface", fmt.Sprintf("%v", o.Value), o.Err)
+		} else {
+			report("TSN/get_interface", fmt.Sprintf("%v", o.Value), fmt.Errorf("get_interface returned %T (want string)", o.Value))
+		}
 		o = a.Command(extAtom, ability.TSNCommandRegisterTalker, ability.TSNRegisterTalkerArgs{ID: "stream-100", MAC: "00:11:22:33:44:55", DestMAC: "01:00:5e:00:00:01", VLANID: 100, Priority: 3, PayloadLen: 512, Interval: 1000000000})
 		report("TSN/register_talker", "stream-100", o.Err)
 		o = a.Command(extAtom, ability.TSNCommandListStreams, nil)
@@ -635,11 +984,24 @@ func main() {
 
 	// --- EKuiperAbility (配置类; 流/规则需注入 transport) ---
 	if a, ok := extAtom.Ability("EKuiperAbility"); ok {
-		// set_endpoint 需域名 (isAcceptableInfluxURL 拒绝 IP/回环)
+		// set_endpoint 校验与数据层 validateInfluxEndpoint 对齐(第五轮):
+		// 拒 userinfo/fragment/无 host/回环/私网/未指定/组播——域名放行,
+		// 拨号层负责二次校验(存储期不解析)。
 		o := a.Command(extAtom, ability.EKuiperCommandSetEndpoint, ability.EKuiperEndpointArgs{URL: "http://ekuiper.internal.example:9081"})
 		report("EKuiper/set_endpoint", "http://ekuiper.internal.example:9081", o.Err)
 		o = a.Command(extAtom, ability.EKuiperCommandGetEndpoint, nil)
-		report("EKuiper/get_endpoint", fmt.Sprintf("%v", o.Value), o.Err)
+		// set 后 get 相等断言(旧实现只打印——set 变 no-op 也 PASS)
+		if got, ok := o.Value.(string); ok {
+			if got != "http://ekuiper.internal.example:9081" {
+				report("EKuiper/get_endpoint", fmt.Sprintf("%q", got), fmt.Errorf("get_endpoint round-trip mismatch: got %q", got))
+			} else {
+				report("EKuiper/get_endpoint", got, nil)
+			}
+		} else if o.Err != nil {
+			report("EKuiper/get_endpoint", fmt.Sprintf("%v", o.Value), o.Err)
+		} else {
+			report("EKuiper/get_endpoint", fmt.Sprintf("%v", o.Value), fmt.Errorf("get_endpoint returned %T (want string)", o.Value))
+		}
 		// 无 transport 时 create_stream 应正确报错 (验证拒绝路径)
 		o = a.Command(extAtom, ability.EKuiperCommandCreateStream, ability.EKuiperStreamArgs{Name: "s1", SQL: "SELECT * FROM demo"})
 		if o.Err == nil {
@@ -664,7 +1026,18 @@ func main() {
 		} else {
 			report("K8s/set_context", "edge-cluster/edge-ns", nil)
 			o = a.Command(extAtom, ability.K8sCommandGetContext, nil)
-			report("K8s/get_context", fmt.Sprintf("%v", o.Value), o.Err)
+			// set 后 get 关键字段往返(旧实现只打印——set 变 no-op 也 PASS)
+			if got, ok := o.Value.(ability.K8sContextView); ok {
+				if got.Cluster != "edge-cluster" || got.Namespace != "edge-ns" {
+					report("K8s/get_context", fmt.Sprintf("%+v", got), fmt.Errorf("get_context round-trip mismatch: %+v", got))
+				} else {
+					report("K8s/get_context", fmt.Sprintf("%s/%s", got.Cluster, got.Namespace), nil)
+				}
+			} else if o.Err != nil {
+				report("K8s/get_context", fmt.Sprintf("%v", o.Value), o.Err)
+			} else {
+				report("K8s/get_context", fmt.Sprintf("%v", o.Value), fmt.Errorf("get_context returned %T (want ability.K8sContextView)", o.Value))
+			}
 		}
 		// 空 cluster 应被拒
 		o = a.Command(extAtom, ability.K8sCommandSetContext, ability.K8sContextArgs{K8sContext: ability.K8sContext{Cluster: ""}})
@@ -688,7 +1061,18 @@ func main() {
 		o := a.Command(extAtom, ability.DockerCommandSetEndpoint, ability.DockerEndpointArgs{URL: "unix:///var/run/docker.sock"})
 		report("Docker/set_endpoint-unix", "unix:///var/run/docker.sock", o.Err)
 		o = a.Command(extAtom, ability.DockerCommandGetEndpoint, nil)
-		report("Docker/get_endpoint", fmt.Sprintf("%v", o.Value), o.Err)
+		// set 后 get 相等断言(旧实现只打印——set 变 no-op 也 PASS)
+		if got, ok := o.Value.(string); ok {
+			if got != "unix:///var/run/docker.sock" {
+				report("Docker/get_endpoint", fmt.Sprintf("%q", got), fmt.Errorf("get_endpoint round-trip mismatch: got %q", got))
+			} else {
+				report("Docker/get_endpoint", got, nil)
+			}
+		} else if o.Err != nil {
+			report("Docker/get_endpoint", fmt.Sprintf("%v", o.Value), o.Err)
+		} else {
+			report("Docker/get_endpoint", fmt.Sprintf("%v", o.Value), fmt.Errorf("get_endpoint returned %T (want string)", o.Value))
+		}
 		// 回环端点应被拒 (isValidDockerEndpoint 拒绝 localhost)
 		o = a.Command(extAtom, ability.DockerCommandSetEndpoint, ability.DockerEndpointArgs{URL: "tcp://127.0.0.1:2375"})
 		if o.Err == nil {
@@ -756,22 +1140,38 @@ func main() {
 								report("Docker/real-remove", id, o.Err)
 							}
 						}
-					} else {
+					} else if o.Err != nil {
 						report("Docker/real-list", fmt.Sprintf("type=%T", o.Value), o.Err)
+					} else {
+						report("Docker/real-list", fmt.Sprintf("type=%T", o.Value), fmt.Errorf("list_containers returned %T (want []ability.DockerContainer)", o.Value))
 					}
 				}
 			}
 		}
 	}
 
+	// 第十三轮覆盖补强: 全仓命令枚举 mapping 的盲区命令级验证
+	// (骨架能力/核心能力/扩展能力三段, 定义见 verify_skeleton.go /
+	// verify_core.go / verify_powered.go)。
+	verifySkeletonExtras(atom, extAtom)
+	verifyCoreExtras(atom, extAtom)
+	verifyPoweredExtras(atom, extAtom)
+
 	// === 数据库 data 组件 (配置/秘钥存储, 无需真实数据库) ===
 	fmt.Println("\n=== 数据库 Data 组件: MySQL / PostgreSQL / SQLite / Redis / MongoDB / InfluxDB ===")
+	// dbVerify 对各 DB 组件的 configure→get_config→status→set_secret→
+	// snapshot→clear_secret 生命周期做真值验证。旧实现 6 个命令只查
+	// Err==nil——configure 丢字段、set_secret 后 SecretConfigured 不变、
+	// snapshot 泄露 secret 全部 PASS——真值断言由各调用段闭包内嵌:
+	//   - configure 闭包: configure + get_config 关键字段往返
+	//   - setSecret/clearSecret 闭包: status.SecretConfigured 迁移断言
+	//   - snapshot 闭包: JSON 序列化后不含 secret 明文
 	dbVerify := func(name string, configure, setSecret, clearSecret, getConfig, status, snapshot func() error) {
 		if err := configure(); err != nil {
-			report(name+"/configure", "", err)
+			report(name+"/configure+roundtrip", "", err)
 			return
 		}
-		report(name+"/configure", "ok", nil)
+		report(name+"/configure+roundtrip", "ok", nil)
 		if err := getConfig(); err != nil {
 			report(name+"/get_config", "", err)
 		} else {
@@ -783,50 +1183,151 @@ func main() {
 			report(name+"/status", "ok", nil)
 		}
 		if err := setSecret(); err != nil {
-			report(name+"/set_secret", "", err)
+			report(name+"/set_secret+migrate", "", err)
 		} else {
-			report(name+"/set_secret", "ok", nil)
+			report(name+"/set_secret+migrate", "ok", nil)
 		}
 		if err := snapshot(); err != nil {
-			report(name+"/snapshot", "", err)
+			report(name+"/snapshot+no-leak", "", err)
 		} else {
-			report(name+"/snapshot", "ok", nil)
+			report(name+"/snapshot+no-leak", "ok", nil)
 		}
 		if err := clearSecret(); err != nil {
-			report(name+"/clear_secret", "", err)
+			report(name+"/clear_secret+migrate", "", err)
 		} else {
-			report(name+"/clear_secret", "ok", nil)
+			report(name+"/clear_secret+migrate", "ok", nil)
 		}
 	}
 	// MySQLData
 	if d, ok := extAtom.Data("MySQLData"); ok {
 		cfg := data.SQLDatabaseConfig{Host: "db.internal.example", Port: 3306, Database: "appdb", Username: "app", TLSMode: data.DatabaseTLSDisable, ConnectTimeout: 3 * time.Second, MaxOpenConns: 10, MaxIdleConns: 5, ConnMaxLifetime: time.Hour}
+		const mySQLSecret = "mysql-secret-0123456789"
 		dbVerify("MySQLData",
 			func() error {
-				return d.Command(extAtom, data.DatabaseCommandConfigure, data.SQLDatabaseConfigureArgs{Config: cfg}).Err
+				if err := d.Command(extAtom, data.DatabaseCommandConfigure, data.SQLDatabaseConfigureArgs{Config: cfg}).Err; err != nil {
+					return err
+				}
+				// configure 后 get_config 关键字段往返(旧实现只查 Err==nil)
+				gc := d.Command(extAtom, data.DatabaseCommandGetConfig, nil)
+				if gc.Err != nil {
+					return gc.Err
+				}
+				got, ok := gc.Value.(data.SQLDatabaseConfig)
+				if !ok {
+					return fmt.Errorf("get_config returned %T (want SQLDatabaseConfig)", gc.Value)
+				}
+				if got.Host != cfg.Host || got.Port != cfg.Port || got.Database != cfg.Database || got.Username != cfg.Username {
+					return fmt.Errorf("get_config round-trip mismatch: %+v", got)
+				}
+				return nil
 			},
 			func() error {
-				return d.Command(extAtom, data.DatabaseCommandSetSecret, data.DatabaseSetSecretArgs{Secret: []byte("mysql-secret-0123456789")}).Err
+				if err := d.Command(extAtom, data.DatabaseCommandSetSecret, data.DatabaseSetSecretArgs{Secret: []byte(mySQLSecret)}).Err; err != nil {
+					return err
+				}
+				st := d.Command(extAtom, data.DatabaseCommandStatus, nil)
+				if st.Err != nil {
+					return st.Err
+				}
+				if s, ok := st.Value.(data.DatabaseStatus); !ok || !s.SecretConfigured {
+					return fmt.Errorf("status.SecretConfigured != true after set_secret (%v)", st.Value)
+				}
+				return nil
 			},
-			func() error { return d.Command(extAtom, data.DatabaseCommandClearSecret, nil).Err },
+			func() error {
+				if err := d.Command(extAtom, data.DatabaseCommandClearSecret, nil).Err; err != nil {
+					return err
+				}
+				st := d.Command(extAtom, data.DatabaseCommandStatus, nil)
+				if st.Err != nil {
+					return st.Err
+				}
+				if s, ok := st.Value.(data.DatabaseStatus); !ok || s.SecretConfigured {
+					return fmt.Errorf("status.SecretConfigured != false after clear_secret (%v)", st.Value)
+				}
+				return nil
+			},
 			func() error { return d.Command(extAtom, data.DatabaseCommandGetConfig, nil).Err },
 			func() error { return d.Command(extAtom, data.DatabaseCommandStatus, nil).Err },
-			func() error { return d.Command(extAtom, data.DatabaseCommandSnapshot, nil).Err })
+			func() error {
+				snapOut := d.Command(extAtom, data.DatabaseCommandSnapshot, nil)
+				if snapOut.Err != nil {
+					return snapOut.Err
+				}
+				raw, err := json.Marshal(snapOut.Value)
+				if err != nil {
+					return err
+				}
+				if bytes.Contains(raw, []byte(mySQLSecret)) {
+					return fmt.Errorf("snapshot JSON leaks secret")
+				}
+				return nil
+			})
 	}
 	// PostgreSQLData
 	if d, ok := extAtom.Data("PostgreSQLData"); ok {
 		cfg := data.SQLDatabaseConfig{Host: "pg.internal.example", Port: 5432, Database: "appdb", Username: "app", TLSMode: data.DatabaseTLSPrefer, ConnectTimeout: 3 * time.Second, MaxOpenConns: 10, MaxIdleConns: 5, ConnMaxLifetime: time.Hour}
+		const pgSecret = "pg-secret-0123456789"
 		dbVerify("PostgreSQLData",
 			func() error {
-				return d.Command(extAtom, data.DatabaseCommandConfigure, data.SQLDatabaseConfigureArgs{Config: cfg}).Err
+				if err := d.Command(extAtom, data.DatabaseCommandConfigure, data.SQLDatabaseConfigureArgs{Config: cfg}).Err; err != nil {
+					return err
+				}
+				gc := d.Command(extAtom, data.DatabaseCommandGetConfig, nil)
+				if gc.Err != nil {
+					return gc.Err
+				}
+				got, ok := gc.Value.(data.SQLDatabaseConfig)
+				if !ok {
+					return fmt.Errorf("get_config returned %T (want SQLDatabaseConfig)", gc.Value)
+				}
+				if got.Host != cfg.Host || got.Port != cfg.Port || got.Database != cfg.Database || got.Username != cfg.Username {
+					return fmt.Errorf("get_config round-trip mismatch: %+v", got)
+				}
+				return nil
 			},
 			func() error {
-				return d.Command(extAtom, data.DatabaseCommandSetSecret, data.DatabaseSetSecretArgs{Secret: []byte("pg-secret-0123456789")}).Err
+				if err := d.Command(extAtom, data.DatabaseCommandSetSecret, data.DatabaseSetSecretArgs{Secret: []byte(pgSecret)}).Err; err != nil {
+					return err
+				}
+				st := d.Command(extAtom, data.DatabaseCommandStatus, nil)
+				if st.Err != nil {
+					return st.Err
+				}
+				if s, ok := st.Value.(data.DatabaseStatus); !ok || !s.SecretConfigured {
+					return fmt.Errorf("status.SecretConfigured != true after set_secret (%v)", st.Value)
+				}
+				return nil
 			},
-			func() error { return d.Command(extAtom, data.DatabaseCommandClearSecret, nil).Err },
+			func() error {
+				if err := d.Command(extAtom, data.DatabaseCommandClearSecret, nil).Err; err != nil {
+					return err
+				}
+				st := d.Command(extAtom, data.DatabaseCommandStatus, nil)
+				if st.Err != nil {
+					return st.Err
+				}
+				if s, ok := st.Value.(data.DatabaseStatus); !ok || s.SecretConfigured {
+					return fmt.Errorf("status.SecretConfigured != false after clear_secret (%v)", st.Value)
+				}
+				return nil
+			},
 			func() error { return d.Command(extAtom, data.DatabaseCommandGetConfig, nil).Err },
 			func() error { return d.Command(extAtom, data.DatabaseCommandStatus, nil).Err },
-			func() error { return d.Command(extAtom, data.DatabaseCommandSnapshot, nil).Err })
+			func() error {
+				snapOut := d.Command(extAtom, data.DatabaseCommandSnapshot, nil)
+				if snapOut.Err != nil {
+					return snapOut.Err
+				}
+				raw, err := json.Marshal(snapOut.Value)
+				if err != nil {
+					return err
+				}
+				if bytes.Contains(raw, []byte(pgSecret)) {
+					return fmt.Errorf("snapshot JSON leaks secret")
+				}
+				return nil
+			})
 	}
 	// SQLiteData (本地文件, 无秘钥: ListCommands 不含 set_secret/clear_secret)
 	if d, ok := extAtom.Data("SQLiteData"); ok {
@@ -835,10 +1336,18 @@ func main() {
 			report("SQLiteData/configure", "", err)
 		} else {
 			report("SQLiteData/configure", "ok", nil)
-			if err := d.Command(extAtom, data.DatabaseCommandGetConfig, nil).Err; err != nil {
-				report("SQLiteData/get_config", "", err)
+			// configure 后 get_config 关键字段往返(与其余 DB 段同型)
+			gc := d.Command(extAtom, data.DatabaseCommandGetConfig, nil)
+			if gc.Err != nil {
+				report("SQLiteData/get_config", "", gc.Err)
+			} else if got, ok := gc.Value.(data.SQLiteConfig); ok {
+				if got.Path != cfg.Path || got.Mode != cfg.Mode {
+					report("SQLiteData/get_config", fmt.Sprintf("%+v", got), fmt.Errorf("get_config round-trip mismatch: %+v", got))
+				} else {
+					report("SQLiteData/get_config", "ok", nil)
+				}
 			} else {
-				report("SQLiteData/get_config", "ok", nil)
+				report("SQLiteData/get_config", fmt.Sprintf("%v", gc.Value), fmt.Errorf("get_config returned %T (want SQLiteConfig)", gc.Value))
 			}
 			if err := d.Command(extAtom, data.DatabaseCommandStatus, nil).Err; err != nil {
 				report("SQLiteData/status", "", err)
@@ -855,50 +1364,241 @@ func main() {
 	// RedisData
 	if d, ok := extAtom.Data("RedisData"); ok {
 		cfg := data.RedisConfig{Addresses: []string{"redis.internal.example:6379"}, DB: 0, DialTimeout: 3 * time.Second, ReadTimeout: 3 * time.Second, WriteTimeout: 3 * time.Second, PoolSize: 8}
+		const redisSecret = "redis-secret-0123456789"
 		dbVerify("RedisData",
 			func() error {
-				return d.Command(extAtom, data.DatabaseCommandConfigure, data.RedisConfigureArgs{Config: cfg}).Err
+				if err := d.Command(extAtom, data.DatabaseCommandConfigure, data.RedisConfigureArgs{Config: cfg}).Err; err != nil {
+					return err
+				}
+				gc := d.Command(extAtom, data.DatabaseCommandGetConfig, nil)
+				if gc.Err != nil {
+					return gc.Err
+				}
+				got, ok := gc.Value.(data.RedisConfig)
+				if !ok {
+					return fmt.Errorf("get_config returned %T (want RedisConfig)", gc.Value)
+				}
+				if len(got.Addresses) != len(cfg.Addresses) || got.Addresses[0] != cfg.Addresses[0] || got.DB != cfg.DB {
+					return fmt.Errorf("get_config round-trip mismatch: %+v", got)
+				}
+				return nil
 			},
 			func() error {
-				return d.Command(extAtom, data.DatabaseCommandSetSecret, data.DatabaseSetSecretArgs{Secret: []byte("redis-secret-0123456789")}).Err
+				if err := d.Command(extAtom, data.DatabaseCommandSetSecret, data.DatabaseSetSecretArgs{Secret: []byte(redisSecret)}).Err; err != nil {
+					return err
+				}
+				st := d.Command(extAtom, data.DatabaseCommandStatus, nil)
+				if st.Err != nil {
+					return st.Err
+				}
+				if s, ok := st.Value.(data.DatabaseStatus); !ok || !s.SecretConfigured {
+					return fmt.Errorf("status.SecretConfigured != true after set_secret (%v)", st.Value)
+				}
+				return nil
 			},
-			func() error { return d.Command(extAtom, data.DatabaseCommandClearSecret, nil).Err },
+			func() error {
+				if err := d.Command(extAtom, data.DatabaseCommandClearSecret, nil).Err; err != nil {
+					return err
+				}
+				st := d.Command(extAtom, data.DatabaseCommandStatus, nil)
+				if st.Err != nil {
+					return st.Err
+				}
+				if s, ok := st.Value.(data.DatabaseStatus); !ok || s.SecretConfigured {
+					return fmt.Errorf("status.SecretConfigured != false after clear_secret (%v)", st.Value)
+				}
+				return nil
+			},
 			func() error { return d.Command(extAtom, data.DatabaseCommandGetConfig, nil).Err },
 			func() error { return d.Command(extAtom, data.DatabaseCommandStatus, nil).Err },
-			func() error { return d.Command(extAtom, data.DatabaseCommandSnapshot, nil).Err })
+			func() error {
+				snapOut := d.Command(extAtom, data.DatabaseCommandSnapshot, nil)
+				if snapOut.Err != nil {
+					return snapOut.Err
+				}
+				raw, err := json.Marshal(snapOut.Value)
+				if err != nil {
+					return err
+				}
+				if bytes.Contains(raw, []byte(redisSecret)) {
+					return fmt.Errorf("snapshot JSON leaks secret")
+				}
+				return nil
+			})
 	}
 	// MongoDBData
 	if d, ok := extAtom.Data("MongoDBData"); ok {
 		cfg := data.MongoDBConfig{Hosts: []string{"mongo.internal.example:27017"}, Database: "appdb", Username: "app", ConnectTimeout: 3 * time.Second, ServerSelectionTimeout: 3 * time.Second}
+		const mongoSecret = "mongo-secret-0123456789"
 		dbVerify("MongoDBData",
 			func() error {
-				return d.Command(extAtom, data.DatabaseCommandConfigure, data.MongoDBConfigureArgs{Config: cfg}).Err
+				if err := d.Command(extAtom, data.DatabaseCommandConfigure, data.MongoDBConfigureArgs{Config: cfg}).Err; err != nil {
+					return err
+				}
+				gc := d.Command(extAtom, data.DatabaseCommandGetConfig, nil)
+				if gc.Err != nil {
+					return gc.Err
+				}
+				got, ok := gc.Value.(data.MongoDBConfig)
+				if !ok {
+					return fmt.Errorf("get_config returned %T (want MongoDBConfig)", gc.Value)
+				}
+				if len(got.Hosts) != len(cfg.Hosts) || got.Hosts[0] != cfg.Hosts[0] || got.Database != cfg.Database {
+					return fmt.Errorf("get_config round-trip mismatch: %+v", got)
+				}
+				return nil
 			},
 			func() error {
-				return d.Command(extAtom, data.DatabaseCommandSetSecret, data.DatabaseSetSecretArgs{Secret: []byte("mongo-secret-0123456789")}).Err
+				if err := d.Command(extAtom, data.DatabaseCommandSetSecret, data.DatabaseSetSecretArgs{Secret: []byte(mongoSecret)}).Err; err != nil {
+					return err
+				}
+				st := d.Command(extAtom, data.DatabaseCommandStatus, nil)
+				if st.Err != nil {
+					return st.Err
+				}
+				if s, ok := st.Value.(data.DatabaseStatus); !ok || !s.SecretConfigured {
+					return fmt.Errorf("status.SecretConfigured != true after set_secret (%v)", st.Value)
+				}
+				return nil
 			},
-			func() error { return d.Command(extAtom, data.DatabaseCommandClearSecret, nil).Err },
+			func() error {
+				if err := d.Command(extAtom, data.DatabaseCommandClearSecret, nil).Err; err != nil {
+					return err
+				}
+				st := d.Command(extAtom, data.DatabaseCommandStatus, nil)
+				if st.Err != nil {
+					return st.Err
+				}
+				if s, ok := st.Value.(data.DatabaseStatus); !ok || s.SecretConfigured {
+					return fmt.Errorf("status.SecretConfigured != false after clear_secret (%v)", st.Value)
+				}
+				return nil
+			},
 			func() error { return d.Command(extAtom, data.DatabaseCommandGetConfig, nil).Err },
 			func() error { return d.Command(extAtom, data.DatabaseCommandStatus, nil).Err },
-			func() error { return d.Command(extAtom, data.DatabaseCommandSnapshot, nil).Err })
+			func() error {
+				snapOut := d.Command(extAtom, data.DatabaseCommandSnapshot, nil)
+				if snapOut.Err != nil {
+					return snapOut.Err
+				}
+				raw, err := json.Marshal(snapOut.Value)
+				if err != nil {
+					return err
+				}
+				if bytes.Contains(raw, []byte(mongoSecret)) {
+					return fmt.Errorf("snapshot JSON leaks secret")
+				}
+				return nil
+			})
 	}
 	// InfluxDBData (endpoint 拒绝 IP/回环, 用域名)
 	if d, ok := extAtom.Data("InfluxDBData"); ok {
 		cfg := data.InfluxDBConfig{Endpoint: "http://influx.internal.example:8086", Org: "feorg", Bucket: "telemetry", Timeout: 3 * time.Second}
+		const influxSecret = "influx-token-0123456789"
 		dbVerify("InfluxDBData",
 			func() error {
-				return d.Command(extAtom, data.DatabaseCommandConfigure, data.InfluxDBConfigureArgs{Config: cfg}).Err
+				if err := d.Command(extAtom, data.DatabaseCommandConfigure, data.InfluxDBConfigureArgs{Config: cfg}).Err; err != nil {
+					return err
+				}
+				gc := d.Command(extAtom, data.DatabaseCommandGetConfig, nil)
+				if gc.Err != nil {
+					return gc.Err
+				}
+				got, ok := gc.Value.(data.InfluxDBConfig)
+				if !ok {
+					return fmt.Errorf("get_config returned %T (want InfluxDBConfig)", gc.Value)
+				}
+				if got.Endpoint != cfg.Endpoint || got.Org != cfg.Org || got.Bucket != cfg.Bucket {
+					return fmt.Errorf("get_config round-trip mismatch: %+v", got)
+				}
+				return nil
 			},
 			func() error {
-				return d.Command(extAtom, data.DatabaseCommandSetSecret, data.DatabaseSetSecretArgs{Secret: []byte("influx-token-0123456789")}).Err
+				if err := d.Command(extAtom, data.DatabaseCommandSetSecret, data.DatabaseSetSecretArgs{Secret: []byte(influxSecret)}).Err; err != nil {
+					return err
+				}
+				st := d.Command(extAtom, data.DatabaseCommandStatus, nil)
+				if st.Err != nil {
+					return st.Err
+				}
+				if s, ok := st.Value.(data.DatabaseStatus); !ok || !s.SecretConfigured {
+					return fmt.Errorf("status.SecretConfigured != true after set_secret (%v)", st.Value)
+				}
+				return nil
 			},
-			func() error { return d.Command(extAtom, data.DatabaseCommandClearSecret, nil).Err },
+			func() error {
+				if err := d.Command(extAtom, data.DatabaseCommandClearSecret, nil).Err; err != nil {
+					return err
+				}
+				st := d.Command(extAtom, data.DatabaseCommandStatus, nil)
+				if st.Err != nil {
+					return st.Err
+				}
+				if s, ok := st.Value.(data.DatabaseStatus); !ok || s.SecretConfigured {
+					return fmt.Errorf("status.SecretConfigured != false after clear_secret (%v)", st.Value)
+				}
+				return nil
+			},
 			func() error { return d.Command(extAtom, data.DatabaseCommandGetConfig, nil).Err },
 			func() error { return d.Command(extAtom, data.DatabaseCommandStatus, nil).Err },
-			func() error { return d.Command(extAtom, data.DatabaseCommandSnapshot, nil).Err })
+			func() error {
+				snapOut := d.Command(extAtom, data.DatabaseCommandSnapshot, nil)
+				if snapOut.Err != nil {
+					return snapOut.Err
+				}
+				raw, err := json.Marshal(snapOut.Value)
+				if err != nil {
+					return err
+				}
+				if bytes.Contains(raw, []byte(influxSecret)) {
+					return fmt.Errorf("snapshot JSON leaks secret")
+				}
+				return nil
+			})
 	}
 
-	// 3. 命令鉴权: 未配置认证时应拒绝
+	// --- data: KeyringData (OneKeyAbility 依赖的基础; 直接验证 set_secret/rotate/状态) ---
+	if d, ok := atom.Data("KeyringData"); ok {
+		o := d.Command(atom, data.KeyringCommandSetSecret, data.KeyringSetSecretArgs{Secret: "verify-secret-key-0123456789"})
+		report("KeyringData/set_secret", "≥16B", o.Err)
+		o = d.Command(atom, data.KeyringCommandStatus, nil)
+		report("KeyringData/status", fmt.Sprintf("%v", o.Value), o.Err)
+		o = d.Command(atom, data.KeyringCommandListTokens, nil)
+		report("KeyringData/list_tokens", fmt.Sprintf("%v", o.Value), o.Err)
+		// 记录轮换前的令牌四元组, 供 rotate 后断言旧签名失效
+		issueOut := d.Command(atom, data.KeyringCommandIssueToken, data.KeyringIssueTokenArgs{Subject: "pre-rotate", TTL: time.Hour})
+		report("KeyringData/issue_token", "pre-rotate", issueOut.Err)
+		kr, krOK := d.(*data.KeyringData)
+		if !krOK {
+			fmt.Printf("  [NOTE] KeyringData 注册类型异常(%T), rotate 签名验证跳过\n", d)
+		} else {
+			// 轮换前捕获旧签名: rotate 后旧签名必须以新密钥失效(rotate 回归
+			// no-op 时旧签名仍有效 → FAIL)。注意 issue_token 返回的是值类型
+			// KeyringToken(TokenSnapshot 拷贝)——旧实现断言 *KeyringToken 恒
+			// false, rotate-invalidates-old 段静默不执行(死断言); 且旧断言
+			// 用轮换后的新密钥自签自验恒 true, 逻辑也写反。
+			preRotate, tokOK := issueOut.Value.(data.KeyringToken)
+			if !tokOK {
+				report("KeyringData/rotate-invalidates-old", fmt.Sprintf("%v", issueOut.Value), fmt.Errorf("issue_token returned %T (want data.KeyringToken)", issueOut.Value))
+			} else {
+				oldSig := kr.Sign(&preRotate)
+				o = d.Command(atom, data.KeyringCommandRotate, nil)
+				report("KeyringData/rotate", "rotate", o.Err)
+				if kr.Verify(preRotate.Subject, preRotate.IssuedAt, preRotate.ExpiresAt, oldSig) {
+					report("KeyringData/rotate-invalidates-old", "old signature still verifies", fmt.Errorf("old token still verifies after rotate (rotate is a no-op?)"))
+				} else {
+					report("KeyringData/rotate-invalidates-old", "old signature rejected", nil)
+				}
+			}
+		}
+		o = d.Command(atom, data.KeyringCommandRevokeAll, nil)
+		report("KeyringData/revoke_all", "revoke_all", o.Err)
+	}
+
+	// 3. 命令鉴权: InitStandardAtom 恒配置 OneKeyAbility 为 CommandAuthenticator,
+	// 未认证/坏凭据应被拒(此处 "cred" 是错误类型触发类型断言失败——只覆盖
+	// "对任意凭据放行"的回归; 有效令牌/吊销后的正向鉴权在 OneKeyAbility 段
+	// 的 auth-valid/auth-after-revoke 断言)。
 	fmt.Println("\n=== 命令鉴权验证 ===")
 	o := atom.AuthenticatedCommand("cred", "BaseAbility", ability.CommandListAbilityNames, nil)
 	if o.Err == nil {

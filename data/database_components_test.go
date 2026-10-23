@@ -77,47 +77,63 @@ func TestDatabaseComponents(t *testing.T) {
 					t.Fatalf("set secret error: %v", out.Err)
 				}
 			}
-			// get config should not include secret
+			// get config should not include secret(旧实现只查 Err——未来给配置结构体
+			// 加 Secret 字段而忘脱敏时测试照常通过)
 			out = comp.Command(nil, DatabaseCommandGetConfig, nil)
 			if out.Err != nil {
 				t.Fatalf("get config error: %v", out.Err)
+			}
+			if tc.validSecret {
+				cfgJSON, jerr := json.Marshal(out.Value)
+				if jerr != nil {
+					t.Fatalf("marshal config: %v", jerr)
+				}
+				rawSecret := tc.secretArgs.(DatabaseSetSecretArgs).Secret
+				if strings.Contains(string(cfgJSON), string(rawSecret)) {
+					t.Fatalf("get_config leaked secret value: %s", string(cfgJSON))
+				}
 			}
 			// status check
 			out = comp.Command(nil, DatabaseCommandStatus, nil)
 			if out.Err != nil {
 				t.Fatalf("status error: %v", out.Err)
 			}
-			// snapshot deep copy test
+			// snapshot deep copy test: 旧实现"重配置后快照不变"结构性恒真
+			// (快照是值拷贝, 重配置走整体替换, 早先的快照副本不可能看到新值,
+			// 且哨兵串 "changed" 从未出现在被改字段里)——深拷贝从未被验证。
+			// 改为别名攻击: 改写快照返回结构内的 slice 元素, 组件内部状态
+			// 必须不受影响。
 			outSnap := comp.Command(nil, DatabaseCommandSnapshot, nil)
 			if outSnap.Err != nil {
 				t.Fatalf("snapshot error: %v", outSnap.Err)
 			}
-			// modify component after snapshot and ensure snapshot unchanged
-			// re‑configure with a different value
-			switch cfg := tc.configure.(type) {
-			case SQLDatabaseConfigureArgs:
-				cfg.Config.Database = cfg.Config.Database + "_changed"
-				_ = comp.Command(nil, DatabaseCommandConfigure, cfg)
-			case SQLiteConfigureArgs:
-				cfg.Config.Path = cfg.Config.Path + "_changed"
-				_ = comp.Command(nil, DatabaseCommandConfigure, cfg)
-			case RedisConfigureArgs:
-				cfg.Config.Addresses = []string{"10.1.1.1:6379"}
-				_ = comp.Command(nil, DatabaseCommandConfigure, cfg)
-			case MongoDBConfigureArgs:
-				cfg.Config.Database = cfg.Config.Database + "_changed"
-				_ = comp.Command(nil, DatabaseCommandConfigure, cfg)
-			case InfluxDBConfigureArgs:
-				cfg.Config.Org = cfg.Config.Org + "_changed"
-				_ = comp.Command(nil, DatabaseCommandConfigure, cfg)
+			switch snap := outSnap.Value.(type) {
+			case RedisSnapshot:
+				if len(snap.Config.Addresses) > 0 {
+					snap.Config.Addresses[0] = "192.0.2.99:1"
+				}
+			case MongoDBSnapshot:
+				if len(snap.Config.Hosts) > 0 {
+					snap.Config.Hosts[0] = "192.0.2.99:1"
+				}
 			}
-			// compare snapshot value unchanged
-			snapJSON, err := json.Marshal(outSnap.Value)
-			if err != nil {
-				t.Fatalf("marshal snap: %v", err)
+			outGet := comp.Command(nil, DatabaseCommandGetConfig, nil)
+			if outGet.Err != nil {
+				t.Fatalf("get config after snapshot mutation: %v", outGet.Err)
 			}
-			if strings.Contains(string(snapJSON), "changed") {
-				t.Fatalf("snapshot was mutated after reconfigure: %s", string(snapJSON))
+			switch cfg := outGet.Value.(type) {
+			case RedisConfig:
+				for _, a := range cfg.Addresses {
+					if a == "192.0.2.99:1" {
+						t.Fatalf("snapshot mutation leaked into component state")
+					}
+				}
+			case MongoDBConfig:
+				for _, h := range cfg.Hosts {
+					if h == "192.0.2.99:1" {
+						t.Fatalf("snapshot mutation leaked into component state")
+					}
+				}
 			}
 			// JSONMarshal must not contain secret
 			if tc.validSecret {

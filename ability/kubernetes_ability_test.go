@@ -1,7 +1,10 @@
 package ability
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -29,7 +32,7 @@ func newFakeK8sTransport() *fakeK8sTransport {
 
 func key(kind, ns, name string) string { return kind + "/" + ns + "/" + name }
 
-func (f *fakeK8sTransport) Apply(manifest string) error {
+func (f *fakeK8sTransport) Apply(_ context.Context, manifest string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.applyErr != nil {
@@ -41,7 +44,7 @@ func (f *fakeK8sTransport) Apply(manifest string) error {
 	return nil
 }
 
-func (f *fakeK8sTransport) Delete(kind, name, ns string) error {
+func (f *fakeK8sTransport) Delete(_ context.Context, kind, name, ns string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	delete(f.resources, key(kind, ns, name))
@@ -49,7 +52,7 @@ func (f *fakeK8sTransport) Delete(kind, name, ns string) error {
 	return nil
 }
 
-func (f *fakeK8sTransport) List(kind, ns string) ([]K8sResource, error) {
+func (f *fakeK8sTransport) List(_ context.Context, kind, ns string) ([]K8sResource, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	out := make([]K8sResource, 0)
@@ -66,7 +69,7 @@ func (f *fakeK8sTransport) List(kind, ns string) ([]K8sResource, error) {
 	return out, nil
 }
 
-func (f *fakeK8sTransport) Get(kind, name, ns string) (K8sResource, error) {
+func (f *fakeK8sTransport) Get(_ context.Context, kind, name, ns string) (K8sResource, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	r, ok := f.resources[key(kind, ns, name)]
@@ -76,7 +79,7 @@ func (f *fakeK8sTransport) Get(kind, name, ns string) (K8sResource, error) {
 	return r, nil
 }
 
-func (f *fakeK8sTransport) Scale(deployment, ns string, replicas int32) error {
+func (f *fakeK8sTransport) Scale(_ context.Context, deployment, ns string, replicas int32) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.scaleErr != nil {
@@ -86,7 +89,7 @@ func (f *fakeK8sTransport) Scale(deployment, ns string, replicas int32) error {
 	return nil
 }
 
-func (f *fakeK8sTransport) Logs(pod, ns string, tail int) (string, error) {
+func (f *fakeK8sTransport) Logs(_ context.Context, pod, ns string, tail int) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.logs, nil
@@ -125,11 +128,23 @@ func TestK8sAbilitySetGetContext(t *testing.T) {
 	}
 	if out := k.Command(atom, K8sCommandGetContext, nil); out.Err != nil {
 		t.Fatal(out.Err)
-	} else if ctx, _ := out.Value.(K8sContext); ctx.Namespace != "default" {
+	} else if ctx, _ := out.Value.(K8sContextView); ctx.Namespace != "default" {
 		t.Fatalf("namespace = %q, want default", ctx.Namespace)
 	}
-	if out := k.Command(atom, K8sCommandSetContext, K8sContextArgs{K8sContext: K8sContext{Cluster: "prod", Namespace: "team-a"}}); out.Err != nil {
+	// 安全回归: set_context 携带含私钥的 kubeconfig 后, get_context/set_context 回执
+	// 均不得回读 Kubeconfig 原文, 只暴露是否已配置。
+	secretKC := "apiVersion: v1\nkind: Config\nusers:\n- name: x\n  user:\n    client-key-data: LS0tLS1CRUdJTiBSU0EgUFJJVkFURSBLRVktLS0tLQo="
+	if out := k.Command(atom, K8sCommandSetContext, K8sContextArgs{K8sContext: K8sContext{Cluster: "prod", Namespace: "team-a", Kubeconfig: secretKC}}); out.Err != nil {
 		t.Fatal(out.Err)
+	} else if v, ok := out.Value.(K8sContextView); !ok || v.KubeconfigConfigured != true || v.Cluster != "prod" {
+		t.Fatalf("set_context view = %#v, want configured view without raw kubeconfig", out.Value)
+	}
+	if out := k.Command(atom, K8sCommandGetContext, nil); out.Err != nil {
+		t.Fatal(out.Err)
+	} else if v, ok := out.Value.(K8sContextView); !ok || v.KubeconfigConfigured != true {
+		t.Fatalf("get_context view = %#v, want configured=true", out.Value)
+	} else if strings.Contains(fmt.Sprintf("%v", out.Value), "client-key-data") {
+		t.Fatalf("get_context leaked raw kubeconfig: %v", out.Value)
 	}
 }
 
@@ -151,7 +166,7 @@ func TestK8sAbilityApply(t *testing.T) {
 		t.Fatal(out.Err)
 	}
 	ft.applyErr = errors.New("apply fail")
-	if out := k.Command(atom, K8sCommandApply, K8sApplyArgs{Manifest: "x"}); !errors.Is(out.Err, types.ErrInvalidArguments) {
+	if out := k.Command(atom, K8sCommandApply, K8sApplyArgs{Manifest: "x"}); !errors.Is(out.Err, types.ErrOperationFailed) {
 		t.Fatalf("apply err = %v", out.Err)
 	}
 }
@@ -188,7 +203,7 @@ func TestK8sAbilityListGetDelete(t *testing.T) {
 	} else if r, _ := out.Value.(K8sResource); r.Name != "demo" {
 		t.Fatalf("get = %+v", r)
 	}
-	if out := k.Command(atom, K8sCommandGet, K8sGetArgs{Kind: "Pod", Name: "missing"}); !errors.Is(out.Err, types.ErrInvalidArguments) {
+	if out := k.Command(atom, K8sCommandGet, K8sGetArgs{Kind: "Pod", Name: "missing"}); !errors.Is(out.Err, types.ErrOperationFailed) {
 		t.Fatalf("get missing error = %v", out.Err)
 	}
 	// delete
@@ -197,6 +212,12 @@ func TestK8sAbilityListGetDelete(t *testing.T) {
 	}
 	if out := k.Command(atom, K8sCommandDelete, K8sDeleteArgs{Kind: "Pod", Name: ""}); !errors.Is(out.Err, types.ErrInvalidArguments) {
 		t.Fatalf("delete empty error = %v", out.Err)
+	}
+	if out := k.Command(atom, K8sCommandDelete, K8sDeleteArgs{Kind: "Pod", Name: "a/b"}); !errors.Is(out.Err, types.ErrInvalidArguments) {
+		t.Fatalf("delete traversal name error = %v", out.Err)
+	}
+	if out := k.Command(atom, K8sCommandDelete, K8sDeleteArgs{Kind: "Pod", Name: "../secret"}); !errors.Is(out.Err, types.ErrInvalidArguments) {
+		t.Fatalf("delete dotdot name error = %v", out.Err)
 	}
 	if out := k.Command(atom, K8sCommandDelete, K8sDeleteArgs{Kind: "!", Name: "x"}); !errors.Is(out.Err, types.ErrInvalidArguments) {
 		t.Fatalf("delete bad kind error = %v", out.Err)
@@ -217,6 +238,9 @@ func TestK8sAbilityScale(t *testing.T) {
 	if out := k.Command(atom, K8sCommandScale, K8sScaleArgs{}); !errors.Is(out.Err, types.ErrInvalidArguments) {
 		t.Fatalf("scale empty error = %v", out.Err)
 	}
+	if out := k.Command(atom, K8sCommandScale, K8sScaleArgs{Deployment: "../x", Replicas: 1}); !errors.Is(out.Err, types.ErrInvalidArguments) {
+		t.Fatalf("scale traversal error = %v", out.Err)
+	}
 	if out := k.Command(atom, K8sCommandScale, K8sScaleArgs{Deployment: "web", Replicas: -1}); !errors.Is(out.Err, types.ErrInvalidArguments) {
 		t.Fatalf("scale negative error = %v", out.Err)
 	}
@@ -224,7 +248,7 @@ func TestK8sAbilityScale(t *testing.T) {
 		t.Fatal(out.Err)
 	}
 	ft.scaleErr = errors.New("scale fail")
-	if out := k.Command(atom, K8sCommandScale, K8sScaleArgs{Deployment: "web", Replicas: 1}); !errors.Is(out.Err, types.ErrInvalidArguments) {
+	if out := k.Command(atom, K8sCommandScale, K8sScaleArgs{Deployment: "web", Replicas: 1}); !errors.Is(out.Err, types.ErrOperationFailed) {
 		t.Fatalf("scale err = %v", out.Err)
 	}
 }
@@ -240,6 +264,9 @@ func TestK8sAbilityGetLogs(t *testing.T) {
 	}
 	if out := k.Command(atom, K8sCommandGetLogs, K8sLogsArgs{}); !errors.Is(out.Err, types.ErrInvalidArguments) {
 		t.Fatalf("logs empty error = %v", out.Err)
+	}
+	if out := k.Command(atom, K8sCommandGetLogs, K8sLogsArgs{Pod: "a?watch=true"}); !errors.Is(out.Err, types.ErrInvalidArguments) {
+		t.Fatalf("logs injection pod error = %v", out.Err)
 	}
 	if out := k.Command(atom, K8sCommandGetLogs, K8sLogsArgs{Pod: "p", Tail: -1}); !errors.Is(out.Err, types.ErrInvalidArguments) {
 		t.Fatalf("logs negative tail error = %v", out.Err)

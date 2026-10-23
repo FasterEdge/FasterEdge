@@ -69,7 +69,10 @@ func run() error {
 	if issueOut.Err != nil {
 		return fmt.Errorf("issue token: %w", issueOut.Err)
 	}
-	tok, _ := issueOut.Value.(ability.OneKeyToken)
+	tok, okTok := issueOut.Value.(ability.OneKeyToken)
+	if !okTok || len(tok.Signature) < 12 {
+		return fmt.Errorf("issue token: unexpected value %v", issueOut.Value)
+	}
 	fmt.Printf("[demo] onekey: issued token for edge-2 (sig=%s...)\n", tok.Signature[:12])
 
 	// 把签名后的 token 编码后跨节点传输,然后在远端用 verify 校验
@@ -109,7 +112,17 @@ func run() error {
 		return fmt.Errorf("config set: %w", out.Err)
 	}
 	cfa, _ := atom.Ability("ConfigFileAbility")
-	cfgPath := filepath.Join(os.TempDir(), "FasterEdge-demo-config.json")
+	// 私有临时目录 + 唯一文件名: 固定公开路径(如共享 /tmp 下的常量名)可被
+	// 预置符号链接劫持(Overwrite:true 会覆写链接目标)——模板示范安全写法。
+	demoDir, err := os.MkdirTemp("", "FasterEdge-demo-*")
+	if err != nil {
+		return fmt.Errorf("demo dir: %w", err)
+	}
+	defer os.RemoveAll(demoDir)
+	if s, ok := cfa.(interface{ SetRoot(string) }); ok {
+		s.SetRoot(demoDir)
+	}
+	cfgPath := filepath.Join(demoDir, "config.json")
 	if out := cfa.Command(atom, ability.ConfigFileCommandSave, ability.ConfigFileSaveArgs{
 		Path:      cfgPath,
 		Overwrite: true,
@@ -130,11 +143,22 @@ func run() error {
 		Timeout: 3 * time.Second,
 	}); out.Err != nil {
 		return fmt.Errorf("sh run: %w", out.Err)
-	} else if res, ok := out.Value.(ability.CmdResult); ok && res.ExitCode == 0 {
-		fmt.Printf("[demo] sh: stdout = %q\n", res.Stdout)
+	} else if res, ok := out.Value.(ability.CmdResult); ok {
+		if res.ExitCode == 0 {
+			fmt.Printf("[demo] sh: stdout = %q\n", res.Stdout)
+		} else {
+			// Windows 无 sh 时 exec 启动失败返回 ExitCode -1 + nil Err(契约):
+			// 旧实现静默跳过且 demo 以 0 退出、步骤 7 从未真正执行——明确提示。
+			fmt.Printf("[demo] sh: skipped (exit code %d, stderr=%q)——本环境无 sh 或命令被拒\n", res.ExitCode, res.Stderr)
+		}
+	} else {
+		fmt.Printf("[demo] sh: skipped (unexpected result %v)\n", out.Value)
 	}
 
-	// 8. 优雅退出:100ms 后取消上下文,RunAtom 在没有 Runner 的情况下会立刻返回
+	// 8. 优雅退出:100ms 后取消上下文。RunAll 无 Runner 时阻塞于 ctx.Done
+	// (不会"立刻返回"——旧注释与行为不符, types/lifecycle.go:500); 本 atom
+	// 含 TimeAbility 这个 Runner, 取消后各组件 Unmount, RunAll 返回
+	// context.Canceled, 与下方容错匹配。
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	go func() {

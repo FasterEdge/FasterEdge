@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/FasterEdge/FasterEdge/types"
 )
 
 var ErrHTTPSDowngrade = errors.New("HTTPS redirect downgrade is disallowed")
@@ -44,19 +46,19 @@ func (t *TimeAbility) fetchNetworkTime(ctx context.Context, rawURL string) (time
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("time request: %w", err)
+		return time.Time{}, fmt.Errorf("time request: %w: %w", types.ErrOperationFailed, err)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("time request: %w", err)
+		return time.Time{}, fmt.Errorf("time request: %w: %w", types.ErrOperationFailed, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return time.Time{}, fmt.Errorf("time source status %s", resp.Status)
+		return time.Time{}, fmt.Errorf("time source status %s: %w", resp.Status, types.ErrOperationFailed)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, t.maxResponseBytes+1))
 	if err != nil {
-		return time.Time{}, fmt.Errorf("time response: %w", err)
+		return time.Time{}, fmt.Errorf("time response: %w: %w", types.ErrOperationFailed, err)
 	}
 	if int64(len(body)) > t.maxResponseBytes {
 		return time.Time{}, ErrTimeResponseTooLarge

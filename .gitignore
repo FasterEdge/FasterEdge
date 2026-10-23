@@ -6,6 +6,9 @@
 *.so
 *.dylib
 
+# Credential files (tokens for push workflows must never be committed)
+.cred*
+
 # Test binary, build with `go test -c`
 *.test
 
@@ -32,6 +35,9 @@ go.work.sum
 
 # Examples verify tool build output
 /verify
+
+# Examples demo build output
+/dist/
 
 # ============================================
 # OS / Editor / IDE 噪音屏蔽

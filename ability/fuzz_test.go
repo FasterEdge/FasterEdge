@@ -1,6 +1,8 @@
 package ability
 
 import (
+	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -23,10 +25,13 @@ func FuzzShellQuote(f *testing.F) {
 		if out[0] != '\'' || out[len(out)-1] != '\'' {
 			t.Fatalf("quote of %q not single-quoted: %q", s, out)
 		}
-		// 不应包含连续两个以上的单引号(即 "" 的假想表示)
-		// 不应出现裸 '' 段(可能表示空字符串补丁)
-		// 核心不变量:shellQuote(x) 的结果在 POSIX sh 中应展开为 x(功能等价)
-		// 这里仅做不崩溃检查,不再检查内部单引号,因为 '\'' 序列是合法的。
+		// 转义完整性(旧实现只断言包裹符与不崩溃): 剥掉全部 '\'' 转义序列后
+		// 内部不得残留裸单引号——否则 POSIX sh 无法把结果展开回原值,
+		// shell 注入面(shellQuote 漏转义)回归可被立刻抓到。
+		stripped := strings.ReplaceAll(out[1:len(out)-1], `'\''`, "")
+		if strings.Contains(stripped, "'") {
+			t.Fatalf("unquoted single quote survived quoting: %q (from %q)", out, s)
+		}
 	})
 }
 
@@ -81,26 +86,46 @@ func FuzzDecodeFromTransmission(f *testing.F) {
 	})
 }
 
-// FuzzIsAcceptableControllerURL 确保网络 URL 校验对任意输入都不 panic。
-func FuzzIsAcceptableControllerURL(f *testing.F) {
-	f.Add("https://ctrl.example.com")
-	f.Add("http://localhost:8080")
-	f.Add("")
-	f.Add("ftp://x")
-	f.Add("http://")
-	f.Fuzz(func(t *testing.T, s string) {
-		_ = isAcceptableControllerURL(s)
-	})
-}
-
-// FuzzIsAcceptableBrokerURL 确保 MQTT broker URL 校验对任意输入都不 panic。
+// FuzzIsAcceptableBrokerURL 确保 MQTT broker URL 校验对任意输入都不 panic,
+// 且"接受"意味着标准 URL 可解析、host/端口齐全(畸形 URL 必须被拒)。
 func FuzzIsAcceptableBrokerURL(f *testing.F) {
 	f.Add("tcp://broker.example.com:1883")
 	f.Add("tcp://127.0.0.1:1883")
 	f.Add("")
 	f.Add("ws://localhost")
+	f.Add("tcp://[")
+	f.Add("tcp://host:")
+	f.Add("tcp://a b:1883")
 	f.Fuzz(func(t *testing.T, s string) {
-		_ = isAcceptableBrokerURL(s)
+		ok := isAcceptableBrokerURL(s)
+		// 接受的输入必须能被标准 URL 解析且 host/端口齐全(旧实现 fall
+		// through 放行畸形输入——"tcp://[" 曾被接受)。
+		if ok {
+			p, err := url.Parse(s)
+			if err != nil || p.Hostname() == "" || p.Port() == "" {
+				t.Fatalf("accepted malformed broker URL %q", s)
+			}
+		}
+	})
+}
+
+// FuzzIsAcceptableControllerURL 确保 controller URL 校验对任意输入都不 panic,
+// 且接受意味着标准 URL 可解析(与 broker 同属性)。
+func FuzzIsAcceptableControllerURL(f *testing.F) {
+	f.Add("")
+	f.Add("https://ctrl.example.com")
+	f.Add("https://host:")
+	f.Add("https://[::1]:8080")
+	f.Add("ftp://x")
+	f.Add("https://user:pass@host")
+	f.Fuzz(func(t *testing.T, s string) {
+		ok := isAcceptableControllerURL(s)
+		if ok {
+			p, err := url.Parse(s)
+			if err != nil || p.Hostname() == "" {
+				t.Fatalf("accepted malformed controller URL %q", s)
+			}
+		}
 	})
 }
 

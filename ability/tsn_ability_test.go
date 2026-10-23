@@ -190,10 +190,25 @@ func TestTSNAbilityTimeAware(t *testing.T) {
 	}
 	// 正常
 	base := time.Now()
+	gs := []byte{0xFF, 0x00}
 	if out := tn.Command(atom, TSNCommandSetTimeAware, TSNTimeAwareArgs{
-		Enabled: true, BaseTime: base, CycleTime: time.Millisecond, GateStates: []byte{0xFF, 0x00},
+		Enabled: true, BaseTime: base, CycleTime: time.Millisecond, GateStates: gs,
 	}); out.Err != nil {
 		t.Fatal(out.Err)
+	}
+	// 别名回归: 修改调用方原 slice 不得影响已存储状态(get 不可见修改)
+	gs[0] = 0x01
+	if out := tn.Command(atom, TSNCommandGetTimeAware, nil); out.Err != nil {
+		t.Fatal(out.Err)
+	} else if got, _ := out.Value.(TSNTimeAwareArgs); got.GateStates[0] != 0xFF {
+		t.Fatalf("gate states aliased caller slice: %v", got.GateStates)
+	}
+	// 长度校验: 空与超长 GateStates 必须拒绝
+	if out := tn.Command(atom, TSNCommandSetTimeAware, TSNTimeAwareArgs{Enabled: true, GateStates: nil}); !errors.Is(out.Err, types.ErrInvalidArguments) {
+		t.Fatalf("empty gate states error = %v", out.Err)
+	}
+	if out := tn.Command(atom, TSNCommandSetTimeAware, TSNTimeAwareArgs{Enabled: true, GateStates: make([]byte, 17)}); !errors.Is(out.Err, types.ErrInvalidArguments) {
+		t.Fatalf("oversized gate states error = %v", out.Err)
 	}
 	if out := tn.Command(atom, TSNCommandGetTimeAware, struct{}{}); !errors.Is(out.Err, types.ErrInvalidArguments) {
 		t.Fatalf("get with args error = %v", out.Err)

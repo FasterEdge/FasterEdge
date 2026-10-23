@@ -2,11 +2,19 @@ package data
 
 import (
 	"strings"
+	"sync"
 
 	"github.com/FasterEdge/FasterEdge/types"
 )
 
-type InfluxDBData struct{ store databaseStore[InfluxDBConfig] }
+// InfluxDBData 的 setter(set_endpoint/set_org/set_bucket)是 read-modify-write:
+// 旧实现先 public() 读整份 config 再 configure() 整块覆盖, 并发配置命令会
+// 互相覆盖(先落盘的字段被后落盘的整份替换)。mu 把字段级 RMW 串行化,
+// store 内部锁在 mu 内嵌套(顺序固定, 无死锁)。
+type InfluxDBData struct {
+	store databaseStore[InfluxDBConfig]
+	mu    sync.Mutex
+}
 type InfluxDBConfigureArgs struct{ Config InfluxDBConfig }
 type InfluxDBSnapshot struct {
 	Version string         `json:"version"`
@@ -28,6 +36,13 @@ func (d *InfluxDBData) Check(*types.Atom) error { return nil }
 func (d *InfluxDBData) Mount(*types.Atom) error { return nil }
 func (d *InfluxDBData) ListCommands() []string  { return databaseSecretCommands() }
 func (d *InfluxDBData) Command(_ *types.Atom, act string, args any) types.CommandOutput {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	// mu 同时串行化 Command 路径与 Setter 路径: 旧实现只给 Setter 持 mu,
+	// Command(configure) 直接走 store——setter 的 public()→configure()
+	// 读改写区间可与并发 configure 命令互踩, 配置整体丢失(文件头注释
+	// 声称修复的"互相覆盖"在混用路径下仍存在)。锁序与 setter 一致
+	// (mu 先于 store 内部锁), 无死锁。
 	switch act {
 	case DatabaseCommandConfigure:
 		typed, ok := args.(InfluxDBConfigureArgs)
@@ -70,11 +85,13 @@ func (d *InfluxDBData) PublicConfig() InfluxDBConfig {
 }
 
 func (d *InfluxDBData) SetEndpoint(value string) error {
-	cfg, _ := d.store.public()
-	cfg.Endpoint = value
 	if err := validateInfluxEndpoint(value); err != nil {
 		return err
 	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	cfg, _ := d.store.public()
+	cfg.Endpoint = value
 	d.store.configure(cfg)
 	return nil
 }
@@ -82,6 +99,8 @@ func (d *InfluxDBData) SetOrg(value string) error {
 	if validateName(value) != nil {
 		return types.ErrInvalidArguments
 	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	cfg, _ := d.store.public()
 	cfg.Org = value
 	d.store.configure(cfg)
@@ -91,6 +110,8 @@ func (d *InfluxDBData) SetBucket(value string) error {
 	if validateName(value) != nil {
 		return types.ErrInvalidArguments
 	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	cfg, _ := d.store.public()
 	cfg.Bucket = value
 	d.store.configure(cfg)

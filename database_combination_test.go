@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -56,6 +57,53 @@ func TestCombinationAllDatabaseDataLifecycle(t *testing.T) {
 				status := mustDataCommand(t, component, atom, data.DatabaseCommandSetSecret, data.DatabaseSetSecretArgs{Secret: []byte(tc.secret)}).Value.(data.DatabaseStatus)
 				if !status.SecretConfigured || status.Revision != 2 {
 					t.Fatalf("secret status = %+v", status)
+				}
+			}
+			// get_config 字段级往返断言(旧实现只查 Configured/Revision——
+			// configure 存错字段时测试照常通过)
+			gotCfg := mustDataCommand(t, component, atom, data.DatabaseCommandGetConfig, nil).Value
+			switch cfg := gotCfg.(type) {
+			case data.SQLDatabaseConfig:
+				want := tc.configure.(data.SQLDatabaseConfigureArgs).Config
+				if cfg.Host != want.Host || cfg.Database != want.Database || cfg.Username != want.Username || cfg.MaxOpenConns != want.MaxOpenConns {
+					t.Fatalf("SQL config round-trip mismatch: got %+v want %+v", cfg, want)
+				}
+			case data.SQLiteConfig:
+				want := tc.configure.(data.SQLiteConfigureArgs).Config
+				if cfg.Path != want.Path || cfg.Mode != want.Mode || cfg.WAL != want.WAL {
+					t.Fatalf("SQLite config round-trip mismatch: got %+v want %+v", cfg, want)
+				}
+			case data.RedisConfig:
+				want := tc.configure.(data.RedisConfigureArgs).Config
+				if !reflect.DeepEqual(cfg.Addresses, want.Addresses) || cfg.DB != want.DB {
+					t.Fatalf("Redis config round-trip mismatch: got %+v want %+v", cfg, want)
+				}
+			case data.MongoDBConfig:
+				want := tc.configure.(data.MongoDBConfigureArgs).Config
+				if !reflect.DeepEqual(cfg.Hosts, want.Hosts) || cfg.Database != want.Database || cfg.AuthSource != want.AuthSource {
+					t.Fatalf("Mongo config round-trip mismatch: got %+v want %+v", cfg, want)
+				}
+			case data.InfluxDBConfig:
+				want := tc.configure.(data.InfluxDBConfigureArgs).Config
+				if cfg.Endpoint != want.Endpoint || cfg.Org != want.Org || cfg.Bucket != want.Bucket {
+					t.Fatalf("Influx config round-trip mismatch: got %+v want %+v", cfg, want)
+				}
+			default:
+				t.Fatalf("unexpected get_config type %T", gotCfg)
+			}
+			// JSONMarshal 泄露检查覆盖全部含 secret 的组件(旧实现只查
+			// Redis/Influx 两处, 其余四组件带 secret 场景零覆盖)
+			if tc.secret != "" {
+				marshaler, ok := component.(interface{ JSONMarshal() ([]byte, error) })
+				if !ok {
+					t.Fatal("component does not implement JSONMarshal")
+				}
+				jb, jerr := marshaler.JSONMarshal()
+				if jerr != nil {
+					t.Fatalf("JSONMarshal: %v", jerr)
+				}
+				if strings.Contains(string(jb), tc.secret) {
+					t.Fatalf("JSONMarshal leaked secret: %s", jb)
 				}
 			}
 			snapshot := mustDataCommand(t, component, atom, data.DatabaseCommandSnapshot, nil).Value

@@ -2,6 +2,7 @@ package data
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"os"
@@ -368,4 +369,128 @@ func intString(n int) string {
 		n /= 10
 	}
 	return string(b[i:])
+}
+
+// TestKeyringLoadSnapshotTTLClockIndependent 回归: 旧 LoadSnapshot 的 TTL
+// 校验锚定加载时刻墙上时钟(ExpiresAt.After(now.Add(maxTokenTTL)))——RTC
+// 回拨(边缘设备时钟复位/NTP 向后纠正)后, 自身 SaveSnapshot 产出的合法
+// 快照(30d 新令牌)会被整体拒载(含 secret, 节点拒启)。现改为 TTL 窗
+// ExpiresAt-IssuedAt, 与时钟无关。
+func TestKeyringLoadSnapshotTTLClockIndependent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "keyring.json")
+	now := time.Now()
+	// 模拟"回拨前签发 30d 令牌、回拨后加载": 签发/过期都在未来
+	// (now+1d .. now+31d), TTL 窗恰为 30d——旧校验(锚定 now)会误判
+	// "expires beyond max ttl" 拒载。
+	snap := keyringSnapshot{
+		Version:      keyringSnapshotVersion,
+		SavedAt:      now.Add(30 * 24 * time.Hour),
+		Secret:       base64.StdEncoding.EncodeToString([]byte("this-is-a-32-byte-secret-for-tests!")),
+		TotalIssued:  1,
+		RevokedCount: 0,
+		Tokens: []KeyringToken{{
+			Subject:   "edge-1",
+			IssuedAt:  now.Add(24 * time.Hour),
+			ExpiresAt: now.Add(31 * 24 * time.Hour),
+		}},
+		DefaultAlgo:     "HMAC-SHA256",
+		DefaultTokenTTL: 24 * time.Hour,
+	}
+	body, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	k := NewKeyringData()
+	if err := k.Mount(nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := k.LoadSnapshot(path); err != nil {
+		t.Fatalf("load should accept clock-independent ttl window: %v", err)
+	}
+	// 加载后令牌仍在(未因拒载丢数据)
+	status, tokens := k.Snapshot()
+	if status.TotalIssued != 1 || len(tokens) != 1 || tokens[0].Subject != "edge-1" {
+		t.Fatalf("loaded token missing: status=%+v tokens=%v", status, tokens)
+	}
+}
+
+// TestKeyringRejectsNonUTF8Subject 回归: 非 UTF-8 subject 签发就拒绝——
+// 旧实现只 trim, 经快照 JSON 落盘会静默腐蚀为 U+FFFD, 往返后
+// LookupToken/Verify 失效、腐蚀重合还会触发 duplicate subject 整盘拒载。
+func TestKeyringRejectsNonUTF8Subject(t *testing.T) {
+	k := NewKeyringData()
+	if err := k.Mount(nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.IssueToken(string([]byte{0xff, 0xfe, 'a'}), time.Hour); err == nil {
+		t.Fatal("expected non-UTF-8 subject to be rejected")
+	}
+	// UTF-8 subject 正常
+	tok, err := k.IssueToken("节点-1", time.Hour)
+	if err != nil {
+		t.Fatalf("utf-8 subject should be accepted: %v", err)
+	}
+	if tok.Subject != "节点-1" {
+		t.Fatalf("subject = %q", tok.Subject)
+	}
+}
+
+// TestKeyringConcurrentLoadSnapshotAndIssueTTLDefault: IssueToken 在 ttl<=0
+// 时读取 defaultTokenTTL(LoadSnapshot 在锁内写入该字段)——第九轮修复了
+// 该无锁读竞争。无 -race 环境下的行为回归: 并发加载与默认 TTL 签发不
+// panic 且最终可正常加载(与 -race 检测器配合可捕获字段级竞争)。
+func TestKeyringConcurrentLoadSnapshotAndIssueTTLDefault(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "keyring.json")
+	seed := NewKeyringData()
+	if err := seed.Mount(nil); err != nil {
+		t.Fatal(err)
+	}
+	seed.SetSecret([]byte("seed-secret-for-concurrent-load"))
+	if _, err := seed.IssueToken("seed-peer", time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := seed.SaveSnapshot(path); err != nil {
+		t.Fatal(err)
+	}
+
+	k := NewKeyringData()
+	if err := k.Mount(nil); err != nil {
+		t.Fatal(err)
+	}
+	const workers = 8
+	var wg sync.WaitGroup
+	wg.Add(workers + 1)
+	for i := 0; i < workers; i++ {
+		go func(worker int) {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				sub := "peer-" + intString(worker) + "-" + intString(j)
+				// ttl<=0 触发 defaultTokenTTL 读取路径; 与并发 LoadSnapshot
+				// 交错时 subject 可能已存在而被拒绝——属竞态合法结果, 忽略
+				_, _ = k.IssueToken(sub, 0)
+			}
+		}(i)
+	}
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 30; i++ {
+			if err := k.LoadSnapshot(path); err != nil {
+				t.Errorf("load[%d]: %v", i, err)
+				return
+			}
+		}
+	}()
+	wg.Wait()
+
+	// 最终状态必须可正常快照与加载(无撕裂/损坏)
+	if err := k.SaveSnapshot(path); err != nil {
+		t.Fatalf("final save: %v", err)
+	}
+	loaded := NewKeyringData()
+	if err := loaded.LoadSnapshot(path); err != nil {
+		t.Fatalf("final load: %v", err)
+	}
 }
