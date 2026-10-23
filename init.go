@@ -34,7 +34,8 @@ func PreRunAtom(atom *types.Atom) error {
 //   - 终端命令:CmdAbility / ShAbility / BashAbility
 //   - 文件与配置:ConfigData + ConfigFileAbility
 //
-// 使用方可在 InitStandardAtom 基础上继续注册 Docker / K8s / MQTT / InfluxDB 等能力。
+// 使用方可在 InitStandardAtom 基础上继续注册 Docker / K8s / MQTT 等能力
+// (注意: InfluxDBData 等六个 DB data 已含于骨架, 请勿重复注册)。
 func InitStandardAtom() *types.Atom {
 	atom := InitAtom()
 

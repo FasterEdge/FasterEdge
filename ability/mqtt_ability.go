@@ -5,11 +5,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/FasterEdge/FasterEdge/types"
+)
+
+const (
+	// mqttMaxPayloadBytes 是单条消息负载的上限(1 MiB),防恶意 broker/调用方
+	// 通过无限大 payload 造成内存耗尽(队列长度有界但字节数原本无界)。
+	mqttMaxPayloadBytes = 1 << 20
 )
 
 const (
@@ -131,13 +139,18 @@ func newMQTTQueue(max int) *mqttQueue {
 }
 
 func (q *mqttQueue) push(m MQTTMessage) bool {
+	if len(m.Payload) > mqttMaxPayloadBytes {
+		return false
+	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if q.closed {
 		return false
 	}
 	if len(q.buf) >= q.max {
-		// 队列满,丢弃最早
+		// 队列满,丢弃最早; 清零被丢弃元素以释放其 payload 字节引用
+		// (否则底层数组前部持续引用已消费 payload, 造成有界内存滞留)
+		q.buf[0] = MQTTMessage{}
 		q.buf = q.buf[1:]
 	}
 	q.buf = append(q.buf, m)
@@ -153,6 +166,10 @@ func (q *mqttQueue) close() {
 }
 
 func (q *mqttQueue) drain(max int, timeout time.Duration) []MQTTMessage {
+	if max < 0 {
+		// 防御: 负值会在 q.buf[:max] 处 slice panic
+		max = 0
+	}
 	deadline := time.Now().Add(timeout)
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -161,6 +178,7 @@ func (q *mqttQueue) drain(max int, timeout time.Duration) []MQTTMessage {
 			max = len(q.buf)
 		}
 		out := append([]MQTTMessage(nil), q.buf[:max]...)
+		clear(q.buf[:max])
 		q.buf = q.buf[max:]
 		return out
 	}
@@ -184,6 +202,7 @@ func (q *mqttQueue) drain(max int, timeout time.Duration) []MQTTMessage {
 		max = len(q.buf)
 	}
 	out := append([]MQTTMessage(nil), q.buf[:max]...)
+	clear(q.buf[:max])
 	q.buf = q.buf[max:]
 	return out
 }
@@ -274,6 +293,15 @@ func (m *MQTTAbility) Unmount(ctx context.Context, _ *types.Atom) error {
 	case err := <-result:
 		return err
 	case <-ctx.Done():
+		// Disconnect 阻塞时等待一个有限窗口让 goroutine 退出, 避免每次
+		// Unmount 泄漏一个 goroutine + 底层连接。Go 无法强制终止 goroutine,
+		// 但窗口期给了正常慢连接退出机会。
+		timer := time.NewTimer(2 * time.Second)
+		defer timer.Stop()
+		select {
+		case <-result:
+		case <-timer.C:
+		}
 		return ctx.Err()
 	}
 }
@@ -348,7 +376,29 @@ func (m *MQTTAbility) Command(atom *types.Atom, act string, args any) types.Comm
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: no transport: %w", act, types.ErrInvalidArguments)}
 		}
 		if err := transport.Connect(); err != nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %v", act, types.ErrInvalidArguments, err)}
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %w", act, types.ErrOperationFailed, err)}
+		}
+		// 断线重连(clean session)后 broker 端订阅清空: 恢复本地队列对应的
+		// 全部订阅, 否则消息静默永久丢失。恢复统一用 QoS0(能力层不记录
+		// 订阅时用的 QoS; 需要 QoS1/2 的场景应由 transport 层做持久订阅)。
+		m.mu.RLock()
+		topics := make([]string, 0, len(m.queues))
+		for t := range m.queues {
+			topics = append(topics, t)
+		}
+		m.mu.RUnlock()
+		for _, t := range topics {
+			// 逐个重订阅前锁内复查队列仍在: 并发 Unsubscribe 已删队列并完成
+			// wire 退订时, 对同一 topic 重新 Subscribe 会在 broker 端产生
+			// "幽灵订阅"(消息持续投递但本地无队列、也无法再退订)——与
+			// subscribe 命令的占位+复查二次校验同型, 队列已删则跳过。
+			m.mu.RLock()
+			_, stillThere := m.queues[t]
+			m.mu.RUnlock()
+			if !stillThere {
+				continue
+			}
+			_ = transport.Subscribe(t, 0)
 		}
 		return types.CommandOutput{Name: act, Value: true}
 	case MQTTCommandDisconnect:
@@ -393,8 +443,21 @@ func (m *MQTTAbility) Command(atom *types.Atom, act string, args any) types.Comm
 		if topic == "" {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: empty topic: %w", act, types.ErrInvalidArguments)}
 		}
+		if len(topic) > 65535 {
+			// MQTT UTF-8 字符串上限: 超长 topic 会被参考 transport 的
+			// uint16 长度字段截断成畸形包。
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: topic too long: %w", act, types.ErrInvalidArguments)}
+		}
+		if strings.ContainsAny(topic, "+#") {
+			// 发布不允许通配符(MQTT 规范): 向 broker 发布含 +/# 的 topic
+			// 会污染订阅匹配面。
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: publish topic must not contain wildcards: %w", act, types.ErrInvalidArguments)}
+		}
 		if typed.Qos > MQTTQos2 {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: invalid qos: %w", act, types.ErrInvalidArguments)}
+		}
+		if len(typed.Payload) > mqttMaxPayloadBytes {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: payload exceeds %d bytes: %w", act, mqttMaxPayloadBytes, types.ErrInvalidArguments)}
 		}
 		m.mu.RLock()
 		transport := m.transport
@@ -403,7 +466,7 @@ func (m *MQTTAbility) Command(atom *types.Atom, act string, args any) types.Comm
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: no transport: %w", act, types.ErrInvalidArguments)}
 		}
 		if err := transport.Publish(topic, typed.Payload, typed.Qos, typed.Retain); err != nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %v", act, types.ErrInvalidArguments, err)}
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %w", act, types.ErrOperationFailed, err)}
 		}
 		return types.CommandOutput{Name: act, Value: topic}
 	case MQTTCommandSubscribe:
@@ -415,11 +478,16 @@ func (m *MQTTAbility) Command(atom *types.Atom, act string, args any) types.Comm
 		if topic == "" {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: empty topic: %w", act, types.ErrInvalidArguments)}
 		}
+		if len(topic) > 65535 {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: topic too long: %w", act, types.ErrInvalidArguments)}
+		}
 		if typed.Qos > MQTTQos2 {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: invalid qos: %w", act, types.ErrInvalidArguments)}
 		}
-		// Reserve topic/queue while holding the write lock so Unmount can't
-		// detach and a concurrent subscribe recreate the queue afterwards.
+		// 锁内做状态检查与队列占位, transport.Subscribe(网络往返)在锁外执行:
+		// 旧实现整段持有写锁, 若 transport 回调路径调用 PushMessage(RLock)
+		// 且恰有消息到达, 会形成"回调等锁 -> SUBACK 无人处理 -> Subscribe 永不返回"
+		// 的死锁, 慢 broker 也会让所有 MQTT 操作全局串行停顿。
 		m.mu.Lock()
 		if m.closing {
 			m.mu.Unlock()
@@ -434,11 +502,29 @@ func (m *MQTTAbility) Command(atom *types.Atom, act string, args any) types.Comm
 			m.mu.Unlock()
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: no transport: %w", act, types.ErrInvalidArguments)}
 		}
-		if err := transport.Subscribe(topic, typed.Qos); err != nil {
-			m.mu.Unlock()
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %v", act, types.ErrInvalidArguments, err)}
-		}
 		m.queues[topic] = newMQTTQueue(typed.MaxQueue)
+		m.mu.Unlock()
+		if err := transport.Subscribe(topic, typed.Qos); err != nil {
+			m.mu.Lock()
+			if q, ok := m.queues[topic]; ok {
+				q.close()
+				delete(m.queues, topic)
+			}
+			m.mu.Unlock()
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %w", act, types.ErrOperationFailed, err)}
+		}
+		// Subscribe 成功后确保队列存在: 占位队列可能被并发 Unsubscribe
+		// 删除(其 transport.Unsubscribe 与本次 Subscribe 竞争)。若已被删除,
+		// 本次 wire 订阅即成"无主订阅"(broker 已订阅但无人收消息)——撤销
+		// wire 订阅并明确失败, 避免幽灵订阅/静默丢消息。
+		m.mu.Lock()
+		if _, ok := m.queues[topic]; !ok {
+			m.mu.Unlock()
+			if transport != nil {
+				_ = transport.Unsubscribe(topic)
+			}
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: subscription cancelled concurrently: %w", act, types.ErrInvalidArguments)}
+		}
 		m.mu.Unlock()
 		return types.CommandOutput{Name: act, Value: topic}
 	case MQTTCommandUnsubscribe:
@@ -485,6 +571,10 @@ func (m *MQTTAbility) Command(atom *types.Atom, act string, args any) types.Comm
 		if typed.Timeout < 0 {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: timeout must be non-negative: %w", act, types.ErrInvalidArguments)}
 		}
+		if typed.Max < 0 {
+			// 负值 Max 会让 drain 的 q.buf[:max] 触发 slice panic(旧实现只查 Timeout)
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: max must be non-negative: %w", act, types.ErrInvalidArguments)}
+		}
 		m.mu.RLock()
 		q, ok := m.queues[topic]
 		m.mu.RUnlock()
@@ -498,6 +588,9 @@ func (m *MQTTAbility) Command(atom *types.Atom, act string, args any) types.Comm
 
 // isAcceptableBrokerURL 限制 MQTT URL 必须是 tcp/tls/ssl/ws/wss 协议,且 host 不为本地回环。
 // 这与 TimeAbility / CloudRoleAbility 的网络策略一致(私网 broker 允许, 回环拒绝)。
+// host 提取使用标准 URL 解析取 Hostname(): 旧实现按最后一个冒号切分会把
+// userinfo 手法(tcp://alice@127.0.0.1:1883)提取成 "alice@127.0.0.1" 绕过回环名单;
+// IP 字面量经 netip 规范化(IPv4-mapped IPv6)后再判回环。
 func isAcceptableBrokerURL(u string) bool {
 	if u == "" {
 		return false
@@ -517,7 +610,38 @@ func isAcceptableBrokerURL(u string) bool {
 			if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") && len(host) >= 2 {
 				host = host[1 : len(host)-1]
 			}
-			if host == "" || host == "localhost" || host == "127.0.0.1" || host == "0.0.0.0" || host == "::1" {
+			if host == "" {
+				return false
+			}
+			// userinfo 防护 + 严格解析: 旧实现只有在 url.Parse 成功时才用
+			// parsed.Hostname(), 失败时(畸形 host/空白/截断方括号/空端口)
+			// fall through 到主机名分支返回 true——"tcp://["、"tcp://host:"、
+			// "tcp://a b:1883" 全部放行, 晚到 dial 才失败。
+			parsed, perr := url.Parse(u)
+			if perr != nil || parsed.Hostname() == "" || parsed.Port() == "" {
+				return false
+			}
+			if parsed.User != nil {
+				return false
+			}
+			host = parsed.Hostname()
+			// IPv6 字面量 Hostname() 带方括号([::1]), 剥掉再判回环
+			if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") && len(host) >= 2 {
+				host = host[1 : len(host)-1]
+			}
+			if host == "" {
+				return false
+			}
+			// IP 字面量: netip 规范化后判回环/未指定
+			if addr, aerr := netip.ParseAddr(host); aerr == nil {
+				addr = addr.Unmap()
+				if addr.IsLoopback() || addr.IsUnspecified() {
+					return false
+				}
+				return true
+			}
+			// 主机名: 去掉尾点 FQDN 后比较回环别名
+			if strings.TrimSuffix(host, ".") == "localhost" {
 				return false
 			}
 			return true

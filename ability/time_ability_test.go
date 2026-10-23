@@ -124,11 +124,23 @@ func TestTimeAbilityRunHonorsImmediateCtxCancel(t *testing.T) {
 	}
 }
 
-func TestTimeAbilityRunRejectsZeroInterval(t *testing.T) {
+func TestTimeAbilityRunNormalizesZeroInterval(t *testing.T) {
+	// 零配置实例(init.go 注册后直接 RunAll): interval=0 必须被 ensureDefaults
+	// 归一化而非拒绝(旧行为会拖垮整个 Atom 的 runner 集合)。
 	c := &taskFakeClock{wall: time.Date(2026, 8, 9, 0, 0, 0, 0, time.UTC)}
-	a := &TimeAbility{clock: c, runMode: TimeRunModeTicker, interval: 0}
-	if err := a.Run(context.Background(), nil); !errors.Is(err, types.ErrInvalidArguments) {
-		t.Fatalf("Run err=%v", err)
+	a := &TimeAbility{clock: c, runMode: TimeRunModeMonotonic, interval: 0}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- a.Run(ctx, nil) }()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run err=%v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Run did not return after cancel")
 	}
 }
 
@@ -202,5 +214,39 @@ func TestTimeAbilityFetchNetworkTimeAcceptsNoZoneDatetime(t *testing.T) {
 	}
 	if !ts2.Equal(want) {
 		t.Fatalf("got %s want %s", ts2, want)
+	}
+}
+
+func TestTimeAbilityMaxSyncOffset(t *testing.T) {
+	c := &taskFakeClock{wall: time.Date(2026, 8, 9, 0, 0, 0, 0, time.UTC)}
+	base := c.Now()
+	// 默认 48h 上限(ensureDefaults 设置; 直接构造需先初始化)
+	a := &TimeAbility{clock: c}
+	a.ensureDefaults()
+	if err := a.checkSyncOffset(base.Add(24 * time.Hour)); err != nil {
+		t.Fatalf("within limit: %v", err)
+	}
+	if err := a.checkSyncOffset(base.Add(49 * time.Hour)); !errors.Is(err, types.ErrInvalidArguments) {
+		t.Fatalf("beyond limit error = %v", err)
+	}
+	if err := a.checkSyncOffset(base.Add(-49 * time.Hour)); !errors.Is(err, types.ErrInvalidArguments) {
+		t.Fatalf("negative beyond limit error = %v", err)
+	}
+	// 显式关闭(哨兵 -1): 任意偏差放行
+	a2 := &TimeAbility{clock: c, maxSyncOffset: -1}
+	if err := a2.checkSyncOffset(base.Add(10 * 365 * 24 * time.Hour)); err != nil {
+		t.Fatalf("disabled limit: %v", err)
+	}
+	// WithMaxSyncOffset(0) 也必须等效关闭(不被 ensureDefaults 覆盖为 48h)
+	ta, err := NewTimeAbility(WithMaxSyncOffset(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ta.ensureDefaults()
+	ta.mu.RLock()
+	off := ta.maxSyncOffset
+	ta.mu.RUnlock()
+	if off != -1 {
+		t.Fatalf("WithMaxSyncOffset(0) got %v, want sentinel -1", off)
 	}
 }

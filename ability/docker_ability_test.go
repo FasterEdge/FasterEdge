@@ -130,7 +130,14 @@ func TestDockerAbilitySetGetEndpoint(t *testing.T) {
 	if out := d.Command(atom, DockerCommandSetEndpoint, "raw-string"); !errors.Is(out.Err, types.ErrInvalidArguments) {
 		t.Fatalf("set wrong type error = %v", out.Err)
 	}
-	for _, bad := range []string{"", "ftp://x", "tcp://localhost:2375", "tcp://127.0.0.1:2375", "tcp://[::1]:2375", "tcp://0.0.0.0:2375", "tcp://::1:2375", "http://host:2375"} {
+	for _, bad := range []string{
+		"", "ftp://x", "tcp://localhost:2375", "tcp://127.0.0.1:2375", "tcp://[::1]:2375",
+		"tcp://0.0.0.0:2375", "tcp://::1:2375", "http://host:2375",
+		// 安全回归: IPv4-mapped IPv6 回环、userinfo 手法、私网/链路本地字面量必须拒绝
+		"tcp://[::ffff:127.0.0.1]:2375", "tcp://alice@127.0.0.1:2375",
+		"tcp://10.0.0.5:2375", "tcp://192.168.1.1:2375", "tcp://169.254.169.254:2375",
+		"tcp://[::ffff:10.0.0.5]:2375",
+	} {
 		if out := d.Command(atom, DockerCommandSetEndpoint, DockerEndpointArgs{URL: bad}); !errors.Is(out.Err, types.ErrInvalidArguments) {
 			t.Errorf("bad endpoint %q should reject, got %v", bad, out.Err)
 		}
@@ -171,9 +178,9 @@ func TestDockerAbilityList(t *testing.T) {
 	if out := d.Command(atom, DockerCommandListContainers, "raw-string"); !errors.Is(out.Err, types.ErrInvalidArguments) {
 		t.Fatalf("list wrong type error = %v", out.Err)
 	}
-	// 错误
+	// 错误(运行期 transport 故障——ErrOperationFailed, 与 influx 先例一致)
 	ft.listErr = errors.New("daemon down")
-	if out := d.Command(atom, DockerCommandListContainers, nil); !errors.Is(out.Err, types.ErrInvalidArguments) {
+	if out := d.Command(atom, DockerCommandListContainers, nil); !errors.Is(out.Err, types.ErrOperationFailed) {
 		t.Fatalf("list err = %v", out.Err)
 	}
 }
@@ -221,8 +228,8 @@ func TestDockerAbilityContainerActions(t *testing.T) {
 	if out := d.Command(atom, DockerCommandRemove, DockerContainerArgs{IDOrName: "c1"}); out.Err != nil {
 		t.Fatal(out.Err)
 	}
-	// start 缺失
-	if out := d.Command(atom, DockerCommandStart, DockerContainerArgs{IDOrName: "missing"}); !errors.Is(out.Err, types.ErrInvalidArguments) {
+	// start 缺失(运行期 transport 错误——ErrOperationFailed)
+	if out := d.Command(atom, DockerCommandStart, DockerContainerArgs{IDOrName: "missing"}); !errors.Is(out.Err, types.ErrOperationFailed) {
 		t.Fatalf("start missing error = %v", out.Err)
 	}
 }
@@ -266,5 +273,26 @@ func TestDockerAbilityUnknownCommand(t *testing.T) {
 	atom := newDockerAtom(t)
 	if out := d.Command(atom, "nope", nil); !errors.Is(out.Err, types.ErrUnsupportedCommand) {
 		t.Fatalf("unknown error = %v", out.Err)
+	}
+}
+
+// TestDockerAbilityTransportErrors 补 fake 定义了却从未注入的 startErr/createErr
+// 分支: start_container/create_container 的 transport 失败路径原零测试。
+func TestDockerAbilityTransportErrors(t *testing.T) {
+	d := NewDockerAbility()
+	atom := newDockerAtom(t)
+	ft := newFakeDockerTransport()
+	d.SetTransport(ft)
+	if out := d.Command(atom, DockerCommandCreate, DockerCreateArgs{Name: "web", Image: "nginx:latest"}); out.Err != nil {
+		t.Fatal(out.Err)
+	}
+	ft.startErr = errors.New("daemon down")
+	if out := d.Command(atom, DockerCommandStart, DockerContainerArgs{IDOrName: "web"}); !errors.Is(out.Err, types.ErrOperationFailed) {
+		t.Fatalf("start transport err = %v", out.Err)
+	}
+	ft.startErr = nil
+	ft.createErr = errors.New("create down")
+	if out := d.Command(atom, DockerCommandCreate, DockerCreateArgs{Name: "web2", Image: "nginx:latest"}); !errors.Is(out.Err, types.ErrOperationFailed) {
+		t.Fatalf("create transport err = %v", out.Err)
 	}
 }

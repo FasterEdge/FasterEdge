@@ -59,6 +59,13 @@ func TestCloudRoleAbilitySetAndGetController(t *testing.T) {
 		CloudRoleSetControllerArgs{URL: "http://127.0.0.1"},
 		CloudRoleSetControllerArgs{URL: "http://0.0.0.0/path"},
 		CloudRoleSetControllerArgs{URL: "http://[::1]:8080"},
+		// 安全回归: 私网/链路本地/IPv4-mapped/userinfo 必须拒绝
+		CloudRoleSetControllerArgs{URL: "http://192.168.1.1"},
+		CloudRoleSetControllerArgs{URL: "http://10.0.0.5/api"},
+		CloudRoleSetControllerArgs{URL: "http://169.254.169.254/latest/meta-data/"},
+		CloudRoleSetControllerArgs{URL: "http://[::ffff:127.0.0.1]:8080"},
+		CloudRoleSetControllerArgs{URL: "http://evil@127.0.0.1/"},
+		CloudRoleSetControllerArgs{URL: "http://127.0.0.1@evil.example/"},
 	} {
 		if out := c.Command(atom, CloudRoleCommandSetController, bad); !errors.Is(out.Err, types.ErrInvalidArguments) {
 			t.Fatalf("bad controller %#v error = %v", bad, out.Err)

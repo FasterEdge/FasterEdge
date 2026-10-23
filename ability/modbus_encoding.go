@@ -40,6 +40,10 @@ func encodeWriteCoilPDU(address uint16, value bool) []byte {
 
 // encodeWriteMultiPDU 构造写多个保持寄存器的 PDU。返回 PDU 与可能的错误。
 func encodeWriteMultiPDU(address uint16, values []uint16) ([]byte, error) {
+	// 空输入会产出 quantity=0 的协议非法 PDU; 上限 123 寄存器(246 字节)
+	if len(values) == 0 || len(values) > 123 {
+		return nil, fmt.Errorf("values length %d out of range 1..123", len(values))
+	}
 	byteCount := len(values) * 2
 	if byteCount > 246 {
 		return nil, fmt.Errorf("byte count %d exceeds 246", byteCount)
@@ -68,7 +72,15 @@ func decodeRegs(payload []byte) []uint16 {
 }
 
 // decodeCoils 把字节流解码为 bool 数组,每个 bit 表示一个线圈状态。
+// 负 quantity 返回 nil(旧实现 make([]bool, 负值) 会 panic);
+// quantity 超过 payload 可表达的位数时截断到实际位数。
 func decodeCoils(payload []byte, quantity int) []bool {
+	if quantity < 0 {
+		return nil
+	}
+	if maxQ := len(payload) * 8; quantity > maxQ {
+		quantity = maxQ
+	}
 	out := make([]bool, quantity)
 	for i := 0; i < quantity; i++ {
 		byteIdx := i / 8
@@ -82,6 +94,7 @@ func decodeCoils(payload []byte, quantity int) []bool {
 }
 
 // isValidModbusEndpoint 接受 host:port (TCP) 或 /dev/...:baud:format (RTU)。
+// 语法校验(端口范围/空白/段数)与注释一致; 地址语义(回环等)由调用方策略决定。
 func isValidModbusEndpoint(addr string) bool {
 	if addr == "" {
 		return false
@@ -89,7 +102,7 @@ func isValidModbusEndpoint(addr string) bool {
 	if strings.HasPrefix(addr, "/") {
 		// RTU 形如 /dev/ttyUSB0:9600:8N1 — 波特率必须为纯数字
 		parts := strings.Split(addr, ":")
-		if len(parts) < 3 {
+		if len(parts) != 3 {
 			return false
 		}
 		if parts[1] == "" {
@@ -100,8 +113,13 @@ func isValidModbusEndpoint(addr string) bool {
 				return false
 			}
 		}
-		// 简易 format 校验: 5-9 位,字母数字
-		for _, r := range parts[2] {
+		// format 校验: 2-9 位字母数字(如 8N1/8E1/7O2), 旧实现注释宣称"5-9 位"
+		// 但代码无长度校验——"8N"、10 位长串均放行, 与注释不符。
+		f := parts[2]
+		if len(f) < 2 || len(f) > 9 {
+			return false
+		}
+		for _, r := range f {
 			if !(r >= '0' && r <= '9') && !(r >= 'A' && r <= 'Z') && !(r >= 'a' && r <= 'z') {
 				return false
 			}
@@ -118,10 +136,26 @@ func isValidModbusEndpoint(addr string) bool {
 	if host == "" || port == "" {
 		return false
 	}
+	// host 拒空白/控制符: "19 2.168.1.1:502" 这类畸形串旧实现放行,
+	// 拨号时才失败——语法层直接拒绝更早暴露配置错误。
+	for _, r := range host {
+		if r <= ' ' || r == 0x7f {
+			return false
+		}
+	}
+	if len(port) > 5 {
+		return false
+	}
+	var portNum uint32
 	for _, r := range port {
 		if r < '0' || r > '9' {
 			return false
 		}
+		portNum = portNum*10 + uint32(r-'0')
+	}
+	// 端口 1..65535(旧实现只查纯数字,"host:0"/"host:99999" 放行)
+	if portNum == 0 || portNum > 65535 {
+		return false
 	}
 	return true
 }

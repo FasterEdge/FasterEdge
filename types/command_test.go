@@ -96,3 +96,33 @@ func TestComponentErrorsSupportIsAndAs(t *testing.T) {
 		t.Fatalf("components = %v, want sorted copy", gotTimeout.Components)
 	}
 }
+
+// panickingAuthenticator 的 AuthenticateCommand 直接 panic(测试鉴权 panic
+// 分支 %w 链——旧实现用 %v 嵌入 panicErr, errors.As 无法识别
+// ComponentPanicError, 鉴权后端崩溃被静默伪装成凭据错误)。
+type panickingAuthenticator struct{}
+
+func (panickingAuthenticator) AuthenticateCommand(_ context.Context, _ *Atom, _ any, _, _ string, _ any) (string, error) {
+	panic("auth boom")
+}
+
+func TestAuthenticatedCommandPanicPreservesComponentPanicError(t *testing.T) {
+	atom := &Atom{}
+	if err := atom.SetCommandAuthenticator(panickingAuthenticator{}); err != nil {
+		t.Fatal(err)
+	}
+	out := atom.AuthenticatedCommand("cred", "BaseAbility", "list", nil)
+	if out.Err == nil {
+		t.Fatal("should fail on authenticator panic")
+	}
+	if !errors.Is(out.Err, ErrAuthenticationFailed) {
+		t.Fatalf("err=%v not ErrAuthenticationFailed", out.Err)
+	}
+	var cpe *ComponentPanicError
+	if !errors.As(out.Err, &cpe) {
+		t.Fatalf("err=%v not ComponentPanicError (panic chain broken)", out.Err)
+	}
+	if cpe.Phase != "authenticate" || cpe.Name != "command authenticator" {
+		t.Fatalf("cpe=%+v", cpe)
+	}
+}

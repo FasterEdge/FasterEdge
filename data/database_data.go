@@ -130,7 +130,28 @@ func validateAddress(address string) error {
 	if err != nil || port == "" {
 		return types.ErrInvalidArguments
 	}
+	// 与 validateDatabaseHost 对齐: 拒绝反斜杠/空白(连接串畸形面——
+	// SplitHostPort 只按最后一个冒号切,"evil host:3306" 会解析出带空格的
+	// host 且不报错)。
+	if strings.ContainsAny(host, " \\") {
+		return types.ErrInvalidArguments
+	}
 	if ip := net.ParseIP(host); ip != nil && (ip.IsLoopback() || ip.IsUnspecified() || ip.IsMulticast()) {
+		return types.ErrInvalidArguments
+	}
+	// 端口必须为 1..65535 的纯数字(旧实现只交 SplitHostPort——
+	// "host:abc"/"host:0"/"host:99999" 均通过, 晚到 dial 才失败)。
+	if len(port) > 5 {
+		return types.ErrInvalidArguments
+	}
+	var portNum uint32
+	for _, r := range port {
+		if r < '0' || r > '9' {
+			return types.ErrInvalidArguments
+		}
+		portNum = portNum*10 + uint32(r-'0')
+	}
+	if portNum == 0 || portNum > 65535 {
 		return types.ErrInvalidArguments
 	}
 	return nil
@@ -202,8 +223,20 @@ func validateSQLiteConfig(config SQLiteConfig) error {
 		if config.Path != ":memory:" {
 			return types.ErrInvalidArguments
 		}
-	} else if filepath.Clean(config.Path) == "." {
-		return types.ErrInvalidArguments
+	} else {
+		clean := filepath.Clean(config.Path)
+		if clean == "." {
+			return types.ErrInvalidArguments
+		}
+		// 拒绝 ".." 段: ".."/"../x.db"/"a/../../x.db" 会读写配置目录之外
+		// 的任意 SQLite 文件(rwc 模式可覆写其他应用数据库)——穿越面。
+		// 绝对路径保留(用户配置目标, 与 Redis/Mongo host 同原则)。
+		rest := strings.TrimPrefix(clean, filepath.VolumeName(clean))
+		for _, seg := range strings.Split(rest, string(filepath.Separator)) {
+			if seg == ".." {
+				return types.ErrInvalidArguments
+			}
+		}
 	}
 	return nil
 }
@@ -226,6 +259,11 @@ func cloneRedisConfig(config RedisConfig) RedisConfig {
 
 func validateRedisConfig(config RedisConfig) error {
 	if len(config.Addresses) == 0 || len(config.Addresses) > 64 || config.DB < 0 || config.DialTimeout < 0 || config.ReadTimeout < 0 || config.WriteTimeout < 0 || config.PoolSize < 0 {
+		return types.ErrInvalidArguments
+	}
+	// Username 与 SQL 侧一致强制字符集/长度(旧实现零校验——CRLF/@/冒号
+	// 可改写 URI authority 或注入协议字节)。
+	if config.Username != "" && validateName(config.Username) != nil {
 		return types.ErrInvalidArguments
 	}
 	for _, address := range config.Addresses {
@@ -255,6 +293,16 @@ func cloneMongoDBConfig(config MongoDBConfig) MongoDBConfig {
 
 func validateMongoDBConfig(config MongoDBConfig) error {
 	if len(config.Hosts) == 0 || len(config.Hosts) > 64 || validateName(config.Database) != nil || config.ConnectTimeout < 0 || config.ServerSelectionTimeout < 0 {
+		return types.ErrInvalidArguments
+	}
+	// Username/AuthSource/ReplicaSet 非空时强制 validateName(同 Redis 修复)。
+	if config.Username != "" && validateName(config.Username) != nil {
+		return types.ErrInvalidArguments
+	}
+	if config.AuthSource != "" && validateName(config.AuthSource) != nil {
+		return types.ErrInvalidArguments
+	}
+	if config.ReplicaSet != "" && validateName(config.ReplicaSet) != nil {
 		return types.ErrInvalidArguments
 	}
 	for _, host := range config.Hosts {

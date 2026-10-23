@@ -3,6 +3,7 @@ package types
 import (
 	"context"
 	"errors"
+	"fmt"
 	"runtime/debug"
 	"sort"
 	"strings"
@@ -57,7 +58,28 @@ func dependencyOrder(items []namedComponent) ([]namedComponent, error) {
 		if !ok {
 			continue
 		}
-		decls := append([]Dependency(nil), provider.Dependencies()...)
+		// Dependencies 与 ListCommands 是仅有两个无框架级 panic 兜底的组件
+		// 回调——组件 panic 会让 dependencyOrder 冒泡, 且 MountAll 的
+		// transitioning 无 defer 复位, Atom 从此永久 ErrInvalidState 锁死。
+		var decls []Dependency
+		var panicked bool
+		var panicValue any
+		func() {
+			defer func() {
+				if v := recover(); v != nil {
+					panicked = true
+					panicValue = v
+				}
+			}()
+			decls = append([]Dependency(nil), provider.Dependencies()...)
+		}()
+		if panicked {
+			// 与 callCheck/callMount/unmount 一致: panic 转 ComponentPanicError
+			// (带 Value + Stack)而非折叠成 DependencyError——旧实现丢失 panic
+			// 信息, 且经 DependencyError.Error() 渲染成 "requires ... panicked"
+			// 的误导文案。
+			return nil, NewComponentPanicError(item.name, "dependencies", panicValue)
+		}
 		sort.Slice(decls, func(i, j int) bool {
 			if decls[i].Kind != decls[j].Kind {
 				return decls[i].Kind < decls[j].Kind
@@ -166,7 +188,7 @@ func (a *Atom) Reset() error {
 }
 
 // MountAll performs the pre-run lifecycle transaction.
-func (a *Atom) MountAll() error {
+func (a *Atom) MountAll() (err error) {
 	if a == nil {
 		return ErrNilAtom
 	}
@@ -176,6 +198,20 @@ func (a *Atom) MountAll() error {
 		return ErrInvalidAtomState
 	}
 	a.transitioning = true
+	// 双保险: dependencyOrder 内的 Dependencies() 已加 recover, 此处兜底
+	// 其余未覆盖的组件回调 panic——不复位 transitioning 会永久锁死 Atom;
+	// 同时把 panic 转成错误返回, 不得静默吞掉(旧实现 recover 后无返回值,
+	// 调用方误以为挂载成功, state 却停在 AtomCreated——伪成功)。
+	defer func() {
+		if v := recover(); v != nil {
+			a.mu.Lock()
+			a.transitioning = false
+			a.mounted = nil
+			a.mountedAbilities = nil
+			a.mu.Unlock()
+			err = fmt.Errorf("mount all: %v", v)
+		}
+	}()
 	items := make([]namedComponent, 0, len(a.data)+len(a.abilities))
 	for n, c := range a.data {
 		items = append(items, namedComponent{name: n, component: c, kind: componentData})
@@ -294,8 +330,11 @@ func callMount(item namedComponent, atom *Atom) (err error) {
 	return nil
 }
 
+// rollback 以逐组件超时逆序卸载已挂载组件(与 unmountWithTimeout 同纪律):
+// 旧实现用裸 context.Background() 无任何预算——任一 Unmount 挂死会让整个
+// 挂载事务(启动路径)永久阻塞, 且无恢复手段。
 func rollback(atom *Atom, mounted []namedComponent, cause error) error {
-	ctx := context.Background()
+	const perComponent = 3 * time.Second
 	var errs []error
 	errs = append(errs, cause)
 	for i := len(mounted) - 1; i >= 0; i-- {
@@ -304,19 +343,31 @@ func rollback(atom *Atom, mounted []namedComponent, cause error) error {
 		if !ok {
 			continue
 		}
-		callErr := atom.observe(m.name, "", PhaseRollback, func() (err error) {
-			defer func() {
-				if v := recover(); v != nil {
-					err = &ComponentPanicError{Name: m.name, Phase: "rollback", Value: v, Stack: debug.Stack()}
+		compCtx, compCancel := context.WithTimeout(context.Background(), perComponent)
+		result := make(chan error, 1)
+		go func() {
+			defer compCancel()
+			result <- atom.observe(m.name, "", PhaseRollback, func() (err error) {
+				defer func() {
+					if v := recover(); v != nil {
+						err = &ComponentPanicError{Name: m.name, Phase: "rollback", Value: v, Stack: debug.Stack()}
+					}
+				}()
+				if err = u.Unmount(compCtx, atom); err != nil {
+					return &ComponentError{Name: m.name, Phase: "rollback", Err: err}
 				}
-			}()
-			if err = u.Unmount(ctx, atom); err != nil {
-				return &ComponentError{Name: m.name, Phase: "rollback", Err: err}
+				return nil
+			})
+		}()
+		select {
+		case err := <-result:
+			if err != nil {
+				errs = append(errs, err)
 			}
-			return nil
-		})
-		if callErr != nil {
-			errs = append(errs, callErr)
+		case <-compCtx.Done():
+			// 仅记录该组件超时并继续卸载剩余组件(goroutine 随 compCtx
+			// 取消自行收敛; 缓冲 chan 保证发送侧不阻塞)。
+			errs = append(errs, &ShutdownTimeoutError{Timeout: perComponent, Phase: "rollback", Components: []string{m.name}})
 		}
 	}
 	return errors.Join(errs...)
@@ -428,7 +479,12 @@ func (a *Atom) RunAll(ctx context.Context, shutdown time.Duration) error {
 			case res := <-results:
 				delete(pending, res.name)
 				if res.err != nil && !canceled {
-					if !errors.Is(res.err, context.Canceled) && !errors.Is(res.err, context.DeadlineExceeded) {
+					// 仅 context.Canceled 视为良性退出信号(被 cancel 的
+					// runner 正常返回); DeadlineExceeded 只能源于 runner
+					// 自身内部 deadline(child ctx 无 deadline, 父 ctx 过期
+					// 由 L420 分支捕获)——旧实现把它一并排除, 导致单
+					// runner 返回 DeadlineExceeded 时 RunAll 返回 nil 伪成功。
+					if !errors.Is(res.err, context.Canceled) {
 						runErr = res.err
 					}
 					cancel()
@@ -513,8 +569,6 @@ func safeRun(r Runner, ctx context.Context, atom *Atom, name string) (err error)
 }
 
 func (a *Atom) unmountWithTimeout(base context.Context, mounted []namedComponent, timeout time.Duration) error {
-	ctx, cancel := context.WithTimeout(base, timeout)
-	defer cancel()
 	var errs []error
 	for i := len(mounted) - 1; i >= 0; i-- {
 		m := mounted[i]
@@ -522,15 +576,21 @@ func (a *Atom) unmountWithTimeout(base context.Context, mounted []namedComponent
 		if !ok {
 			continue
 		}
+		// 每个组件独立的卸载预算: 旧实现共享一个 WithTimeout(base),
+		// 单个挂死组件(或已取消的 base ctx)会立即命中 Done 并 return,
+		// 中止整条逆序卸载链——其余组件(如 Modbus/Serial 的 Close)永不
+		// 执行, 且 UnmountAll 随即清空 mounted 置 AtomFailed, 无重试路径。
+		compCtx, compCancel := context.WithTimeout(base, timeout)
 		result := make(chan error, 1)
 		go func() {
+			defer compCancel()
 			result <- a.observe(m.name, "", PhaseUnmount, func() (err error) {
 				defer func() {
 					if v := recover(); v != nil {
 						err = NewComponentPanicError(m.name, "unmount", v)
 					}
 				}()
-				if err = u.Unmount(ctx, a); err != nil {
+				if err = u.Unmount(compCtx, a); err != nil {
 					return &ComponentError{Name: m.name, Phase: "unmount", Err: err}
 				}
 				return nil
@@ -541,8 +601,10 @@ func (a *Atom) unmountWithTimeout(base context.Context, mounted []namedComponent
 			if err != nil {
 				errs = append(errs, err)
 			}
-		case <-ctx.Done():
-			return errors.Join(append(errs, &ShutdownTimeoutError{Timeout: timeout, Phase: "unmount", Components: []string{m.name}})...)
+		case <-compCtx.Done():
+			// 仅记录该组件超时并继续卸载剩余组件(goroutine 随 compCtx
+			// 取消自行收敛; 缓冲 chan 保证发送侧不阻塞)。
+			errs = append(errs, &ShutdownTimeoutError{Timeout: timeout, Phase: "unmount", Components: []string{m.name}})
 		}
 	}
 	return errors.Join(errs...)

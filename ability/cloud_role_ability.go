@@ -3,6 +3,9 @@ package ability
 
 import (
 	"fmt"
+	"net"
+	"net/netip"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -31,6 +34,14 @@ const (
 	CloudRoleStatusHealthy  CloudRoleStatus = "healthy"
 	CloudRoleStatusDegraded CloudRoleStatus = "degraded"
 	CloudRoleStatusOffline  CloudRoleStatus = "offline"
+)
+
+// 服务注册的资源上限(防持令牌对端无界灌入 map/字符串导致 OOM)。
+const (
+	cloudMaxServiceNameLen     = 128
+	cloudMaxServiceVersionLen  = 64
+	cloudMaxServiceEndpointLen = 512
+	cloudMaxServiceCount       = 512
 )
 
 // CloudRoleService 描述本云端节点对外提供的服务。
@@ -163,16 +174,28 @@ func (c *CloudRoleAbility) Command(atom *types.Atom, act string, args any) types
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
 		}
 		name := strings.TrimSpace(typed.Name)
-		if name == "" || strings.TrimSpace(typed.Name) != typed.Name {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
+		if name == "" || len(name) > cloudMaxServiceNameLen ||
+			strings.TrimSpace(typed.Name) != typed.Name {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: service name must be 1-%d chars: %w", act, cloudMaxServiceNameLen, types.ErrInvalidArguments)}
+		}
+		version := strings.TrimSpace(typed.Version)
+		endpoint := strings.TrimSpace(typed.Endpoint)
+		// 与 edge 能力条目一致设硬上限: 旧实现无界增长, 持令牌对端可灌入
+		// 任意大字符串/无限条目导致 OOM。
+		if len(version) > cloudMaxServiceVersionLen || len(endpoint) > cloudMaxServiceEndpointLen {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: service version/endpoint too long: %w", act, types.ErrInvalidArguments)}
 		}
 		svc := CloudRoleService{
 			Name:      name,
-			Version:   strings.TrimSpace(typed.Version),
-			Endpoint:  strings.TrimSpace(typed.Endpoint),
+			Version:   version,
+			Endpoint:  endpoint,
 			UpdatedAt: time.Now(),
 		}
 		c.mu.Lock()
+		if _, exists := c.services[name]; !exists && len(c.services) >= cloudMaxServiceCount {
+			c.mu.Unlock()
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: service limit %d reached: %w", act, cloudMaxServiceCount, types.ErrInvalidArguments)}
+		}
 		c.services[name] = svc
 		c.mu.Unlock()
 		return types.CommandOutput{Name: act, Value: svc}
@@ -282,33 +305,29 @@ func normalizeStatus(s CloudRoleStatus) CloudRoleStatus {
 	return CloudRoleStatusUnknown
 }
 
-// isAcceptableControllerURL 限制 controller 必须是 http(s)://host[:port][/path] 形式,拒绝本地回环、私网、链路本地。
-// 这与 TimeAbility 的网络策略一致,降低 SSRF 风险。
+// isAcceptableControllerURL 限制 controller 必须是 http(s)://host[:port][/path] 形式,
+// 拒绝本地回环、私网、链路本地(与 TimeAbility 网络策略一致, 降低 SSRF 风险)。
+// 旧实现仅与 4 个字面量比较, 私网/链路本地/IPv4-mapped IPv6(userinfo 手法)
+// 全部可绕过, 与注释宣称的策略完全不符。
 func isAcceptableControllerURL(u string) bool {
 	lower := strings.ToLower(u)
 	if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
 		return false
 	}
-	rest := u
-	if i := strings.Index(lower, "://"); i >= 0 {
-		rest = u[i+3:]
-	}
-	host := rest
-	if i := strings.IndexAny(rest, "/?#"); i >= 0 {
-		host = rest[:i]
-	}
-	if i := strings.LastIndex(host, ":"); i >= 0 {
-		host = host[:i]
-	}
-	if host == "" {
+	parsed, err := url.Parse(u)
+	if err != nil || parsed.Hostname() == "" || parsed.User != nil {
 		return false
 	}
-	// IPv6 字面量带方括号, 先剥掉再比较回环 (如 http://[::1]:8080)
-	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") && len(host) >= 2 {
-		host = host[1 : len(host)-1]
+	host := parsed.Hostname()
+	// IP 字面量: netip 规范化(IPv4-mapped IPv6)后复用 addressPolicy.validateIP
+	// 拒绝回环/私网/链路本地/组播/未指定/CGNAT/特殊用段。
+	if addr, aerr := netip.ParseAddr(host); aerr == nil {
+		addr = addr.Unmap()
+		ip := net.IP(addr.AsSlice())
+		return (addressPolicy{allowPrivate: false}).validateIP(ip) == nil
 	}
-	if host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "0.0.0.0" {
-		return false
-	}
-	return true
+	// 主机名字面回环别名拒绝。其余主机名不在存储期解析: DNS rebinding 的 TOCTOU
+	// 使存储期解析价值有限, 且会拒绝对离线/内网域名; 真正拨号时应像
+	// TimeAbility 的 addressPolicy.dialContext 那样对解析结果二次校验。
+	return strings.TrimSuffix(strings.ToLower(host), ".") != "localhost"
 }

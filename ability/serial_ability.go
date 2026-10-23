@@ -2,6 +2,8 @@
 package ability
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -61,12 +63,14 @@ type SerialSetConfigArgs struct {
 }
 
 // SerialTransport 抽象出真实串口字节流收发。
-// Open 打开并按配置初始化,Close 释放资源,Write/Read 完成字节流读写。
+// Open 打开并按配置初始化,Close 释放资源,Write/Read 完成字节流读写,
+// ApplyConfig 把新配置下发到已打开的端口(参数变更真正生效)。
 type SerialTransport interface {
 	Open(port string, cfg SerialConfig) error
 	Close(port string) error
 	Write(port string, data []byte) (int, error)
 	Read(port string, length int, timeout time.Duration) ([]byte, error)
+	ApplyConfig(port string, cfg SerialConfig) error
 }
 
 // SerialPortLister 抽象出列举可用串口设备(默认实现枚举 /dev/tty* 等)。
@@ -80,7 +84,15 @@ type SerialAbility struct {
 	openPorts map[string]SerialConfig
 	transport SerialTransport
 	lister    SerialPortLister
+	closing   bool // Unmount 置位后拒绝 open/set_config/close
 }
+
+const (
+	// maxSerialReadBytes 是 read 命令单次读取的字节上限(对齐 CmdAbility
+	// 1MiB 输出上限): 旧实现 Length 无上限, 真实 transport 按 length 分配
+	// 缓冲时, 已认证对端可传 Length=MaxInt 造成内存 DoS。
+	maxSerialReadBytes = 1 << 20
+)
 
 func NewSerialAbility() *SerialAbility {
 	return &SerialAbility{openPorts: make(map[string]SerialConfig)}
@@ -121,6 +133,36 @@ func (s *SerialAbility) Mount(atom *types.Atom) error {
 	return s.Check(atom)
 }
 
+// Unmount 关闭所有已打开端口并清空记录, 防止 atom 拆除/回滚时串口 fd 泄漏
+// (旧实现未实现 Unmounter, 框架永不调用 Close)。closing 标志在快照前置位,
+// 此后并发 open 被拒绝, 保证快照覆盖全部端口——旧实现快照后锁外 Close
+// 期间新 open 写入的端口既不被 Close 也不被 delete, fd 永久泄漏。
+func (s *SerialAbility) Unmount(ctx context.Context, atom *types.Atom) error {
+	s.mu.Lock()
+	s.closing = true
+	ports := make([]string, 0, len(s.openPorts))
+	for p := range s.openPorts {
+		ports = append(ports, p)
+	}
+	transport := s.transport
+	s.mu.Unlock()
+	var errs []error
+	for _, p := range ports {
+		if transport != nil {
+			if err := transport.Close(p); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		s.mu.Lock()
+		delete(s.openPorts, p)
+		s.mu.Unlock()
+	}
+	return errors.Join(errs...)
+}
+
+// Compile-time guarantee that SerialAbility satisfies Unmounter.
+var _ types.Unmounter = (*SerialAbility)(nil)
+
 func (s *SerialAbility) Command(atom *types.Atom, act string, args any) types.CommandOutput {
 	if err := s.Check(atom); err != nil {
 		return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, err)}
@@ -140,14 +182,29 @@ func (s *SerialAbility) Command(atom *types.Atom, act string, args any) types.Co
 		}
 		s.mu.Lock()
 		transport := s.transport
+		closing := s.closing
+		_, alreadyOpen := s.openPorts[port]
 		s.mu.Unlock()
+		if closing {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: ability is closing: %w", act, types.ErrInvalidArguments)}
+		}
+		if alreadyOpen {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: port %q already open: %w", act, port, types.ErrInvalidArguments)}
+		}
 		if transport == nil {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: no transport set: %w", act, types.ErrInvalidArguments)}
 		}
 		if err := transport.Open(port, typed.Config); err != nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: open: %w: %v", act, types.ErrInvalidArguments, err)}
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: open: %w: %w", act, types.ErrOperationFailed, err)}
 		}
 		s.mu.Lock()
+		// 双开防护: 两个并发 open 同端口时 transport.Open 可双双成功,
+		// 但 map 只留一份——后到者回滚关闭自身连接, 防首个 fd 无人管理。
+		if _, dup := s.openPorts[port]; dup || s.closing {
+			s.mu.Unlock()
+			_ = transport.Close(port)
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: port %q already open or closing: %w", act, port, types.ErrInvalidArguments)}
+		}
 		s.openPorts[port] = typed.Config
 		s.mu.Unlock()
 		return types.CommandOutput{Name: act, Value: port}
@@ -160,18 +217,28 @@ func (s *SerialAbility) Command(atom *types.Atom, act string, args any) types.Co
 		s.mu.Lock()
 		transport := s.transport
 		_, open := s.openPorts[port]
-		s.mu.Unlock()
+		closing := s.closing
 		if !open {
+			s.mu.Unlock()
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: port %q not open: %w", act, port, types.ErrInvalidArguments)}
 		}
-		if transport != nil {
-			if err := transport.Close(port); err != nil {
-				return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: close: %w: %v", act, types.ErrInvalidArguments, err)}
-			}
+		if closing {
+			s.mu.Unlock()
+			// Unmount 已接管清理, 拒绝并发 close(避免与 Unmount 的
+			// 快照后 Close 竞态)。
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: ability is closing: %w", act, types.ErrInvalidArguments)}
 		}
-		s.mu.Lock()
+		// 锁内先删除记录再锁外 Close: 保证同一端口在能力内只被 Close 一次
+		// ——Unmount 的快照(锁内置 closing 后)不再包含本端口, 命令侧 Close
+		// 与 Unmount 不会并发双 Close(旧实现先放锁再 Close, Unmount 可夹在
+		// 中间对同一端口双 Close, 串口驱动行为未定义)。
 		delete(s.openPorts, port)
 		s.mu.Unlock()
+		if transport != nil {
+			if err := transport.Close(port); err != nil {
+				return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: close: %w: %w", act, types.ErrOperationFailed, err)}
+			}
+		}
 		return types.CommandOutput{Name: act, Value: port}
 	case SerialCommandIsOpen:
 		typed, ok := args.(SerialPortArg)
@@ -207,7 +274,7 @@ func (s *SerialAbility) Command(atom *types.Atom, act string, args any) types.Co
 		}
 		n, err := transport.Write(port, data)
 		if err != nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: write: %w: %v", act, types.ErrInvalidArguments, err)}
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: write: %w: %w", act, types.ErrOperationFailed, err)}
 		}
 		return types.CommandOutput{Name: act, Value: n}
 	case SerialCommandRead:
@@ -217,6 +284,9 @@ func (s *SerialAbility) Command(atom *types.Atom, act string, args any) types.Co
 		}
 		if typed.Length <= 0 {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: length must be positive: %w", act, types.ErrInvalidArguments)}
+		}
+		if typed.Length > maxSerialReadBytes {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: length exceeds max %d: %w", act, maxSerialReadBytes, types.ErrInvalidArguments)}
 		}
 		if typed.Timeout < 0 {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: timeout must be non-negative: %w", act, types.ErrInvalidArguments)}
@@ -237,7 +307,7 @@ func (s *SerialAbility) Command(atom *types.Atom, act string, args any) types.Co
 		}
 		buf, err := transport.Read(port, typed.Length, typed.Timeout)
 		if err != nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: read: %w: %v", act, types.ErrInvalidArguments, err)}
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: read: %w: %w", act, types.ErrOperationFailed, err)}
 		}
 		return types.CommandOutput{Name: act, Value: buf}
 	case SerialCommandSetConfig:
@@ -251,13 +321,32 @@ func (s *SerialAbility) Command(atom *types.Atom, act string, args any) types.Co
 		}
 		s.mu.Lock()
 		_, open := s.openPorts[port]
-		if open {
-			s.openPorts[port] = typed.Config
-		}
+		transport := s.transport
+		closing := s.closing
 		s.mu.Unlock()
 		if !open {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: port %q not open: %w", act, port, types.ErrInvalidArguments)}
 		}
+		if closing {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: ability is closing: %w", act, types.ErrInvalidArguments)}
+		}
+		// 配置必须真正下发到 transport, 否则新波特率等参数静默失效
+		// (旧实现只更新本地记录, 硬件仍按旧配置运行)。
+		if transport != nil {
+			if err := transport.ApplyConfig(port, typed.Config); err != nil {
+				return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: apply config: %w: %w", act, types.ErrOperationFailed, err)}
+			}
+		}
+		s.mu.Lock()
+		// 复查端口仍打开且未 closing: 旧实现 ApplyConfig(锁外)后直接回写——
+		// 并发 Unmount 关端口后会把已关闭端口重新登记进 openPorts, 陈旧条目
+		// 导致后续 write 全部失败、端口记录泄漏。
+		if _, stillOpen := s.openPorts[port]; !stillOpen || s.closing {
+			s.mu.Unlock()
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: port %q closed while applying config: %w", act, port, types.ErrOperationFailed)}
+		}
+		s.openPorts[port] = typed.Config
+		s.mu.Unlock()
 		return types.CommandOutput{Name: act, Value: typed.Config}
 	case SerialCommandGetConfig:
 		typed, ok := args.(SerialPortArg)
@@ -284,7 +373,7 @@ func (s *SerialAbility) Command(atom *types.Atom, act string, args any) types.Co
 		}
 		ports, err := lister.ListPorts()
 		if err != nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: list: %w: %v", act, types.ErrInvalidArguments, err)}
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: list: %w: %w", act, types.ErrOperationFailed, err)}
 		}
 		return types.CommandOutput{Name: act, Value: ports}
 	}

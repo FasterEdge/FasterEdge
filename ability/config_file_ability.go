@@ -8,6 +8,7 @@ package ability
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,6 +24,10 @@ const (
 	ConfigFileCommandSetPath = "set_path"
 	ConfigFileCommandGetPath = "get_path"
 	ConfigFileCommandExists  = "exists"
+
+	// configFileMaxBytes 是 load 读取的配置文件大小上限,防 /dev/zero 等
+	// 无限流设备导致挂死/内存耗尽。
+	configFileMaxBytes = 1 << 20
 )
 
 // ConfigFileLoadArgs 是 load 命令的参数。
@@ -43,12 +48,80 @@ type ConfigFilePathArg struct {
 }
 
 // ConfigFileAbility 在 ConfigData 之上提供 JSON 配置文件的加载与保存。
+// 所有 load/save/exists/set_path 路径都被约束在 root 目录内, 防止任意文件
+// 读写(旧实现接受任意路径: load 可读任意 JSON 配置文件、save 可覆盖任意
+// 进程可写文件——能力超出"配置文件管理"语义且可绕过 CmdAbility 的 allowlist 控制)。
 type ConfigFileAbility struct {
 	mu   sync.RWMutex
 	path string
+	root string
 }
 
 func NewConfigFileAbility() *ConfigFileAbility { return &ConfigFileAbility{} }
+
+// SetRoot 设置配置文件的允许根目录(必须在 Mount 前调用);
+// 未设置时 Mount 默认使用当前工作目录。
+func (a *ConfigFileAbility) SetRoot(dir string) {
+	a.mu.Lock()
+	a.root = filepath.Clean(dir)
+	a.mu.Unlock()
+}
+
+// confine 把用户输入的路径解析到 root 内并拒绝逃逸。
+// 相对路径基于 root 解析; 绝对路径直接使用但必须位于 root 内
+// (Windows 盘符/POSIX 根路径不参与 Join, 避免 Join 把盘符当普通段)。
+// root 未配置时回退到当前工作目录(与 Mount 默认一致)。
+func (a *ConfigFileAbility) confine(p string) (string, error) {
+	a.mu.RLock()
+	root := a.root
+	a.mu.RUnlock()
+	if root == "" {
+		if wd, err := os.Getwd(); err == nil {
+			root = wd
+		} else {
+			root = "."
+		}
+	}
+	clean := filepath.Clean(p)
+	var joined string
+	if filepath.IsAbs(clean) {
+		joined = clean
+	} else {
+		joined = filepath.Join(root, clean)
+	}
+	rel, err := filepath.Rel(root, joined)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("path %q escapes root %q: %w", p, root, types.ErrInvalidArguments)
+	}
+	// 词法 confine 不防符号链接: root 内 planted symlink 指向 root 外时,
+	// os.Open/os.WriteFile/os.Stat 跟随链接读写 root 之外的文件(load 读
+	// 任意文件, save(Overwrite=true) 截断/覆写任意进程可写文件)——逐组件
+	// Lstat 拒绝链接(root 本身不查——它是用户显式配置的基目录)。
+	if err := rejectSymlinkComponents(root, joined); err != nil {
+		return "", fmt.Errorf("path %q rejected: %v: %w", p, err, types.ErrInvalidArguments)
+	}
+	return joined, nil
+}
+
+// rejectSymlinkComponents 检查 joined(root 内) 的每个路径组件(不含 root
+// 本身)是否为符号链接。
+func rejectSymlinkComponents(root, joined string) error {
+	rel, err := filepath.Rel(root, joined)
+	if err != nil {
+		return err
+	}
+	if rel == "." {
+		return nil
+	}
+	cur := root
+	for _, seg := range strings.Split(rel, string(os.PathSeparator)) {
+		cur = filepath.Join(cur, seg)
+		if li, lerr := os.Lstat(cur); lerr == nil && li.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("path component %q is a symlink", cur)
+		}
+	}
+	return nil
+}
 
 func (a *ConfigFileAbility) GetName() string { return "ConfigFileAbility" }
 func (a *ConfigFileAbility) Dependencies() []types.Dependency {
@@ -72,7 +145,21 @@ func (a *ConfigFileAbility) Check(atom *types.Atom) error {
 	return nil
 }
 
-func (a *ConfigFileAbility) Mount(atom *types.Atom) error { return a.Check(atom) }
+func (a *ConfigFileAbility) Mount(atom *types.Atom) error {
+	if err := a.Check(atom); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	if a.root == "" {
+		if wd, err := os.Getwd(); err == nil {
+			a.root = wd
+		} else {
+			a.root = "."
+		}
+	}
+	a.mu.Unlock()
+	return nil
+}
 
 func (a *ConfigFileAbility) Command(atom *types.Atom, act string, args any) types.CommandOutput {
 	if err := a.Check(atom); err != nil {
@@ -89,7 +176,10 @@ func (a *ConfigFileAbility) Command(atom *types.Atom, act string, args any) type
 		if !ok || strings.TrimSpace(typed.Path) == "" {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
 		}
-		cleaned := filepath.Clean(strings.TrimSpace(typed.Path))
+		cleaned, err := a.confine(typed.Path)
+		if err != nil {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %v", act, types.ErrInvalidArguments, err)}
+		}
 		a.mu.Lock()
 		a.path = cleaned
 		a.mu.Unlock()
@@ -106,7 +196,11 @@ func (a *ConfigFileAbility) Command(atom *types.Atom, act string, args any) type
 		if !ok || strings.TrimSpace(typed.Path) == "" {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
 		}
-		if _, err := os.Stat(filepath.Clean(typed.Path)); err != nil {
+		cleaned, err := a.confine(typed.Path)
+		if err != nil {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %v", act, types.ErrInvalidArguments, err)}
+		}
+		if _, err := os.Stat(cleaned); err != nil {
 			return types.CommandOutput{Name: act, Value: false}
 		}
 		return types.CommandOutput{Name: act, Value: true}
@@ -118,13 +212,25 @@ func (a *ConfigFileAbility) Command(atom *types.Atom, act string, args any) type
 		if strings.TrimSpace(typed.Path) == "" {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: empty path: %w", act, types.ErrInvalidArguments)}
 		}
-		cleaned := filepath.Clean(typed.Path)
-		raw, err := os.ReadFile(cleaned)
+		cleaned, err := a.confine(typed.Path)
+		if err != nil {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %v", act, types.ErrInvalidArguments, err)}
+		}
+		f, err := os.Open(cleaned)
 		if err != nil {
 			if typed.Strict {
-				return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: read %s: %w: %v", act, cleaned, types.ErrInvalidArguments, err)}
+				// 文件 I/O 运行期失败(含 ErrNotExist)是操作失败——双 %w 链底层
+				return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: read %s: %w: %w", act, cleaned, types.ErrOperationFailed, err)}
 			}
 			return types.CommandOutput{Name: act, Value: cfg.Snapshot()}
+		}
+		defer f.Close()
+		raw, err := io.ReadAll(io.LimitReader(f, configFileMaxBytes+1))
+		if err != nil {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: read %s: %w: %w", act, cleaned, types.ErrOperationFailed, err)}
+		}
+		if len(raw) > configFileMaxBytes {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: file %s exceeds %d bytes: %w", act, cleaned, configFileMaxBytes, types.ErrOperationFailed)}
 		}
 		parsed, perr := parseFlatJSON(raw)
 		if perr != nil {
@@ -133,7 +239,12 @@ func (a *ConfigFileAbility) Command(atom *types.Atom, act string, args any) type
 			}
 			return types.CommandOutput{Name: act, Value: cfg.Snapshot()}
 		}
-		cfg.ReplaceAll(parsed)
+		if err := cfg.ReplaceAll(parsed); err != nil {
+			if typed.Strict {
+				return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: apply %s: %w: %v", act, cleaned, types.ErrInvalidArguments, err)}
+			}
+			return types.CommandOutput{Name: act, Value: cfg.Snapshot()}
+		}
 		a.mu.Lock()
 		a.path = cleaned
 		a.mu.Unlock()
@@ -152,7 +263,10 @@ func (a *ConfigFileAbility) Command(atom *types.Atom, act string, args any) type
 		if path == "" {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: no path set: %w", act, types.ErrInvalidArguments)}
 		}
-		cleaned := filepath.Clean(path)
+		cleaned, err := a.confine(path)
+		if err != nil {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w: %v", act, types.ErrInvalidArguments, err)}
+		}
 		if !typed.Overwrite {
 			if _, err := os.Stat(cleaned); err == nil {
 				return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: file exists, pass Overwrite=true: %w", act, types.ErrInvalidArguments)}
@@ -160,13 +274,13 @@ func (a *ConfigFileAbility) Command(atom *types.Atom, act string, args any) type
 		}
 		payload, err := cfg.JSONMarshal()
 		if err != nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: marshal: %w: %v", act, types.ErrInvalidArguments, err)}
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: marshal: %w: %w", act, types.ErrOperationFailed, err)}
 		}
 		if err := os.MkdirAll(filepath.Dir(cleaned), 0o755); err != nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: mkdir: %w: %v", act, types.ErrInvalidArguments, err)}
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: mkdir: %w: %w", act, types.ErrOperationFailed, err)}
 		}
 		if err := os.WriteFile(cleaned, payload, 0o644); err != nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: write: %w: %v", act, types.ErrInvalidArguments, err)}
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: write: %w: %w", act, types.ErrOperationFailed, err)}
 		}
 		a.mu.Lock()
 		a.path = cleaned

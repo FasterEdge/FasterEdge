@@ -20,6 +20,11 @@ const (
 	TimeCommandLastSync     = "last"
 	TimeCommandGetTime      = "get_time"
 	TimeCommandConfigureRun = "configure_run"
+
+	// maxTimeSyncConcurrency 是网络对时(sync_net/sync_ntp)的并发上限,
+	// 每次同步新建 Transport/Dialer, 无上限可耗尽 FD/goroutine(对照
+	// CmdAbility 并发 16 基线; 时间同步为低频操作, 4 足够)。
+	maxTimeSyncConcurrency = 4
 )
 
 type TimeSyncNetworkArgs struct{ URL string }
@@ -56,16 +61,19 @@ type TimeAbility struct {
 	networkPolicy     addressPolicy
 	httpTimeout       time.Duration
 	ntpTimeout        time.Duration
+	maxSyncOffset     time.Duration // >0 时网络对时源偏差超限拒绝; 0=不限制
 	maxResponseBytes  int64
 	minimumTick       time.Duration
 	defaultNetworkURL string
 	defaultNTPServer  string
 	ntpQuery          ntpQuerier
+	sem               chan struct{} // 网络对时并发信号量(懒初始化于 ensureDefaults)
 }
 
 type timeAbilityConfig struct {
 	allowPrivate                        bool
 	httpTimeout, ntpTimeout             time.Duration
+	maxSyncOffset                       time.Duration
 	maxResponseBytes                    int64
 	minimumTick                         time.Duration
 	defaultNetworkURL, defaultNTPServer string
@@ -90,6 +98,23 @@ func WithNTPTimeout(v time.Duration) TimeOption {
 			return types.ErrInvalidArguments
 		}
 		c.ntpTimeout = v
+		return nil
+	}
+}
+
+// WithMaxSyncOffset 设置网络对时(NTP/HTTP)的偏差合理性上限: 源时间与本地
+// 时钟偏差超过该值即拒绝。默认 48h(兼容 RTC 失效的大步进); 传 0 显式关闭
+// 限制(内部用 -1 哨兵与"未设置"区分, 避免被 ensureDefaults 覆盖)。
+func WithMaxSyncOffset(v time.Duration) TimeOption {
+	return func(c *timeAbilityConfig) error {
+		if v < 0 {
+			return types.ErrInvalidArguments
+		}
+		if v == 0 {
+			c.maxSyncOffset = -1
+			return nil
+		}
+		c.maxSyncOffset = v
 		return nil
 	}
 }
@@ -121,7 +146,7 @@ func NewTimeAbility(options ...TimeOption) (*TimeAbility, error) {
 			return nil, fmt.Errorf("%w", err)
 		}
 	}
-	return &TimeAbility{httpTimeout: c.httpTimeout, ntpTimeout: c.ntpTimeout, maxResponseBytes: c.maxResponseBytes, minimumTick: c.minimumTick, defaultNetworkURL: c.defaultNetworkURL, defaultNTPServer: c.defaultNTPServer, networkPolicy: addressPolicy{allowPrivate: c.allowPrivate}}, nil
+	return &TimeAbility{httpTimeout: c.httpTimeout, ntpTimeout: c.ntpTimeout, maxSyncOffset: c.maxSyncOffset, maxResponseBytes: c.maxResponseBytes, minimumTick: c.minimumTick, defaultNetworkURL: c.defaultNetworkURL, defaultNTPServer: c.defaultNTPServer, networkPolicy: addressPolicy{allowPrivate: c.allowPrivate}}, nil
 }
 
 var _ types.Ability = (*TimeAbility)(nil)
@@ -145,6 +170,10 @@ func (t *TimeAbility) ensureDefaults() {
 		if t.ntpTimeout == 0 {
 			t.ntpTimeout = 5 * time.Second
 		}
+		if t.maxSyncOffset == 0 {
+			// 默认 48h: 兼容 RTC 失效大步进, 同时拒绝注入任意偏差的可信外源
+			t.maxSyncOffset = 48 * time.Hour
+		}
 		if t.maxResponseBytes == 0 {
 			t.maxResponseBytes = 64 << 10
 		}
@@ -159,6 +188,9 @@ func (t *TimeAbility) ensureDefaults() {
 		}
 		if t.ntpQuery == nil {
 			t.ntpQuery = ntpQueryAdapter{}
+		}
+		if t.sem == nil {
+			t.sem = make(chan struct{}, maxTimeSyncConcurrency)
 		}
 	})
 }
@@ -213,10 +245,17 @@ func (t *TimeAbility) Command(atom *types.Atom, act string, args any) types.Comm
 		if a.URL == "" {
 			a.URL = t.defaultNetworkURL
 		}
+		if !t.acquireSyncSlot() {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: too many concurrent network syncs: %w", act, types.ErrInvalidArguments)}
+		}
+		defer t.releaseSyncSlot()
 		ctx, cancel := context.WithTimeout(context.Background(), t.httpTimeout)
 		defer cancel()
 		ts, err := t.fetchNetworkTime(ctx, a.URL)
 		if err != nil {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, err)}
+		}
+		if err := t.checkSyncOffset(ts); err != nil {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, err)}
 		}
 		t.setSync(ts, "net:"+a.URL)
@@ -233,8 +272,15 @@ func (t *TimeAbility) Command(atom *types.Atom, act string, args any) types.Comm
 		if a.Address == "" {
 			a.Address = t.defaultNTPServer
 		}
+		if !t.acquireSyncSlot() {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: too many concurrent network syncs: %w", act, types.ErrInvalidArguments)}
+		}
+		defer t.releaseSyncSlot()
 		ts, err := t.fetchNTPTime(a.Address)
 		if err != nil {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, err)}
+		}
+		if err := t.checkSyncOffset(ts); err != nil {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, err)}
 		}
 		t.setSync(ts, "ntp:"+a.Address)
@@ -285,8 +331,10 @@ func (t *TimeAbility) Command(atom *types.Atom, act string, args any) types.Comm
 }
 
 func (t *TimeAbility) setSync(ts time.Time, source string) {
-	mono := t.clock.Monotonic()
 	t.mu.Lock()
+	// 单调时钟读取移入锁内: 锁外读与并发 setSync 构成"旧对时覆盖新对时"
+	// 的逻辑竞态, 并使 currentTime 偶发 "monotonic clock moved backwards"。
+	mono := t.clock.Monotonic()
 	t.lastSynced = ts
 	t.baseMono = mono
 	t.lastSource = source
@@ -299,20 +347,57 @@ func (t *TimeAbility) ensureSynced() {
 	if ok {
 		return
 	}
-	ts := t.clock.Now()
-	mono := t.clock.Monotonic()
 	t.mu.Lock()
 	if t.lastSynced.IsZero() {
+		ts := t.clock.Now()
+		mono := t.clock.Monotonic()
 		t.lastSynced = ts
 		t.baseMono = mono
 		t.lastSource = "system"
 	}
 	t.mu.Unlock()
 }
+
+// acquireSyncSlot/releaseSyncSlot 实现网络对时并发信号量(非阻塞)。
+func (t *TimeAbility) acquireSyncSlot() bool {
+	t.ensureDefaults()
+	select {
+	case t.sem <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+func (t *TimeAbility) releaseSyncSlot() { <-t.sem }
+
+// checkSyncOffset 校验网络对时源返回时间与本地时钟的偏差不超过 maxSyncOffset
+// (>0 时)。旧实现三时间源均可注入任意偏差(如伪造 HTTP 响应或恶意 NTP
+// 服务器返回 2030 年的时间); NTP resp.Validate() 只校验服务器内部一致性,
+// 不限制 |ClockOffset|。
+func (t *TimeAbility) checkSyncOffset(ts time.Time) error {
+	t.mu.RLock()
+	limit := t.maxSyncOffset
+	t.mu.RUnlock()
+	if limit <= 0 {
+		return nil
+	}
+	now := t.clock.Now()
+	off := ts.Sub(now)
+	if off < 0 {
+		off = -off
+	}
+	if off > limit {
+		return fmt.Errorf("time source offset %s exceeds max %s: %w", off.Round(time.Second), limit, types.ErrInvalidArguments)
+	}
+	return nil
+}
 func (t *TimeAbility) currentTime() (time.Time, string, error) {
-	mono := t.clock.Monotonic()
 	t.mu.RLock()
 	defer t.mu.RUnlock()
+	// mono 读必须在锁内: 旧实现在 RLock 之前读, 与并发 setSync(锁内更新
+	// baseMono)交错时 elapsed<0, get_time 偶发报错 "monotonic clock moved
+	// backwards"(与 setSync 的对称位置修复一致)。
+	mono := t.clock.Monotonic()
 	if t.lastSynced.IsZero() {
 		return time.Time{}, "", types.ErrInvalidArguments
 	}
@@ -373,13 +458,16 @@ var ErrTimeNotSynced = errors.New("time ability has not been synced")
 // unconfigured monotonic mode is 1 second so the supervision loop does not
 // burn CPU when the user never called configure_run.
 func (t *TimeAbility) Run(ctx context.Context, _ *types.Atom) error {
+	// ensureDefaults 必须先于 interval 检查: 零配置(init.go 注册后直接
+	// RunAll)的 interval 为 0, 旧顺序会先拒绝——与注释"默认 1s"矛盾,
+	// 且未配置实例 RunAll 会拖垮整个 Atom 的 runner 集合。
+	t.ensureDefaults()
 	t.mu.RLock()
 	mode, interval := t.runMode, t.interval
 	t.mu.RUnlock()
 	if interval <= 0 {
 		return fmt.Errorf("time ability run: interval %s: %w", interval, types.ErrInvalidArguments)
 	}
-	t.ensureDefaults()
 	t.ensureSynced()
 	if mode == TimeRunModeMonotonic && interval < time.Second {
 		// Avoid the default 1ms busy loop that ensureDefaults seeds for

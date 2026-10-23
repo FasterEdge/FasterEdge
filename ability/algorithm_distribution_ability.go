@@ -4,6 +4,7 @@ package ability
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -103,6 +104,7 @@ type AlgDistAbility struct {
 	// watcherWG 跟踪所有进行中的状态同步 watcher,Unmount 时用于等待。
 	watcherWG sync.WaitGroup
 	seq       uint64
+	closing   bool // Unmount 置位: 拒绝新 watcher(防 WaitGroup Add-while-Wait)
 }
 
 // NewAlgDistAbility 创建一个算法分发能力。
@@ -227,7 +229,47 @@ func (a *AlgDistAbility) Check(atom *types.Atom) error {
 func (a *AlgDistAbility) Mount(atom *types.Atom) error { return a.Check(atom) }
 
 // Unmount 等待所有状态同步 watcher 退出,保证 AlgDistJob 状态收敛。
+// isValidAlgDistComponent 校验算法 name/version: 仅字母数字._-, 拒绝 "/" ".."
+// 等路径穿越字符与 "@"(键分隔符)等污染字符。
+func isValidAlgDistComponent(s string) bool {
+	if s == "" || len(s) > 128 {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// isValidAlgDistRemotePath 校验远端目标路径: 必须绝对路径且无 ".." 组件
+// (防远端写路径穿越, 如 name 含 "/" 或 remote 含 "../" 逃出目标目录);
+// 同时拒绝 Windows 反斜杠分隔符("/a\..\b" 在 Windows 语义下可绕过 ".." 检查)。
+func isValidAlgDistRemotePath(p string) bool {
+	if !strings.HasPrefix(p, "/") {
+		return false
+	}
+	if strings.ContainsRune(p, '\\') {
+		return false
+	}
+	for _, seg := range strings.Split(p, "/") {
+		if seg == ".." {
+			return false
+		}
+	}
+	return true
+}
+
 func (a *AlgDistAbility) Unmount(_ context.Context, _ *types.Atom) error {
+	// 置 closing 拒绝新 watcher(与 startJobWatcher 的 Add 同一把锁串行)——
+	// 旧实现无标志只 Wait: distribute 恰在计数为 0 时 Add(1) 属 WaitGroup
+	// 文档禁止的 Add-while-Wait(0), 未定义行为窗口。
+	a.mu.Lock()
+	a.closing = true
+	a.mu.Unlock()
 	a.watcherWG.Wait()
 	return nil
 }
@@ -249,6 +291,17 @@ func (a *AlgDistAbility) Command(atom *types.Atom, act string, args any) types.C
 		source := strings.TrimSpace(typed.SourcePath)
 		if name == "" || version == "" || source == "" {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: name/version/source required: %w", act, types.ErrInvalidArguments)}
+		}
+		// 组件名白名单: 仅字母数字._-(拒绝 "/" 与 "..", 防远端路径穿越/键污染)
+		if !isValidAlgDistComponent(name) || !isValidAlgDistComponent(version) {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: name/version may only contain letters, digits, '.', '_', '-': %w", act, types.ErrInvalidArguments)}
+		}
+		// SourcePath 是本机文件(register 时读取、distribute 时作为 LocalPath
+		// 上传)——必须绝对路径(本机语义, 兼容 Windows 盘符路径), 且 Clean
+		// 归一化后无 ".." 逃逸。旧实现仅非空检查——配合 distribute 的
+		// LocalPath 透传, 构成"注册→分发→任意本地文件外传"链。
+		if sourceClean := filepath.Clean(source); !filepath.IsAbs(sourceClean) {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: source path must be absolute: %w", act, types.ErrInvalidArguments)}
 		}
 		key := algKey(name, version)
 		alg := &AlgDistAlgorithm{
@@ -325,8 +378,13 @@ func (a *AlgDistAbility) Command(atom *types.Atom, act string, args any) types.C
 		if name == "" || version == "" || target == "" {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: name/version/target required: %w", act, types.ErrInvalidArguments)}
 		}
+		if !isValidAlgDistComponent(name) || !isValidAlgDistComponent(version) {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: name/version may only contain letters, digits, '.', '_', '-': %w", act, types.ErrInvalidArguments)}
+		}
 		if remote == "" {
 			remote = "/algorithms/" + name + "-" + version
+		} else if !isValidAlgDistRemotePath(remote) {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: remote path must be absolute and contain no '..' components: %w", act, types.ErrInvalidArguments)}
 		}
 		a.mu.RLock()
 		alg, ok := a.algs[algKey(name, version)]
@@ -449,7 +507,16 @@ func (a *AlgDistAbility) startJobWatcher(jobID, transferID string) {
 	if jobID == "" || transferID == "" {
 		return
 	}
+	// Add 与 Unmount 的 closing 置位在同一把锁内串行: 防止 Add-while-Wait(0)
+	// (WaitGroup 文档禁止, 可 panic)——Unmount 置 closing 后拒绝新 watcher,
+	// Wait 只等已登记 goroutine。
+	a.mu.Lock()
+	if a.closing {
+		a.mu.Unlock()
+		return
+	}
 	a.watcherWG.Add(1)
+	a.mu.Unlock()
 	go func() {
 		defer a.watcherWG.Done()
 		a.watchJob(jobID, transferID)
@@ -507,21 +574,25 @@ func (a *AlgDistAbility) watchJob(jobID, transferID string) {
 		if isTerminalFileTransfer(transfer.Status) {
 			a.mu.Lock()
 			cur, exists := a.jobs[jobID]
-			a.mu.Unlock()
 			if !exists {
+				a.mu.Unlock()
 				return
 			}
-			a.mu.Lock()
-			switch transfer.Status {
-			case FileTransferStatusCompleted:
-				cur.Status = AlgDistStatusCompleted
-			case FileTransferStatusFailed:
-				cur.Status = AlgDistStatusFailed
-				cur.Error = transfer.Error
-			case FileTransferStatusCanceled:
-				cur.Status = AlgDistStatusCanceled
+			// 用户已取消(cancelJob 置 Canceled)时不再覆写终态: transfer 与
+			// cancel 竞速完成会把 Canceled 覆写成 Completed/Failed, 用户
+			// 可观测状态与取消动作矛盾(旧实现无条件覆写)。
+			if cur.Status != AlgDistStatusCanceled {
+				switch transfer.Status {
+				case FileTransferStatusCompleted:
+					cur.Status = AlgDistStatusCompleted
+				case FileTransferStatusFailed:
+					cur.Status = AlgDistStatusFailed
+					cur.Error = transfer.Error
+				case FileTransferStatusCanceled:
+					cur.Status = AlgDistStatusCanceled
+				}
+				cur.FinishedAt = time.Now()
 			}
-			cur.FinishedAt = time.Now()
 			a.mu.Unlock()
 			return
 		}

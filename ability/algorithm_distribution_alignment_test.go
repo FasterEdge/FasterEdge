@@ -511,4 +511,9 @@ func TestAlgDistInvalidPerCallTargetRejected(t *testing.T) {
 	if out.Err == nil {
 		t.Fatal("expected error for unknown target")
 	}
+	// 只断非 nil 不断哨兵会让实现误返回 ErrMissingDependency/ErrOperationFailed
+	// 时测试照样 PASS——未知目标属参数校验, 必须命中 ErrInvalidArguments。
+	if !errors.Is(out.Err, types.ErrInvalidArguments) {
+		t.Fatalf("unknown target error = %v, want ErrInvalidArguments", out.Err)
+	}
 }

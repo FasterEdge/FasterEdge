@@ -24,6 +24,15 @@ const (
 	EdgeRoleCommandSetOnline     = "set_online"
 )
 
+const (
+	// edgeMaxZoneLen/edgeMaxCapLen/edgeMaxCapCount 是 zone/能力条目的资源上限:
+	// 旧实现无界增长, 持有效令牌的对端(含被攻陷边缘设备)可反复
+	// add_capability/set_capabilities 灌入任意大 map 与字符串导致 OOM。
+	edgeMaxZoneLen  = 64
+	edgeMaxCapLen   = 128
+	edgeMaxCapCount = 256
+)
+
 // EdgeRoleMetrics 描述边缘节点的本地运行指标。
 type EdgeRoleMetrics struct {
 	Online         bool
@@ -138,8 +147,8 @@ func (e *EdgeRoleAbility) Command(atom *types.Atom, act string, args any) types.
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
 		}
 		zone := strings.TrimSpace(typed.Zone)
-		if zone == "" {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: empty zone: %w", act, types.ErrInvalidArguments)}
+		if zone == "" || len(zone) > edgeMaxZoneLen {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: zone must be 1-%d chars: %w", act, edgeMaxZoneLen, types.ErrInvalidArguments)}
 		}
 		e.mu.Lock()
 		e.zone = zone
@@ -159,10 +168,17 @@ func (e *EdgeRoleAbility) Command(atom *types.Atom, act string, args any) types.
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
 		}
 		name := strings.TrimSpace(typed.Name)
-		if name == "" {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: empty capability: %w", act, types.ErrInvalidArguments)}
+		if name == "" || len(name) > edgeMaxCapLen {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: capability must be 1-%d chars: %w", act, edgeMaxCapLen, types.ErrInvalidArguments)}
 		}
 		e.mu.Lock()
+		// 已达上限时仅允许更新已存在条目(去重插入不增长), 新条目拒绝。
+		if len(e.capabilities) >= edgeMaxCapCount {
+			if _, exists := e.capabilities[name]; !exists {
+				e.mu.Unlock()
+				return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: capability limit %d reached: %w", act, edgeMaxCapCount, types.ErrInvalidArguments)}
+			}
+		}
 		e.capabilities[name] = struct{}{}
 		e.lastSeenAt = time.Now()
 		e.mu.Unlock()
@@ -196,10 +212,13 @@ func (e *EdgeRoleAbility) Command(atom *types.Atom, act string, args any) types.
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
 		}
 		set := make(map[string]struct{}, len(typed.Capabilities))
+		if len(typed.Capabilities) > edgeMaxCapCount {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: capability list exceeds %d: %w", act, edgeMaxCapCount, types.ErrInvalidArguments)}
+		}
 		for _, c := range typed.Capabilities {
 			c = strings.TrimSpace(c)
-			if c == "" {
-				return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: empty entry in capabilities: %w", act, types.ErrInvalidArguments)}
+			if c == "" || len(c) > edgeMaxCapLen {
+				return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: capability must be 1-%d chars: %w", act, edgeMaxCapLen, types.ErrInvalidArguments)}
 			}
 			set[c] = struct{}{}
 		}
