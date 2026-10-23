@@ -53,7 +53,7 @@ jobs:
         else
           tar czf ../fasteredge-demo-${{ matrix.target }}.tar.gz fasteredge-demo
         fi
-    - uses: actions/upload-artifact@v4
+    - uses: actions/upload-artifact@v7
       with:
         name: 'fasteredge-demo-${{ matrix.target }}'
         path: '${{ github.workspace }}/fasteredge-demo-${{ matrix.target }}.*'
@@ -69,7 +69,7 @@ jobs:
       run: docker build -t fasteredge-demo .
     - name: '导出镜像包'
       run: docker save fasteredge-demo | gzip > fasteredge-demo-image.tar.gz
-    - uses: actions/upload-artifact@v4
+    - uses: actions/upload-artifact@v7
       with:
         name: 'fasteredge-demo-docker-image'
         path: 'fasteredge-demo-image.tar.gz'
