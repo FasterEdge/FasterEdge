@@ -9,7 +9,7 @@ COPY . .
 WORKDIR /src/examples/demo
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/fasteredge-demo .
 
-FROM alpine:3.21
+FROM alpine:3.24
 RUN apk add --no-cache ca-certificates && adduser -D -H -u 1000 app && mkdir -p /app && chown -R app:app /app
 WORKDIR /app
 COPY --from=build /out/fasteredge-demo /usr/local/bin/fasteredge-demo
