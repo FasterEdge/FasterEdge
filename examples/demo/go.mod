@@ -2,7 +2,7 @@ module github.com/FasterEdge/FasterEdge/examples/demo
 
 go 1.27.4
 
-require github.com/FasterEdge/FasterEdge v1.0.20261116
+require github.com/FasterEdge/FasterEdge v1.0.20261123
 
 require (
 	github.com/beevik/ntp v1.6.0 // indirect

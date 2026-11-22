@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
@@ -116,6 +117,37 @@ type FileTransferIDArg struct {
 type FileTransferTransport interface {
 	Upload(ctx FileTransferContext) error
 	Download(ctx FileTransferContext) error
+}
+
+// fileTransferPeerPolicy 是"目标对端地址"的策略等级(AllowPrivate): 对端是
+// 内网 edge 节点(10.x / 172.16-31.x / 192.168.x), 私网必须放行; 回环、未指定、
+// 组播、链路本地(含云元数据 169.254.169.254)与十进制歧义写法一律拒绝。
+// 等级与 netMapPeerPolicy 一致——同一个对端地址不应在两个能力上得到相反结论。
+var fileTransferPeerPolicy = NewAddressGuard(AddressPolicyAllowPrivate)
+
+// checkFileTransferPeerAddress 只对**真正出网**的目标做地址守卫, 不碰本地
+// 文件路径。FileTransferAbility 里只有 target(对端节点名)会出网:
+// LocalPath / RemotePath 是文件路径(分别由 filepath.IsAbs + 符号链接检查、
+// isValidAbsoluteRemotePath 把关), 走地址策略只会误伤 "/data/x.bin" 这类
+// 合法路径。对端地址来自 NetMapAbility 的 peer 表; 表项在 register_peer /
+// update_peer 时已过 netMapPeerPolicy, 这里再判一次是纵深防御——peer 表的
+// 其它写入路径(快照恢复、未来新增命令)不能成为绕过地址策略的入口。
+func checkFileTransferPeerAddress(addr string) error {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return fmt.Errorf("peer address is empty: %w", types.ErrInvalidArguments)
+	}
+	host := addr
+	if h, port, err := net.SplitHostPort(addr); err == nil {
+		if !isValidPeerPort(port) {
+			return fmt.Errorf("peer address %q: bad port: %w", addr, types.ErrInvalidArguments)
+		}
+		host = h
+	}
+	if err := fileTransferPeerPolicy.CheckHost(host); err != nil {
+		return fmt.Errorf("peer address %q: %w: %w", host, types.ErrInvalidArguments, err)
+	}
+	return nil
 }
 
 // FileTransferContext 透传给 Transport 的运行时上下文。
@@ -259,8 +291,15 @@ func (a *FileTransferAbility) Command(atom *types.Atom, act string, args any) ty
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: NetMapAbility not registered: %w", act, types.ErrMissingDependency)}
 		}
 		nm, _ := atom.Ability("NetMapAbility")
-		if out := nm.Command(atom, NetMapCommandLookupPeer, NetMapLookupPeerArgs{Name: strings.TrimSpace(typed.PeerName)}); out.Err != nil {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: target lookup: %w", act, out.Err)}
+		lookup := nm.Command(atom, NetMapCommandLookupPeer, NetMapLookupPeerArgs{Name: strings.TrimSpace(typed.PeerName)})
+		if lookup.Err != nil {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: target lookup: %w", act, lookup.Err)}
+		}
+		// 对端地址的地址策略守卫(只有它会出网; 本地/远端**文件路径**不走这里)。
+		if peer, ok := lookup.Value.(NetMapPeer); ok {
+			if err := checkFileTransferPeerAddress(peer.Address); err != nil {
+				return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, err)}
+			}
 		}
 		a.mu.Lock()
 		a.target = strings.TrimSpace(typed.PeerName)
@@ -336,8 +375,14 @@ func (a *FileTransferAbility) Command(atom *types.Atom, act string, args any) ty
 				return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: NetMapAbility not registered: %w", act, types.ErrMissingDependency)}
 			}
 			nm, _ := atom.Ability("NetMapAbility")
-			if out := nm.Command(atom, NetMapCommandLookupPeer, NetMapLookupPeerArgs{Name: target}); out.Err != nil {
-				return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: target lookup: %w", act, out.Err)}
+			perCall := nm.Command(atom, NetMapCommandLookupPeer, NetMapLookupPeerArgs{Name: target})
+			if perCall.Err != nil {
+				return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: target lookup: %w", act, perCall.Err)}
+			}
+			if peer, ok := perCall.Value.(NetMapPeer); ok {
+				if err := checkFileTransferPeerAddress(peer.Address); err != nil {
+					return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, err)}
+				}
 			}
 		}
 		direction := FileTransferDirectionUpload

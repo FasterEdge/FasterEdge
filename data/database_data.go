@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"path/filepath"
 	"strings"
@@ -114,17 +115,41 @@ func validTLS(mode DatabaseTLSMode) bool {
 	}
 }
 
+// databaseAddressPolicy 是数据库类 Data 的出网地址策略等级: AllowPrivate
+// —— 内网数据库(edge 场景的 MySQL/Redis/Mongo 多在 10.x/172.x/192.168.x)
+// 是合法拓扑地址, 私网/CGNAT/文档保留段一并放行; 回环、未指定、组播、
+// 链路本地(含云元数据 169.254.169.254)与十进制歧义写法(2130706433、127.1、
+// 0x7f.0.0.1)仍一律拒绝。判定真理在 types/address_policy.go, 这里不再另写
+// 一套 net.ParseIP 比较。
+var databaseAddressPolicy = types.NewAddressGuard(types.AddressPolicyAllowPrivate)
+
+// validateDatabaseHost 校验 SQL host + port。语法层(空串/畸形字符/端口 0)沿用
+// 原有纪律, 地址语义统一委托 databaseAddressPolicy.CheckHost —— 旧实现只拒
+// 回环/未指定/组播, 私网、链路本地(169.254.169.254)与 localhost 别名全部放行,
+// 与 README 声称的"默认拒绝 localhost/127.0.0.1"不符。
 func validateDatabaseHost(host string, port uint16) error {
 	host = strings.TrimSpace(host)
-	if host == "" || strings.ContainsAny(host, " /?#@") || port == 0 {
+	if host == "" || port == 0 {
 		return types.ErrInvalidArguments
 	}
-	if ip := net.ParseIP(host); ip != nil && (ip.IsLoopback() || ip.IsUnspecified() || ip.IsMulticast()) {
+	// host 形如 "host" / "host:port" 两种都不接受; 端口字段独立由 port 承载,
+	// 因此含 "/"、"?"、"#"、反斜杠、空白的写法视为畸形。
+	if strings.ContainsAny(host, " /\\?#@") {
 		return types.ErrInvalidArguments
 	}
-	return nil
+	// 端口由 Port 字段独立承载, Host 里再带一段 ":port" 会拼出畸形 DSN。
+	// 例外是 IPv6 字面量(本身含冒号), 因此只在"解析不成 IP 却含冒号"时拒绝。
+	if strings.Contains(host, ":") {
+		if _, err := netip.ParseAddr(strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")); err != nil {
+			return types.ErrInvalidArguments
+		}
+	}
+	return wrapDatabaseAddress(host)
 }
 
+// validateAddress 校验 "host:port" 形式的节点地址(Redis / MongoDB)。
+// 端口纪律(纯数字 1..65535)保持原有实现, 地址语义委托
+// databaseAddressPolicy.CheckHost —— 旧实现只拒回环/未指定/组播。
 func validateAddress(address string) error {
 	host, port, err := net.SplitHostPort(strings.TrimSpace(address))
 	if err != nil || port == "" {
@@ -134,9 +159,6 @@ func validateAddress(address string) error {
 	// SplitHostPort 只按最后一个冒号切,"evil host:3306" 会解析出带空格的
 	// host 且不报错)。
 	if strings.ContainsAny(host, " \\") {
-		return types.ErrInvalidArguments
-	}
-	if ip := net.ParseIP(host); ip != nil && (ip.IsLoopback() || ip.IsUnspecified() || ip.IsMulticast()) {
 		return types.ErrInvalidArguments
 	}
 	// 端口必须为 1..65535 的纯数字(旧实现只交 SplitHostPort——
@@ -153,6 +175,16 @@ func validateAddress(address string) error {
 	}
 	if portNum == 0 || portNum > 65535 {
 		return types.ErrInvalidArguments
+	}
+	return wrapDatabaseAddress(host)
+}
+
+// wrapDatabaseAddress 把统一地址策略的拒绝转成 data 包统一的
+// types.ErrInvalidArguments —— data 侧对外只暴露 ErrInvalidArguments 哨兵,
+// 不把 ErrAddressDisallowed 泄漏给调用方(保持既有调用点的判定方式不变)。
+func wrapDatabaseAddress(host string) error {
+	if err := databaseAddressPolicy.CheckHost(host); err != nil {
+		return fmt.Errorf("host %q: %w: %w", host, types.ErrInvalidArguments, err)
 	}
 	return nil
 }
@@ -320,17 +352,24 @@ type InfluxDBConfig struct {
 	Timeout  time.Duration `json:"timeout"`
 }
 
+// influxEndpointPolicy 是 InfluxDB 端点的策略等级(PublicOnly): 与 ability 侧
+// influxEndpointPolicy / ekuiperEndpointPolicy / dockerEndpointPolicy 同级
+// (远端观测库, 私网一并拒绝)。域名在拨号层由 transport 经
+// types.AddressGuard.DialContext 对实际 IP 二次校验(存储期不解析, 避免
+// TOCTOU 与阻塞)。
+var influxEndpointPolicy = types.NewAddressGuard(types.AddressPolicyPublicOnly)
+
 func validateInfluxEndpoint(endpoint string) error {
 	parsed, err := url.Parse(strings.TrimSpace(endpoint))
 	if err != nil || parsed.User != nil || parsed.Fragment != "" || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" {
 		return types.ErrInvalidArguments
 	}
-	host := strings.ToLower(parsed.Hostname())
-	if host == "localhost" {
-		return types.ErrInvalidArguments
-	}
-	if ip := net.ParseIP(host); ip != nil && (ip.IsLoopback() || ip.IsUnspecified() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsMulticast()) {
-		return types.ErrInvalidArguments
+	// 地址语义统一委托 influxEndpointPolicy(IPv4-mapped、userinfo 已在 URL
+	// 层被拒、尾点 FQDN、localhost 别名、十进制歧义写法、云元数据 169.254.169.254
+	// 一并覆盖)。旧实现手写"localhost + net.ParseIP 五连比较", 私网放行、
+	// 十进制写法放行, 与统一策略结论不一致。
+	if err := influxEndpointPolicy.CheckHost(parsed.Hostname()); err != nil {
+		return fmt.Errorf("endpoint host %q: %w: %w", parsed.Hostname(), types.ErrInvalidArguments, err)
 	}
 	return nil
 }
@@ -338,13 +377,6 @@ func validateInfluxEndpoint(endpoint string) error {
 func validateInfluxDBConfig(config InfluxDBConfig) error {
 	if err := validateInfluxEndpoint(config.Endpoint); err != nil {
 		return err
-	}
-	parsed, err := url.Parse(strings.TrimSpace(config.Endpoint))
-	if err != nil || parsed.User != nil || parsed.Fragment != "" || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" {
-		return types.ErrInvalidArguments
-	}
-	if ip := net.ParseIP(parsed.Hostname()); ip != nil && (ip.IsLoopback() || ip.IsUnspecified() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsMulticast()) {
-		return types.ErrInvalidArguments
 	}
 	if validateName(config.Org) != nil || validateName(config.Bucket) != nil || config.Timeout < 0 {
 		return types.ErrInvalidArguments

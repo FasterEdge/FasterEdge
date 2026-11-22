@@ -94,10 +94,11 @@ type ModbusTransport interface {
 // ModbusAbility 提供 Modbus 协议读写能力,具体字节流由注入的 Transport 完成。
 // 没有 Transport 时,所有读写命令返回 types.ErrInvalidArguments(防止误用)。
 type ModbusAbility struct {
-	mu        sync.RWMutex
-	endpoint  string
-	unitID    uint8
-	transport ModbusTransport
+	mu            sync.RWMutex
+	endpoint      string
+	unitID        uint8
+	transport     ModbusTransport
+	allowLoopback bool
 }
 
 func NewModbusAbility() *ModbusAbility {
@@ -108,6 +109,55 @@ func (m *ModbusAbility) SetTransport(t ModbusTransport) {
 	m.mu.Lock()
 	m.transport = t
 	m.mu.Unlock()
+}
+
+// SetAllowLoopback 显式放开"Modbus TCP 端点可以落在本机回环"的限制。
+//
+// 默认是拒绝的: TCP 端点走统一地址策略的 AllowPrivate 等级(工业从站通常在
+// 10.x / 172.16-31.x / 192.168.x 私网段, 私网必须放行), 而回环、未指定、
+// 组播、链路本地(含云元数据 169.254.169.254)与十进制歧义写法一律拒绝——
+// `127.0.0.1:502` 这类"默认值"会把请求打到本机其它服务上。
+// 只有在本机跑从站模拟器做联调时才需要显式打开, 与 TimeAbility 的 LAN 源
+// 选项同纪律: 框架不替使用者做这个决定。
+func (m *ModbusAbility) SetAllowLoopback(allow bool) {
+	m.mu.Lock()
+	m.allowLoopback = allow
+	m.mu.Unlock()
+}
+
+// endpointGuard 返回当前生效的 Modbus TCP 端点策略守卫。
+func (m *ModbusAbility) endpointGuard() AddressGuard {
+	m.mu.RLock()
+	allow := m.allowLoopback
+	m.mu.RUnlock()
+	if allow {
+		return NewAddressGuard(AddressPolicyAllowLoopback)
+	}
+	return modbusEndpointPolicy
+}
+
+// modbusEndpointPolicy 是 Modbus TCP 端点的策略等级(AllowPrivate)。
+// RTU 端点(/dev/ttyUSB0:9600:8N1)是本地设备路径, 不经网络策略。
+var modbusEndpointPolicy = NewAddressGuard(AddressPolicyAllowPrivate)
+
+// isValidModbusTCPHost 在语法校验之外补上地址语义校验(set_endpoint 的实际
+// 落点): 只对**真正出网**的 TCP 端点判定, RTU 设备路径直接放行, 因此不会
+// 误伤 /dev/... 形式的本地端点。
+func (m *ModbusAbility) checkModbusEndpoint(addr string) error {
+	if !isValidModbusEndpoint(addr) {
+		return fmt.Errorf("invalid endpoint %q: %w", addr, types.ErrInvalidArguments)
+	}
+	if strings.HasPrefix(addr, "/") {
+		return nil
+	}
+	host, ok := modbusTCPHost(addr)
+	if !ok {
+		return fmt.Errorf("invalid endpoint %q: %w", addr, types.ErrInvalidArguments)
+	}
+	if err := m.endpointGuard().CheckHost(host); err != nil {
+		return fmt.Errorf("endpoint host %q: %w: %w", host, types.ErrInvalidArguments, err)
+	}
+	return nil
 }
 
 func (m *ModbusAbility) GetName() string { return "ModbusAbility" }
@@ -179,8 +229,8 @@ func (m *ModbusAbility) Command(atom *types.Atom, act string, args any) types.Co
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
 		}
 		addr := strings.TrimSpace(typed.Addr)
-		if !isValidModbusEndpoint(addr) {
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: invalid endpoint %q: %w", act, addr, types.ErrInvalidArguments)}
+		if err := m.checkModbusEndpoint(addr); err != nil {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, err)}
 		}
 		m.mu.Lock()
 		m.endpoint = addr

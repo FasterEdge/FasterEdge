@@ -774,6 +774,12 @@ func main() {
 
 	// Modbus 联调 (需要 MiniGreat Receiver Modbus 从站 :1502)
 	if ab, ok := extAtom.Ability("ModbusAbility"); ok {
+		// set_endpoint 的 TCP 端点默认拒绝回环(统一地址策略 AllowPrivate 等级),
+		// 本机从站模拟器联调必须先显式打开, 与 TimeAbility 的 LAN 源选项同纪律。
+		if mab, ok := ab.(*ability.ModbusAbility); ok {
+			mab.SetAllowLoopback(true)
+			report("Modbus/set_allow_loopback", "true", nil)
+		}
 		o := ab.Command(extAtom, ability.ModbusCommandSetEndpoint, ability.ModbusEndpointArgs{Addr: "127.0.0.1:1502"})
 		report("Modbus/set_endpoint", "127.0.0.1:1502", o.Err)
 		o = ab.Command(extAtom, ability.ModbusCommandSetUnitID, ability.ModbusUnitIDArgs{UnitID: 1})

@@ -93,6 +93,26 @@ func decodeCoils(payload []byte, quantity int) []bool {
 	return out
 }
 
+// modbusTCPHost 从 TCP 端点("host:port")取出 host, 并剥掉 IPv6 字面量的方括号。
+// 返回 ok=false 表示不是合法的 host:port 形态(调用方按畸形端点拒绝)。
+func modbusTCPHost(addr string) (string, bool) {
+	idx := strings.LastIndex(addr, ":")
+	if idx <= 0 || idx == len(addr)-1 {
+		return "", false
+	}
+	host := addr[:idx]
+	// IPv6 字面量形如 "[::1]:502": LastIndex 会落在端口冒号上, host 带方括号,
+	// 交给地址策略前先剥掉(策略的 CheckHost 自身也接受方括号形态, 这里统一走
+	// 剥括号路径, 避免两种写法在错误消息里不一致)。
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") && len(host) >= 2 {
+		host = host[1 : len(host)-1]
+	}
+	if host == "" {
+		return "", false
+	}
+	return host, true
+}
+
 // isValidModbusEndpoint 接受 host:port (TCP) 或 /dev/...:baud:format (RTU)。
 // 语法校验(端口范围/空白/段数)与注释一致; 地址语义(回环等)由调用方策略决定。
 func isValidModbusEndpoint(addr string) bool {

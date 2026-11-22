@@ -65,6 +65,19 @@ func TestModbusAbilitySetGetEndpointAndUnitID(t *testing.T) {
 	if out := m.Command(atom, ModbusCommandSetEndpoint, ModbusEndpointArgs{Addr: "192.168.1.10:502"}); out.Err != nil {
 		t.Fatal(out.Err)
 	}
+	// 回环 TCP 端点默认拒绝(统一地址策略 AllowPrivate 等级仍拒回环)
+	if out := m.Command(atom, ModbusCommandSetEndpoint, ModbusEndpointArgs{Addr: "127.0.0.1:502"}); !errors.Is(out.Err, types.ErrInvalidArguments) {
+		t.Fatalf("loopback TCP endpoint should be rejected by default, got %v", out.Err)
+	}
+	if out := m.Command(atom, ModbusCommandSetEndpoint, ModbusEndpointArgs{Addr: "localhost:502"}); !errors.Is(out.Err, types.ErrInvalidArguments) {
+		t.Fatalf("localhost TCP endpoint should be rejected by default, got %v", out.Err)
+	}
+	// 显式放开回环后放行(本机从站模拟器联调场景)
+	m.SetAllowLoopback(true)
+	if out := m.Command(atom, ModbusCommandSetEndpoint, ModbusEndpointArgs{Addr: "127.0.0.1:502"}); out.Err != nil {
+		t.Fatalf("loopback TCP endpoint should be accepted after SetAllowLoopback(true): %v", out.Err)
+	}
+	m.SetAllowLoopback(false)
 	// 合法 RTU
 	if out := m.Command(atom, ModbusCommandSetEndpoint, ModbusEndpointArgs{Addr: "/dev/ttyUSB0:9600:8N1"}); out.Err != nil {
 		t.Fatal(out.Err)

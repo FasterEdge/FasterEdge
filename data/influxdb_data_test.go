@@ -13,9 +13,10 @@ import (
 // Endpoint——无论交错如何, Org/Bucket 保持某次 configure 的完整非零值)。
 func TestInfluxDBConcurrentSetterAndCommand(t *testing.T) {
 	d := NewInfluxDBData()
-	// 203.0.113.x 是文档保留网段(TEST-NET-3), 非回环/私网/组播——通过
-	// validateInfluxEndpoint 的私网拒绝校验。
-	base := InfluxDBConfig{Endpoint: "http://203.0.113.10:8086", Org: "org0", Bucket: "bucket0"}
+	// 公网域名作为基线端点: 统一地址策略(influxEndpointPolicy, PublicOnly)
+	// 对 Influx 端点的要求是"仅公网可路由地址"——203.0.113.x 这类文档保留段
+	// 已归入 PublicOnly 拒绝集合, 旧实现手写判定只拒回环/私网/组播时才放行。
+	base := InfluxDBConfig{Endpoint: "http://influx.example.com:8086", Org: "org0", Bucket: "bucket0"}
 	if out := d.Command(nil, DatabaseCommandConfigure, InfluxDBConfigureArgs{Config: base}); out.Err != nil {
 		t.Fatal(out.Err)
 	}
@@ -26,7 +27,7 @@ func TestInfluxDBConcurrentSetterAndCommand(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < 100; j++ {
-				_ = d.SetEndpoint("http://203.0.113." + intString(j%200+1) + ":8086")
+				_ = d.SetEndpoint("http://influx" + intString(j%200+1) + ".example.com:8086")
 			}
 		}()
 	}
@@ -34,7 +35,7 @@ func TestInfluxDBConcurrentSetterAndCommand(t *testing.T) {
 		defer wg.Done()
 		for j := 0; j < 100; j++ {
 			cfg := InfluxDBConfig{
-				Endpoint: "http://203.0.113.250:8086",
+				Endpoint: "http://influx250.example.com:8086",
 				Org:      "org" + intString(j%10),
 				Bucket:   "bucket" + intString(j%10),
 			}
