@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/netip"
 	"net/url"
 	"strings"
 	"sync"
@@ -586,69 +585,70 @@ func (m *MQTTAbility) Command(atom *types.Atom, act string, args any) types.Comm
 	return types.CommandOutput{Name: act, Err: fmt.Errorf("command %s: %w", act, types.ErrUnsupportedCommand)}
 }
 
-// isAcceptableBrokerURL 限制 MQTT URL 必须是 tcp/tls/ssl/ws/wss 协议,且 host 不为本地回环。
-// 这与 TimeAbility / CloudRoleAbility 的网络策略一致(私网 broker 允许, 回环拒绝)。
+// isAcceptableBrokerURL 限制 MQTT URL 必须是 tcp/tls/ssl/ws/wss 协议,并且
+// host 经统一地址策略(mqttBrokerPolicy)判定: 私网 broker 允许(edge 场景
+// 常见内网 broker), 回环/未指定/组播/链路本地/十进制写法 IP 一律拒绝。
+// 地址语义只此一处, 与 docker/influxdb/ekuiper/k8s 共享 AddressPolicyLevel。
 // host 提取使用标准 URL 解析取 Hostname(): 旧实现按最后一个冒号切分会把
-// userinfo 手法(tcp://alice@127.0.0.1:1883)提取成 "alice@127.0.0.1" 绕过回环名单;
-// IP 字面量经 netip 规范化(IPv4-mapped IPv6)后再判回环。
+// userinfo 手法(tcp://alice@127.0.0.1:1883)提取成 "alice@127.0.0.1" 绕过回环名单。
 func isAcceptableBrokerURL(u string) bool {
 	if u == "" {
 		return false
 	}
 	lower := strings.ToLower(u)
+	allowed := false
 	for _, prefix := range []string{"tcp://", "tls://", "ssl://", "ws://", "wss://"} {
 		if strings.HasPrefix(lower, prefix) {
-			rest := u[len(prefix):]
-			host := rest
-			if i := strings.IndexAny(rest, "/?#"); i >= 0 {
-				host = rest[:i]
-			}
-			if i := strings.LastIndex(host, ":"); i >= 0 {
-				host = host[:i]
-			}
-			// IPv6 字面量带方括号, 先剥掉再比较回环 (如 tcp://[::1]:1883)
-			if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") && len(host) >= 2 {
-				host = host[1 : len(host)-1]
-			}
-			if host == "" {
-				return false
-			}
-			// userinfo 防护 + 严格解析: 旧实现只有在 url.Parse 成功时才用
-			// parsed.Hostname(), 失败时(畸形 host/空白/截断方括号/空端口)
-			// fall through 到主机名分支返回 true——"tcp://["、"tcp://host:"、
-			// "tcp://a b:1883" 全部放行, 晚到 dial 才失败。
-			parsed, perr := url.Parse(u)
-			if perr != nil || parsed.Hostname() == "" || parsed.Port() == "" {
-				return false
-			}
-			if parsed.User != nil {
-				return false
-			}
-			host = parsed.Hostname()
-			// IPv6 字面量 Hostname() 带方括号([::1]), 剥掉再判回环
-			if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") && len(host) >= 2 {
-				host = host[1 : len(host)-1]
-			}
-			if host == "" {
-				return false
-			}
-			// IP 字面量: netip 规范化后判回环/未指定
-			if addr, aerr := netip.ParseAddr(host); aerr == nil {
-				addr = addr.Unmap()
-				if addr.IsLoopback() || addr.IsUnspecified() {
-					return false
-				}
-				return true
-			}
-			// 主机名: 去掉尾点 FQDN 后比较回环别名
-			if strings.TrimSuffix(host, ".") == "localhost" {
-				return false
-			}
-			return true
+			allowed = true
+			break
 		}
 	}
-	return false
+	if !allowed {
+		return false
+	}
+	// 严格解析: 旧实现只有在 url.Parse 成功时才用 parsed.Hostname(),
+	// 失败时(畸形 host/空白/截断方括号/空端口) fall through 到主机名分支
+	// 返回 true——"tcp://["、"tcp://host:"、"tcp://a b:1883" 全部放行,
+	// 晚到 dial 才失败。
+	parsed, err := url.Parse(u)
+	if err != nil || parsed.Hostname() == "" || parsed.Port() == "" || parsed.User != nil {
+		return false
+	}
+	host := parsed.Hostname()
+	// IPv6 字面量 Hostname() 带方括号([::1]), 剥掉再交策略判定
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") && len(host) >= 2 {
+		host = host[1 : len(host)-1]
+	}
+	return mqttBrokerPolicy.CheckHost(host) == nil
 }
+
+// mqttBrokerPolicy 是 MQTT broker 地址的策略等级: 内网 broker(10.x/172.x/
+// 192.168.x)是边缘常态, 因此放行私网、拒绝回环与所有特殊段。
+var mqttBrokerPolicy = NewAddressGuard(AddressPolicyAllowPrivate)
 
 // Compile-time guarantee that MQTTAbility satisfies Unmounter.
 var _ types.Unmounter = (*MQTTAbility)(nil)
+
+// Compile-time guarantee that MQTTAbility satisfies CommandLister.
+var _ types.CommandLister = (*MQTTAbility)(nil)
+
+// mqttAbilityCommands 是 MQTTAbility 的命令目录, 与 Command 中 act 的
+// switch 分支逐一对应(由 command_contract_test.go 解析源码交叉核对):
+// 连接配置 3 条, 连接生命周期 3 条, 收发 4 条, 本地队列 1 条。
+var mqttAbilityCommands = []string{
+	MQTTCommandSetBroker,
+	MQTTCommandGetBroker,
+	MQTTCommandSetCredentials,
+	MQTTCommandSetClientID,
+	MQTTCommandConnect,
+	MQTTCommandDisconnect,
+	MQTTCommandIsConnected,
+	MQTTCommandPublish,
+	MQTTCommandSubscribe,
+	MQTTCommandUnsubscribe,
+	MQTTCommandListSubs,
+	MQTTCommandDrain,
+}
+
+// ListCommands 实现 types.CommandLister, 返回命令目录的副本(调用方持有所有权)。
+func (m *MQTTAbility) ListCommands() []string { return append([]string(nil), mqttAbilityCommands...) }

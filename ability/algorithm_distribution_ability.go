@@ -434,6 +434,27 @@ func (a *AlgDistAbility) Command(atom *types.Atom, act string, args any) types.C
 	return types.CommandOutput{Name: act, Err: fmt.Errorf("command %s: %w", act, types.ErrUnsupportedCommand)}
 }
 
+// algDistAbilityCommands 是 AlgorithmDistributionAbility 的命令目录, 与 Command 的
+// case 分支一一对应。
+var algDistAbilityCommands = []string{
+	AlgDistCommandRegister,
+	AlgDistCommandUnregister,
+	AlgDistCommandList,
+	AlgDistCommandGet,
+	AlgDistCommandDistribute,
+	AlgDistCommandCancel,
+	AlgDistCommandListDistribute,
+	AlgDistCommandClearFinished,
+}
+
+// ListCommands satisfies types.CommandLister.
+func (a *AlgDistAbility) ListCommands() []string {
+	return append([]string(nil), algDistAbilityCommands...)
+}
+
+// Compile-time guarantee that AlgorithmDistributionAbility declares its command catalogue.
+var _ types.CommandLister = (*AlgDistAbility)(nil)
+
 func algKey(name, version string) string { return name + "@" + version }
 
 func (a *AlgDistAbility) newJob(name, version, target, remote, transferID string) *AlgDistJob {

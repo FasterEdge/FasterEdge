@@ -4,7 +4,6 @@ package ability
 import (
 	"fmt"
 	"net"
-	"net/netip"
 	"sort"
 	"strings"
 	"sync"
@@ -208,6 +207,22 @@ func (a *NetMapAbility) Command(atom *types.Atom, act string, args any) types.Co
 	return types.CommandOutput{Name: act, Err: fmt.Errorf("command %s: %w", act, types.ErrUnsupportedCommand)}
 }
 
+// netMapAbilityCommands 是 NetMapAbility 的命令目录, 与 Command 中 act 的
+// switch 分支一一对应(由 command_contract_test.go 解析源码交叉核对)。
+var netMapAbilityCommands = []string{
+	NetMapCommandRegisterPeer,
+	NetMapCommandUnregisterPeer,
+	NetMapCommandUpdatePeer,
+	NetMapCommandListPeers,
+	NetMapCommandLookupPeer,
+	NetMapCommandGetTopology,
+}
+
+// ListCommands 实现 types.CommandLister, 返回命令目录的副本。
+func (a *NetMapAbility) ListCommands() []string {
+	return append([]string(nil), netMapAbilityCommands...)
+}
+
 func (a *NetMapAbility) snapshotPeers() []NetMapPeer {
 	a.mu.RLock()
 	out := make([]NetMapPeer, 0, len(a.peers))
@@ -243,17 +258,18 @@ func (a *NetMapAbility) lookup(name, addr string) (NetMapPeer, bool, error) {
 }
 
 // isValidPeerAddress 允许 host:port / 纯 IP / 主机名(不含协议前缀、不含路径)。
-// 网络策略与 docker/mqtt/cloud 统一: IP 字面量经 netip 规范化后拒绝
-// 回环/未指定/组播/链路本地(169.254.169.254 等 SSRF 种子)——旧实现仅语法
-// 校验, 127.0.0.1/224.0.0.1 均可入库, 注入 transport 按 peer.Address 连接
-// 即构成 SSRF。私网段(10.x/192.168.x)是合法 edge 内网地址, 与 mqtt 策略
-// 一致放行。主机名存储期不 DNS 解析(TOCTOU), 仅拒绝尾点 localhost,
-// 拨号层应二次校验(与 cloud_role 的 addressPolicy 同模式)。
+// 网络策略统一走 ability/address_policy.go 的 AddressPolicyLevel(edge 节点常
+// 位于内网, 故等级为 AllowPrivate: 放行私网/CGNAT/文档保留段, 仍拒绝回环/
+// 未指定/组播/链路本地 169.254.169.254 等 SSRF 种子)——旧实现另写一套
+// isDialablePeerIP, 与 docker/mqtt/cloud 各写一套的判定并存, 同一地址在
+// 不同能力上结论相反。主机名存储期不 DNS 解析(TOCTOU), 但拒绝尾点 localhost、
+// 十进制写法 IP 与含控制符的畸形 host; 拨号层必须用 AddressGuard.DialContext
+// 对实际 IP 二次判定。
 func isValidPeerAddress(addr string) bool {
 	if addr == "" {
 		return false
 	}
-	if strings.ContainsAny(addr, " /\\?#") {
+	if strings.ContainsAny(addr, " /\\?#@") {
 		return false
 	}
 	host := addr
@@ -270,27 +286,10 @@ func isValidPeerAddress(addr string) bool {
 		}
 		host = h
 	}
-	// 剥 IPv6 方括号
-	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") && len(host) >= 2 {
-		host = host[1 : len(host)-1]
-	}
 	if host == "" {
 		return false
 	}
-	if ip := net.ParseIP(host); ip != nil {
-		return isDialablePeerIP(ip)
-	}
-	// 主机名(仅允许字母数字、点、连字符、下划线)
-	if strings.TrimSuffix(strings.ToLower(host), ".") == "localhost" {
-		return false
-	}
-	for _, r := range host {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '.' || r == '-' || r == '_' {
-			continue
-		}
-		return false
-	}
-	return true
+	return netMapPeerPolicy.CheckHost(host) == nil
 }
 
 // isValidPeerPort 校验端口为 1..65535 的纯数字。
@@ -308,17 +307,6 @@ func isValidPeerPort(port string) bool {
 	return n >= 1 && n <= 65535
 }
 
-// isDialablePeerIP 经 netip 规范化(IPv4-mapped IPv6)后拒绝回环/未指定/组播/
-// 链路本地地址。私网与公网地址均放行(edge 节点常位于内网)。
-func isDialablePeerIP(ip net.IP) bool {
-	addr, ok := netip.AddrFromSlice(ip)
-	if !ok {
-		return false
-	}
-	addr = addr.Unmap()
-	if addr.IsLoopback() || addr.IsUnspecified() || addr.IsMulticast() ||
-		addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast() {
-		return false
-	}
-	return true
-}
+// netMapPeerPolicy 是 NetMapAbility 的 peer 地址策略等级: edge 节点本身
+// 部署在内网, 私网段是合法拓扑地址, 因此放行私网但拒绝回环/链路本地/组播。
+var netMapPeerPolicy = NewAddressGuard(AddressPolicyAllowPrivate)

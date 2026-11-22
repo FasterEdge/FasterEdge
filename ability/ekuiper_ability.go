@@ -3,8 +3,6 @@ package ability
 
 import (
 	"fmt"
-	"net"
-	"net/netip"
 	"net/url"
 	"sort"
 	"strings"
@@ -13,6 +11,11 @@ import (
 
 	"github.com/FasterEdge/FasterEdge/types"
 )
+
+// ekuiperEndpointPolicy 是 eKuiper REST API 端点的策略等级(PublicOnly):
+// 与数据层 InfluxDBData 的策略一致, 私网一并拒绝; 域名在拨号层由
+// AddressGuard 对实际 IP 二次校验(存储期不解析, 避免 TOCTOU 与阻塞)。
+var ekuiperEndpointPolicy = NewAddressGuard(AddressPolicyPublicOnly)
 
 const (
 	EKuiperCommandSetEndpoint   = "set_endpoint"
@@ -134,6 +137,32 @@ func (e *EKuiperAbility) Check(atom *types.Atom) error {
 
 func (e *EKuiperAbility) Mount(atom *types.Atom) error { return e.Check(atom) }
 
+// Compile-time guarantee that EKuiperAbility satisfies CommandLister.
+var _ types.CommandLister = (*EKuiperAbility)(nil)
+
+// ekuiperAbilityCommands 是 EKuiperAbility 的命令目录, 与 Command 中 act 的
+// switch 分支逐一对应(由 command_contract_test.go 解析源码交叉核对):
+// 端点 2 条, 流 4 条, 规则 6 条(start/stop 是两个分支标签, 各自单列)。
+var ekuiperAbilityCommands = []string{
+	EKuiperCommandSetEndpoint,
+	EKuiperCommandGetEndpoint,
+	EKuiperCommandCreateStream,
+	EKuiperCommandDropStream,
+	EKuiperCommandListStreams,
+	EKuiperCommandGetStream,
+	EKuiperCommandCreateRule,
+	EKuiperCommandDropRule,
+	EKuiperCommandStartRule,
+	EKuiperCommandStopRule,
+	EKuiperCommandShowRules,
+	EKuiperCommandGetRuleStatus,
+}
+
+// ListCommands 实现 types.CommandLister, 返回命令目录的副本(调用方持有所有权)。
+func (e *EKuiperAbility) ListCommands() []string {
+	return append([]string(nil), ekuiperAbilityCommands...)
+}
+
 func (e *EKuiperAbility) Command(atom *types.Atom, act string, args any) types.CommandOutput {
 	if err := e.Check(atom); err != nil {
 		return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, err)}
@@ -147,24 +176,15 @@ func (e *EKuiperAbility) Command(atom *types.Atom, act string, args any) types.C
 		endpoint := strings.TrimSpace(typed.URL)
 		// URL 校验与数据层 validateInfluxEndpoint 对齐(旧实现仅查 http/https
 		// 前缀——"http://"(无 host)/内嵌 userinfo/回环 IPv6/畸形端口全放行,
-		// 凭据随每次 REST 调用重放且 get_endpoint 原样回显)。
+		// 凭据随每次 REST 调用重放且 get_endpoint 原样回显)。host 语义统一走
+		// AddressPolicyLevel(PublicOnly, 与 InfluxDBData 一致拒私网)。
 		parsed, perr := url.Parse(endpoint)
 		if perr != nil || parsed.User != nil || parsed.Fragment != "" ||
 			(parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: invalid url: %w", act, types.ErrInvalidArguments)}
 		}
-		if ip := net.ParseIP(parsed.Hostname()); ip != nil {
-			addr, ok := netip.AddrFromSlice(ip)
-			if !ok {
-				return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: invalid url host: %w", act, types.ErrInvalidArguments)}
-			}
-			addr = addr.Unmap()
-			// 与 InfluxDBData 一致拒绝回环/未指定/私网/链路本地/组播;
-			// 域名留待拨号层二次校验(存储期不解析, TOCTOU)。
-			if addr.IsLoopback() || addr.IsUnspecified() || addr.IsPrivate() ||
-				addr.IsLinkLocalUnicast() || addr.IsMulticast() {
-				return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: url host not allowed: %w", act, types.ErrInvalidArguments)}
-			}
+		if ekuiperEndpointPolicy.CheckHost(parsed.Hostname()) != nil {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: url host not allowed: %w", act, types.ErrInvalidArguments)}
 		}
 		e.mu.Lock()
 		e.endpoint = endpoint

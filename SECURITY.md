@@ -33,9 +33,10 @@ FasterEdge 项目重视安全。请**不要在公共渠道（Issue/讨论区/群
 
 本项目在多轮暗病审计中已落实以下防护（供安全研究人员参考）：
 
-- 命令能力（sh 等）走白名单 + 参数校验，拒绝注入
+- 命令执行能力（`CmdAbility` / `ShAbility` / `BashAbility`）为 **fail-closed**：空 allowlist 拒绝一切执行，授权须经 `set_allowlist` 或显式 `set_allowlist_any` opt-in；白名单命中后仍扫描 shell 链接元字符（`;` `&` `|` `$()` 反引号、进程替换、换行/控制字符等）。已知局限：元字符扫描是引号感知的字符级检查而非 shell 解析器，反斜杠转义的编码绕过（如 `\x3b`）不展开解码，须以 fail-closed 缺省或收紧白名单兜底
+- `set_allowlist` 属能力授予面，被 `OneKeyAbility` 认证边界限制为仅本地进程内调用；`run` / `start` 可远程调用但始终受 allowlist 约束。**新增的 `set_allowlist_any` 尚未加入该本地限制清单**（需在 `ability/one_key_ability.go` 的 `restrictedRemoteCommand` 补一条判断；该文件本轮由其他负责人并行重构，未触碰），缺口由 `TestCmdAbilitySetAllowAnyRemoteRestriction` 登记；补齐前不要把 `set_allowlist_any` 暴露给远程传输层
 - `OneKeyAbility` 等固定长度结构校验，防溢出/截断
-- 网络出站（时间源/SSRF 面）做 IP 校验（禁私有/链路本地/环回/特殊段）+ 重定向降级拦截
+- 网络出站（时间源/SSRF 面）做 IP 校验（禁私有/链路本地/环回/特殊段）+ 重定向降级拦截。地址策略统一收敛在 `ability/address_policy.go`：`AddressPolicyLevel` 三档等级（`PublicOnly` / `AllowPrivate` / `AllowLoopback`）由调用方显式选择，net_map/docker/mqtt/influxdb/ekuiper/k8s/time 共用同一处判定真理；域名在拨号期对解析出的**全部**实际 IP 逐个复检后只拨数值 IP（防 DNS rebinding），并拒绝 IPv4-mapped（`::ffff:127.0.0.1`）、userinfo（`tcp://alice@host:port`）与十进制写法（`2130706433` / `127.1` / `0x7f.0.0.1`）等歧义形态
 - 接收面统一大小上限（1MB 等），防内存耗尽 DoS
 - WebSocket/HTTP 监听防慢连接 DoS（读超时/读上限）
 - CI 工作流最小权限（permissions 显式声明）

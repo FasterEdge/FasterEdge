@@ -73,7 +73,7 @@ type SerialTransport interface {
 	ApplyConfig(port string, cfg SerialConfig) error
 }
 
-// SerialPortLister 抽象出列举可用串口设备(默认实现枚举 /dev/tty* 等)。
+// SerialPortLister 抽象出列举可用串口设备。
 type SerialPortLister interface {
 	ListPorts() ([]string, error)
 }
@@ -113,7 +113,9 @@ func (s *SerialAbility) SetLister(l SerialPortLister) {
 func (s *SerialAbility) GetName() string { return "SerialAbility" }
 
 func (s *SerialAbility) Describe() string {
-	return "SerialAbility提供串口管理能力:open/close/read/write,字节流通过注入的 SerialTransport 完成;默认提供 tty* 风格的 PortLister。"
+	// 措辞必须与实现一致: 默认 lister 返回空列表(不做跨平台枚举),
+	// 真实枚举需调用方 SetLister 注入; 未注入 transport 时 open 直接报错。
+	return "SerialAbility提供串口管理能力:open/close/read/write,字节流通过注入的 SerialTransport 完成;未注入 transport 时 open 报错。默认 PortLister 返回空列表,真实枚举需 SetLister 注入。"
 }
 
 func (s *SerialAbility) Check(atom *types.Atom) error {
@@ -162,6 +164,28 @@ func (s *SerialAbility) Unmount(ctx context.Context, atom *types.Atom) error {
 
 // Compile-time guarantee that SerialAbility satisfies Unmounter.
 var _ types.Unmounter = (*SerialAbility)(nil)
+
+// Compile-time guarantee that SerialAbility satisfies CommandLister.
+var _ types.CommandLister = (*SerialAbility)(nil)
+
+// serialAbilityCommands 是 SerialAbility 的命令目录, 与 Command 中 act 的
+// switch 分支逐一对应(由 command_contract_test.go 解析源码交叉核对):
+// open/close/is_open/read/write/set_config/get_config/list_ports 共 8 条。
+var serialAbilityCommands = []string{
+	SerialCommandOpen,
+	SerialCommandClose,
+	SerialCommandIsOpen,
+	SerialCommandWrite,
+	SerialCommandRead,
+	SerialCommandSetConfig,
+	SerialCommandGetConfig,
+	SerialCommandListPorts,
+}
+
+// ListCommands 实现 types.CommandLister, 返回命令目录的副本(调用方持有所有权)。
+func (s *SerialAbility) ListCommands() []string {
+	return append([]string(nil), serialAbilityCommands...)
+}
 
 func (s *SerialAbility) Command(atom *types.Atom, act string, args any) types.CommandOutput {
 	if err := s.Check(atom); err != nil {
@@ -421,7 +445,7 @@ func isValidSerialConfig(c SerialConfig) bool {
 }
 
 // defaultPortLister 是 SerialPortLister 的默认实现:返回空列表(避免跨平台枚举差异)。
-// 用户可通过 SetLister 注入真实实现(读取 /dev/tty* 或注册表)。
+// 用户可通过 SetLister 注入真实实现(如 examples/verify 里的注册表 / /dev 扫描)。
 type defaultPortLister struct{}
 
 func (defaultPortLister) ListPorts() ([]string, error) { return []string{}, nil }

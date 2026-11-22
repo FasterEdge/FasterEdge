@@ -3,6 +3,7 @@ package types
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -94,6 +95,45 @@ func TestComponentErrorsSupportIsAndAs(t *testing.T) {
 	}
 	if !reflect.DeepEqual(gotTimeout.Components, []string{"alpha", "zeta"}) {
 		t.Fatalf("components = %v, want sorted copy", gotTimeout.Components)
+	}
+}
+
+// scopeDenyingAuthenticator 模拟"凭据有效但作用域不覆盖本次调用"的鉴权器:
+// 它对 component == "forbidden" 返回 ErrAuthorizationDenied, 其余放行。
+// 用于验证框架把授权拒绝(403)与凭据错误(401)区分开, 且同样先于组件查找。
+type scopeDenyingAuthenticator struct{}
+
+func (scopeDenyingAuthenticator) AuthenticateCommand(_ context.Context, _ *Atom, _ any, component, _ string, _ any) (string, error) {
+	if component == "forbidden" {
+		return "", fmt.Errorf("subject %q not authorized for %s: %w", "node", component, ErrAuthorizationDenied)
+	}
+	return "node", nil
+}
+
+func TestAuthenticatedCommandDeniesAuthorizationBeforeLookup(t *testing.T) {
+	atom := &Atom{}
+	target := &testComponent{name: "target"}
+	if err := atom.AddAbility(target); err != nil {
+		t.Fatal(err)
+	}
+	if err := atom.SetCommandAuthenticator(scopeDenyingAuthenticator{}); err != nil {
+		t.Fatal(err)
+	}
+	// 授权拒绝必须先于组件查找: 目标组件未注册时也是 403 而非
+	// ErrMissingDependency(否则越权调用可枚举已注册组件)。
+	out := atom.AuthenticatedCommand("cred", "forbidden", "ping", nil)
+	if !errors.Is(out.Err, ErrAuthorizationDenied) {
+		t.Fatalf("authorization denial: err=%v (want ErrAuthorizationDenied)", out.Err)
+	}
+	if errors.Is(out.Err, ErrAuthenticationFailed) {
+		t.Fatalf("authorization denial must not be reported as authentication failure: %v", out.Err)
+	}
+	if errors.Is(out.Err, ErrMissingDependency) {
+		t.Fatalf("authorization denial must precede component lookup: %v", out.Err)
+	}
+	// 放行的调用照常派发(鉴权器返回 principal)
+	if out := atom.AuthenticatedCommand("cred", "target", "ping", nil); out.Err != nil {
+		t.Fatalf("allowed call: %v", out.Err)
 	}
 }
 

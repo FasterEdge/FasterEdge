@@ -3,6 +3,7 @@ package types
 
 import (
 	"context"
+	"errors"
 	"fmt"
 )
 
@@ -33,9 +34,20 @@ func (a *Atom) AuthenticatedCommand(credential any, component, command string, a
 	return a.AuthenticatedCommandContext(context.Background(), credential, component, command, args)
 }
 
+// ErrAuthorizationDenied reports that the credential was valid but does not
+// authorize the requested component/command. 刻意与 ErrAuthenticationFailed
+// 区分: 认证失败(401)与授权拒绝(403)对平台告警/审计是两类事件。定义在此文件
+// 而非 errors.go —— 它只由命令分派边界的鉴权流程产生。
+var ErrAuthorizationDenied = errors.New("command authorization denied")
+
 // AuthenticatedCommandContext is the security boundary intended for HTTP,
-// MQTT, RPC, and other remote adapters. Authentication happens before target
-// lookup so failed callers cannot use it to enumerate registered components.
+// MQTT, RPC, and other remote adapters. The pipeline is:
+//
+//	authenticate + authorize (identity, scope) → dispatch (component lookup)
+//
+// 认证与授权都在目标组件查找之前完成: 作用域外的调用无法用来枚举已注册组件。
+// 授权拒绝以 ErrAuthorizationDenied 返回, 与凭据错误(ErrAuthenticationFailed)
+// 可区分——鉴权器用 %w 包装该哨兵即可让平台识别 403 而非 401。
 func (a *Atom) AuthenticatedCommandContext(ctx context.Context, credential any, component, command string, args any) (out CommandOutput) {
 	out.Name = command
 	if a == nil {
@@ -79,6 +91,13 @@ func (a *Atom) AuthenticatedCommandContext(ctx context.Context, credential any, 
 		return
 	}
 	if authErr != nil {
+		// 授权拒绝(作用域外的 component/command)与凭据错误(验签失败)在
+		// 上层折叠为同一 401 前, 先把 403 哨兵保留在错误链上: 平台可
+		// errors.Is(err, ErrAuthorizationDenied) 区分两类事件。
+		if errors.Is(authErr, ErrAuthorizationDenied) {
+			out.Err = fmt.Errorf("authorize command: %w: %v", ErrAuthorizationDenied, errors.Unwrap(authErr))
+			return
+		}
 		out.Err = fmt.Errorf("authenticate command: %w", ErrAuthenticationFailed)
 		return
 	}
@@ -99,6 +118,9 @@ func (a *Atom) dispatchContext(ctx context.Context, component, command string, a
 	c, ok := a.component(component)
 	if !ok {
 		out.Err = fmt.Errorf("component %q: %w", component, ErrMissingDependency)
+		// 目标组件不存在同样是一次"失败的 command 相位": 旧实现在此处直接
+		// 返回, metrics 里连 command:failure 都没有, 分派失败对埋点不可见。
+		a.observeGateFailure(component, PhaseCommand, out.Err)
 		return
 	}
 	_ = a.observe(component, command, PhaseCommand, func() (err error) {

@@ -124,6 +124,18 @@ func (n *NetMapData) refreshInterfacesLocked() {
 	}
 }
 
+// netMapCommands 是 NetMapData 的规范命令目录。Command 的 switch 与
+// ListCommands 消费同一批命令常量, 两个清单不会各自漂移。
+var netMapCommands = []string{
+	NetMapCommandInfo,
+	NetMapCommandSetNodeName,
+	NetMapCommandInterfaces,
+	NetMapCommandSetDefaultIface,
+}
+
+// ListCommands 实现 types.CommandLister。
+func (n *NetMapData) ListCommands() []string { return append([]string(nil), netMapCommands...) }
+
 func (n *NetMapData) Command(_ *types.Atom, act string, args any) types.CommandOutput {
 	switch act {
 	case NetMapCommandInfo:

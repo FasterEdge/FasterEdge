@@ -65,7 +65,54 @@ out := atom.AuthenticatedCommandContext(
 )
 ```
 
-Authentication completes before locating the target component; expired, revoked, pre-rotation or tampered tokens are all rejected. The current OneKey token can be reused within its validity period, so remote nodes should use short TTLs and invalidate tokens promptly via revocation or rotation.
+Authentication and authorization both complete before locating the target component; expired, revoked, pre-rotation or tampered tokens are all rejected, and so are calls outside the token's scope (returned as `types.ErrAuthorizationDenied`, distinguishable from the credential error `types.ErrAuthenticationFailed`).
+
+Tokens can be bound to a capability scope (component + command whitelist, optional args fingerprint), declared at issue time:
+
+```go
+out := ok.Command(atom, ability.OneKeyCommandIssueToken, ability.OneKeyIssueTokenArgs{
+    Subject: "edge-2", TTL: time.Hour,
+    Scope: []data.KeyringScopeRule{
+        {Component: "NetMapAbility", Commands: []string{ability.NetMapCommandGetTopology}},
+        {Component: "KeyringData", Commands: []string{data.KeyringCommandListTokens}},
+    },
+})
+```
+
+The scope and nonce are covered by the HMAC payload, so a remote peer that tampers with the credential's `Scope` field (widening the whitelist, stripping it, editing the command list) fails signature verification. A token with an empty scope is unrestricted — that is the legacy format's semantics; new issues should declare a scope explicitly.
+
+One-shot tokens (replay protection) are issued with `OneShot: true`: each authentication consumes one nonce and any replay is rejected. Tokens without `OneShot` remain reusable within their validity period (unchanged behaviour), so those should use short TTLs and be invalidated promptly via revocation or rotation. Authentication failures are rate limited per subject (10 per minute by default); beyond that the subject's attempts are rejected.
+
+Boundary notes: `verify_token` is the command the authentication protocol itself depends on and is always allowed; management commands such as `issue_token` / `revoke_*` / `rotate` / `set_secret` / `set_allowlist` / `set_role` are restricted to local in-process calls regardless of token scope.
+
+#### Observability
+
+Every lifecycle phase (`check` / `mount` / `run` / `unmount` / `rollback`) and the command dispatch path (`command`) emit instrumentation events. Attaching them takes one line:
+
+```go
+// Metrics only
+metrics, err := fasteredge.WithMetrics(atom)
+if err != nil { return err }
+
+// Or metrics + a custom sink (logging, alerting, ...)
+metrics, err := fasteredge.WithEventSinkAndMetrics(mySink, atom)
+if err != nil { return err }
+
+defer func() {
+    // Prometheus text format (text/plain; version=0.0.4), or metrics.WriteJSON()
+    fmt.Print(metrics.WritePrometheus())
+}()
+```
+
+The instrumentation contract is "one event pair per phase" (`start` + `success`/`failure`). Unmount and rollback timeouts also produce a terminal event, so a hung component is observable — it never leaves a bare `start` behind. The export channel is yours to choose: the framework starts no HTTP server and writes no files, it only provides renderers.
+
+```text
+fasteredge_lifecycle_events_total{phase="mount",status="success"} 19
+fasteredge_phase_duration_seconds_count{phase="mount"} 19
+fasteredge_phase_duration_seconds{phase="mount",quantile="0.99"} 0.1067416
+```
+
+`types.MetricsCollector` implements `types.EventSink`, so it can be fed into `types.NewMultiEventSink` alongside other sinks. If you only need raw events without aggregation, use `types.EventRecorder`.
 
 ### 4. Ecosystem
 
@@ -108,25 +155,48 @@ mysql.Command(atom, data.DatabaseCommandSetSecret, data.DatabaseSetSecretArgs{
 | `RoleAbility` | Basic | `describe` / `set_role` / `get_role` |
 | `TimeAbility` | Basic | `sync_manual` / `sync_system` / `sync_net` / `sync_ntp` / `get_time` / `configure_run` |
 | `NetMapAbility` | Basic | `register_peer` / `unregister_peer` / `update_peer` / `list_peers` / `lookup_peer` / `get_topology` |
-| `OneKeyAbility` | Basic | `issue_token` / `verify_token` / `revoke_token` / `revoke_all` / `list_tokens` / `status` / `rotate` (HMAC-SHA256) |
+| `OneKeyAbility` | Basic | `issue_token` / `verify_token` / `revoke_token` / `revoke_all` / `list_tokens` / `status` / `rotate` (HMAC-SHA256; tokens can bind a component/command scope and a one-shot nonce) |
 | `CloudRoleAbility` | Basic | `describe` / `set_controller` / `register_service` / `set_status` / `heartbeat` (depends on RoleAbility with role=cloud) |
 | `EdgeRoleAbility` | Basic | `describe` / `set_zone` / `add_capability` / `record_latency` / `get_metrics` / `set_online` (depends on RoleAbility with role=edge) |
-| `CmdAbility` | Terminal | `run` / `start` / `wait` / `kill` / `list` / `set_allowlist` / `clear_finished` (pluggable allowlist) |
-| `ShAbility` | Terminal | `run` / `start` / `wait` / `kill` / `list` / `set_allowlist` (based on CmdAbility, `sh -c` form) |
-| `BashAbility` | Terminal | `run` / `start` / `wait` / `kill` / `list` / `set_allowlist` (based on ShAbility, `bash --noprofile --norc -c` form) |
-| `ConfigFileAbility` | File/Config | `set_path` / `load` / `save` / `exists` (JSON persistence based on ConfigData) |
-| `FileTransferAbility` | File/Config | `set_target` / `upload` / `download` / `list` / `get_transfer` / `cancel` (pluggable Transport) |
-| `AlgorithmDistributionAbility` | File/Config | `register_algorithm` / `unregister_algorithm` / `distribute` / `list_distributions` / `cancel` (based on FileTransfer) |
+| `CmdAbility` | Terminal | `run` / `start` / `wait` / `kill` / `list` / `set_allowlist` / `get_allowlist` / `set_allowlist_any` / `get_job` / `clear_finished` (pluggable allowlist, **fail-closed**) |
+| `ShAbility` | Terminal | `run` / `start` / `wait` / `kill` / `list` / `set_allowlist` / `get_allowlist` / `set_allowlist_any` (based on CmdAbility, `sh -c` form; does not inherit `get_job` / `clear_finished`, **fail-closed**) |
+| `BashAbility` | Terminal | `run` / `start` / `wait` / `kill` / `list` / `set_allowlist` / `get_allowlist` / `set_allowlist_any` (based on ShAbility, `bash --noprofile --norc -c` form; does not inherit `get_job` / `clear_finished`, **fail-closed**) |
+| `ConfigFileAbility` | File/Config | `set_path` / `get_path` / `load` / `save` / `exists` (JSON persistence based on ConfigData) |
+| `FileTransferAbility` | File/Config | `set_target` / `get_target` / `upload` / `download` / `list` / `get_transfer` / `cancel` / `clear_finished` (pluggable Transport) |
+| `AlgorithmDistributionAbility` | File/Config | `register_algorithm` / `unregister_algorithm` / `get_algorithm` / `list_algorithms` / `distribute` / `cancel` / `list_distributions` / `clear_finished` (based on FileTransfer) |
 | `ModbusAbility` | Industrial protocols | `set_endpoint` / `set_unit_id` / `read_holding` / `read_input` / `read_coils` / `read_discrete` / `write_*` (pluggable) |
 | `SerialAbility` | Industrial protocols | `open` / `close` / `read` / `write` / `set_config` / `list_ports` (pluggable Transport) |
-| `TSNAbility` | Industrial protocols | `set_interface` / `register_talker` / `register_listener` / `unregister` / `set_priority_map` / `set_time_aware` |
+| `TSNAbility` | Industrial protocols | `set_interface` / `register_talker` / `register_listener` / `unregister` / `set_priority_map` / `set_time_aware` (pluggable `TSNTransport`) |
 | `MQTTAbility` | Data exchange | `set_broker` / `connect` / `disconnect` / `publish` / `subscribe` / `drain` / `list_subscriptions` (pluggable Transport) |
 | `InfluxDBAbility` | Data exchange | `set_endpoint` / `set_token` / `set_org` / `set_bucket` / `ping` / `write` / `query` / `list_series` / `delete_series` |
 | `EKuiperAbility` | Data exchange | `set_endpoint` / `create_stream` / `drop_stream` / `create_rule` / `start_rule` / `stop_rule` / `show_rules` |
 | `DockerAbility` | Container orchestration | `set_endpoint` / `list_containers` / `start/stop/restart/remove` / `pull_image` / `inspect` / `get_logs` / `create` |
 | `KubernetesAbility` | Container orchestration | `set_context` / `apply` / `delete` / `list` / `get` / `scale` / `get_logs` |
 
-All capabilities that depend on external networks/processes (FileTransfer / Modbus / Serial / MQTT / InfluxDB / EKuiper / Docker / Kubernetes) are injected via `SetXxxTransport(...)`; the framework itself only manages metadata and lifecycle, without binding to any concrete driver.
+All capabilities that depend on external networks/processes (FileTransfer / Modbus / Serial / TSN / MQTT / InfluxDB / EKuiper / Docker / Kubernetes) are injected via `SetXxxTransport(...)`; the framework itself only manages metadata and lifecycle, without binding to any concrete driver.
+
+#### SerialAbility: real backends and scope
+
+`SerialAbility` opens no device files itself: the byte stream must go through a `SerialTransport` injected with `SetTransport(...)`; the framework only tracks port state and config records. **Without a transport, `open` returns an error (`no transport set`) instead of silently succeeding**; `is_open` / `get_config` / `list_ports` only read back local records and work offline.
+
+`examples/verify/serial_transport.go` is a **minimal but real** reference implementation (verification program only, not a library dependency), split by GOOS with build tags:
+
+- **Windows**: `CreateFile("\.\COMx")` + `SetCommState` (DCB baud/data bits/stop bits/parity) + `SetCommTimeouts` (where the read timeout actually lands); port enumeration reads `HARDWARE\DEVICEMAP\SERIALCOMM`.
+- **Linux**: `open("/dev/ttyUSB*")` + termios `TCGETS`/`TCSETS` + `select` for read timeouts; port enumeration scans `ttyS*`/`ttyUSB*`/`ttyACM*` under `/dev`.
+- **Other platforms** (darwin/wasm, ...): `serial_port_unsupported.go` returns an explicit "not implemented" error so `go build ./...` passes on any GOOS instead of pretending to work.
+
+`examples/verify` injects it and runs a real round trip: `open → is_open → write → get_config → close` was verified against COM1 of the build machine (the `Serial/real-*` assertions); when no device is available that section is explicitly SKIPped rather than reported as a pass. `ability/serial_ability_test.go` covers the state machine and `examples/verify/serial_transport_test.go` covers the real backend's error paths.
+
+`TSNAbility` does not call netlink/tc/taprio itself: interface probing, stream rule installation/removal, PCP-to-queue mapping and Qbv gate control are all delegated to the injected `TSNTransport`. **Without a transport, `set_interface` / `register_talker` / `register_listener` / `unregister` / `set_priority_map` / `set_time_aware` all return an error and never report silent success**; `get_interface` / `list_streams` / `get_priority_map` / `get_time_aware` only read back local records and work offline. When the device-side push fails the local state does not advance (e.g. a failed `unregister` keeps the entry so the caller can retry).
+
+#### Command execution security model (fail-closed)
+
+`CmdAbility` / `ShAbility` / `BashAbility` are **fail-closed**: execution is denied by default, not allowed by default.
+
+- **An empty allowlist denies every execution.** `run` / `start` return `ErrAllowlistEmpty` (wrapped in `types.ErrInvalidArguments`) when no allowlist has been configured, and the message names the opt-in paths. The previous behaviour — "empty allowlist means unrestricted" — was a default-open authorization hole and has been removed.
+- **Two explicit ways to grant execution**: (1) `set_allowlist` lists the permitted commands (exact executable name plus args prefix for `CmdAbility`; first word for `ShAbility` / `BashAbility`); (2) `set_allowlist_any` (`CmdSetAllowAnyArgs{Any:true}`, or the Go API `SetAllowAny(true)`) opens "allow any command". Opening it is the caller's explicit decision; the framework never makes it for you.
+- **Remote surface (one known gap)**: `set_allowlist` grants capability, so `OneKeyAbility`'s authentication boundary restricts it to local in-process calls; `run` / `start` stay remotely reachable but always subject to the allowlist. **The new `set_allowlist_any` is not yet in that local-only list** — it needs one more case in `restrictedRemoteCommand` inside `ability/one_key_ability.go`, a file another owner was refactoring in parallel, so this change deliberately left it untouched; the gap is recorded by `TestCmdAbilitySetAllowAnyRemoteRestriction`. Do not expose `set_allowlist_any` to remote transports until that line lands.
+- **Composite-command blocking (honest scope, not exhaustive)**: after the first word matches, shell chaining metacharacters (`;` `&` `|` `$()` backticks `` ` `` process substitution `<(` `>()` `|&` `${` and control characters such as CR/LF) are scanned for and the whole command is rejected. This is a **quote-aware character scan, not a shell parser**: backslash-escaped encodings (e.g. `\x3b` for `;`) are not decoded, and callers must rely on fail-closed defaults or tighter allowlists there. Boundary cases live in `TestShAbilityRejectsExtendedChainingBypass` in `ability/sh_ability_test.go`.
 
 #### Cross-Capability Composition Example
 
@@ -158,7 +228,7 @@ ok.Command(atom, ability.OneKeyCommandVerifyToken, ability.OneKeyVerifyTokenArgs
 - Follows the Strategy Pattern, Command Pattern and Composite Pattern
 - All command arguments are strictly typed; any nil / type mismatch / blank value returns `types.ErrInvalidArguments`
 - Internal state is fully protected by `sync.RWMutex` / `atomic`; `-race` clean
-- Ability involving external networks rejects `localhost` / `127.0.0.1` / `0.0.0.0` / `::1` by default to reduce SSRF risk
+- Ability involving external networks rejects `localhost` / `127.0.0.1` / `0.0.0.0` / `::1` by default to reduce SSRF risk. Address decisions are unified in `ability/address_policy.go` (`AddressPolicyLevel`: `PublicOnly` / `AllowPrivate` / `AllowLoopback`); each ability picks a level explicitly instead of writing its own rule set, and hostnames are re-checked against the **actually resolved IPs** at dial time (DNS rebinding). IPv4-mapped forms (`::ffff:127.0.0.1`), userinfo tricks (`tcp://alice@host:port`) and decimal-notation IPs (`2130706433`, `127.1`, `0x7f.0.0.1`) are always rejected
 
 ### 6. Lifecycle and Graceful Shutdown
 
@@ -183,4 +253,25 @@ go test -race ./...     # With race detection
 go test ./... -v -run Integration   # Cross-capability integration tests
 ```
 
-Current coverage: **315 test functions (plus 8 benchmarks and 8 fuzz targets), all passing, `go vet` with no warnings.**
+Current coverage: **all unit and integration tests pass (15 new observability tests added), `go vet` with no warnings, `-race` clean.** The total number of test functions grows with the component set, so it is no longer pinned to a specific number in the docs.
+
+### 8. Command-Contract Extraction and Ecosystem Diffing
+
+The ecosystem contains second implementations (such as the frontend registry of [Simulator](https://github.com/FasterEdge/Simulator)) that align their command names with the Go side by hand. To turn "aligned" into a machine-checkable fact, this repository ships a static contract extractor:
+
+```bash
+go run ./cmd/contract -out contract/contract.json   # or -stdout to print directly
+```
+
+The extractor uses `go/ast` to parse the `Command()` of every component under `ability/` and `data/`: it walks each dispatch branch of the `switch act` (including branches reached through helpers such as `simpleContainerAction(act, args)`, `sqlCommand(store, act, args)` and `b.sh.Command(mapBashCommand(act), args)`), resolves the case label's constant identifier against the consts in the same file to recover the command literal, and then parses the argument struct asserted by `args.(XxxArgs)` in that branch (name / type / json tag / three-valued requiredness). Two runs over the same source produce byte-identical output, so the file can be version-controlled.
+
+The output is `contract/contract.json` (schemaVersion 1), with these fields:
+
+- `components[]`: component name, kind, source file, and `commands[]` (command name + constant name + `args`)
+- `args.kind`: `struct` (argument struct) / `none` (the branch explicitly rejects non-nil args) / `unknown` (not decidable statically, e.g. a uniform rejection before the `switch`)
+- `args.wrapper`: the Go side wraps a configuration struct in the argument struct (the `configure` family), which consumers must treat as a structural difference
+- `args.fields[]`: field name, json name, tag, Go type, and three-valued `required`
+
+The extraction is guarded by `cmd/contract/extract_test.go`: a two-way comparison of the component set against the source, every command findable in a dispatch branch (and vice versa), the delegation chains and wrapper flags spot-checked against the real source, and two extractions producing identical bytes. Together with `ability/command_contract_test.go` (which guards that `ListCommands` equals the set of dispatch branches) these form two gates against command-catalog drift.
+
+For the downstream diff command see section 9 of the Simulator README; **this repository only promises that the extraction faithfully reflects the Go source, not that downstream implementations match it** — that is for each downstream to diff and fix on its own. Current Go-side baseline: 31 components / 226 dispatched commands / 198 command constants, no unreferenced constants.

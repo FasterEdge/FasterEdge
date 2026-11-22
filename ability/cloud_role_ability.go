@@ -293,6 +293,25 @@ func (c *CloudRoleAbility) describeWithRole(atom *types.Atom) CloudRoleDescripti
 	return desc
 }
 
+// cloudRoleAbilityCommands 是 CloudRoleAbility 的命令目录, 与 Command 中 act
+// 的 switch 分支一一对应(由 command_contract_test.go 解析源码交叉核对)。
+var cloudRoleAbilityCommands = []string{
+	CloudRoleCommandDescribe,
+	CloudRoleCommandSetController,
+	CloudRoleCommandGetController,
+	CloudRoleCommandRegister,
+	CloudRoleCommandUnregister,
+	CloudRoleCommandListServices,
+	CloudRoleCommandSetStatus,
+	CloudRoleCommandGetStatus,
+	CloudRoleCommandHeartbeat,
+}
+
+// ListCommands 实现 types.CommandLister, 返回命令目录的副本。
+func (c *CloudRoleAbility) ListCommands() []string {
+	return append([]string(nil), cloudRoleAbilityCommands...)
+}
+
 func normalizeStatus(s CloudRoleStatus) CloudRoleStatus {
 	switch strings.ToLower(strings.TrimSpace(string(s))) {
 	case "healthy", "ok", "up":

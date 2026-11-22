@@ -71,4 +71,15 @@ func (b *BaseAbility) Command(atom *types.Atom, act string, args any) types.Comm
 	return types.CommandOutput{Name: act, Err: fmt.Errorf("command %s: %w", act, types.ErrUnsupportedCommand)}
 }
 
+// baseAbilityCommands 是 BaseAbility 的命令目录, 与 Command 中 act 的
+// switch 分支一一对应(由 command_contract_test.go 解析源码交叉核对,
+// 新增分支忘了登记会直接测试失败)。
+var baseAbilityCommands = []string{
+	CommandListDataNames,
+	CommandListAbilityNames,
+}
+
+// ListCommands 实现 types.CommandLister, 返回命令目录的副本(调用方持有所有权)。
+func (b *BaseAbility) ListCommands() []string { return append([]string(nil), baseAbilityCommands...) }
+
 // 细节方法实现...

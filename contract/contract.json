@@ -1,0 +1,3809 @@
+{
+  "schemaVersion": 1,
+  "generator": "fasteredge-contract-extract FasterEdge",
+  "stats": {
+    "packages": [
+      "ability",
+      "data"
+    ],
+    "components": 31,
+    "commands": 226,
+    "commandConstants": 198,
+    "distinctCommandValues": 151,
+    "argsStruct": 136,
+    "argsNone": 86,
+    "argsUnknown": 4,
+    "fieldsRequired": 10,
+    "fieldsOptional": 7,
+    "fieldsUnknown": 234
+  },
+  "components": [
+    {
+      "name": "AlgorithmDistributionAbility",
+      "kind": "ability",
+      "source": "FasterEdge/algorithm_distribution_ability.go",
+      "commands": [
+        {
+          "name": "cancel",
+          "constant": "AlgDistCommandCancel",
+          "args": {
+            "kind": "struct",
+            "type": "AlgDistIDArg",
+            "fields": [
+              {
+                "name": "ID",
+                "json": "ID",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "clear_finished",
+          "constant": "AlgDistCommandClearFinished",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "distribute",
+          "constant": "AlgDistCommandDistribute",
+          "args": {
+            "kind": "struct",
+            "type": "AlgDistDistributeArgs",
+            "fields": [
+              {
+                "name": "Name",
+                "json": "Name",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "Version",
+                "json": "Version",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "Target",
+                "json": "Target",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "RemotePath",
+                "json": "RemotePath",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "get_algorithm",
+          "constant": "AlgDistCommandGet",
+          "args": {
+            "kind": "struct",
+            "type": "AlgDistAlgorithmRef",
+            "fields": [
+              {
+                "name": "Name",
+                "json": "Name",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "Version",
+                "json": "Version",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "list_algorithms",
+          "constant": "AlgDistCommandList",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "list_distributions",
+          "constant": "AlgDistCommandListDistribute",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "register_algorithm",
+          "constant": "AlgDistCommandRegister",
+          "args": {
+            "kind": "struct",
+            "type": "AlgDistRegisterArgs",
+            "fields": [
+              {
+                "name": "Name",
+                "json": "Name",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "Version",
+                "json": "Version",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "SourcePath",
+                "json": "SourcePath",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "ContentType",
+                "json": "ContentType",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "unregister_algorithm",
+          "constant": "AlgDistCommandUnregister",
+          "args": {
+            "kind": "struct",
+            "type": "AlgDistAlgorithmRef",
+            "fields": [
+              {
+                "name": "Name",
+                "json": "Name",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "Version",
+                "json": "Version",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "BaseAbility",
+      "kind": "ability",
+      "source": "FasterEdge/base_ability.go",
+      "commands": [
+        {
+          "name": "list_ability_names",
+          "constant": "CommandListAbilityNames",
+          "args": {
+            "kind": "unknown"
+          }
+        },
+        {
+          "name": "list_data_names",
+          "constant": "CommandListDataNames",
+          "args": {
+            "kind": "unknown"
+          }
+        }
+      ]
+    },
+    {
+      "name": "BashAbility",
+      "kind": "ability",
+      "source": "FasterEdge/bash_ability.go",
+      "commands": [
+        {
+          "name": "get_allowlist",
+          "constant": "BashCommandGetAllowlist",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "kill",
+          "constant": "BashCommandKill",
+          "args": {
+            "kind": "struct",
+            "type": "ShKillArgs",
+            "via": "b.sh.Command",
+            "fields": [
+              {
+                "name": "JobID",
+                "json": "JobID",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "list",
+          "constant": "BashCommandList",
+          "args": {
+            "kind": "none",
+            "via": "b.sh.Command"
+          }
+        },
+        {
+          "name": "run",
+          "constant": "BashCommandRun",
+          "args": {
+            "kind": "struct",
+            "type": "ShRunArgs",
+            "fields": [
+              {
+                "name": "Command",
+                "json": "Command",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "Timeout",
+                "json": "Timeout",
+                "type": "time.Duration",
+                "required": "unknown"
+              },
+              {
+                "name": "Env",
+                "json": "Env",
+                "type": "[]string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "set_allowlist",
+          "constant": "BashCommandSetAllowlist",
+          "args": {
+            "kind": "struct",
+            "type": "ShSetAllowlistArgs",
+            "fields": [
+              {
+                "name": "Allowed",
+                "json": "Allowed",
+                "type": "[]string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "set_allowlist_any",
+          "constant": "BashCommandSetAllowAny",
+          "args": {
+            "kind": "struct",
+            "type": "CmdSetAllowAnyArgs",
+            "fields": [
+              {
+                "name": "Any",
+                "json": "Any",
+                "type": "bool",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "start",
+          "constant": "BashCommandStart",
+          "args": {
+            "kind": "struct",
+            "type": "ShRunArgs",
+            "fields": [
+              {
+                "name": "Command",
+                "json": "Command",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "Timeout",
+                "json": "Timeout",
+                "type": "time.Duration",
+                "required": "unknown"
+              },
+              {
+                "name": "Env",
+                "json": "Env",
+                "type": "[]string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "wait",
+          "constant": "BashCommandWait",
+          "args": {
+            "kind": "struct",
+            "type": "ShWaitArgs",
+            "via": "b.sh.Command",
+            "fields": [
+              {
+                "name": "JobID",
+                "json": "JobID",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "Wait",
+                "json": "Wait",
+                "type": "time.Duration",
+                "required": "unknown"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "CloudRoleAbility",
+      "kind": "ability",
+      "source": "FasterEdge/cloud_role_ability.go",
+      "commands": [
+        {
+          "name": "describe",
+          "constant": "CloudRoleCommandDescribe",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "get_controller",
+          "constant": "CloudRoleCommandGetController",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "get_status",
+          "constant": "CloudRoleCommandGetStatus",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "heartbeat",
+          "constant": "CloudRoleCommandHeartbeat",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "list_services",
+          "constant": "CloudRoleCommandListServices",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "register_service",
+          "constant": "CloudRoleCommandRegister",
+          "args": {
+            "kind": "struct",
+            "type": "CloudRoleRegisterServiceArgs",
+            "fields": [
+              {
+                "name": "Name",
+                "json": "Name",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "Version",
+                "json": "Version",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "Endpoint",
+                "json": "Endpoint",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "set_controller",
+          "constant": "CloudRoleCommandSetController",
+          "args": {
+            "kind": "struct",
+            "type": "CloudRoleSetControllerArgs",
+            "fields": [
+              {
+                "name": "URL",
+                "json": "URL",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "set_status",
+          "constant": "CloudRoleCommandSetStatus",
+          "args": {
+            "kind": "struct",
+            "type": "CloudRoleSetStatusArgs",
+            "fields": [
+              {
+                "name": "Status",
+                "json": "Status",
+                "type": "CloudRoleStatus",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "unregister_service",
+          "constant": "CloudRoleCommandUnregister",
+          "args": {
+            "kind": "struct",
+            "type": "CloudRoleUnregisterServiceArgs",
+            "fields": [
+              {
+                "name": "Name",
+                "json": "Name",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "CmdAbility",
+      "kind": "ability",
+      "source": "FasterEdge/cmd_ability.go",
+      "commands": [
+        {
+          "name": "clear_finished",
+          "constant": "CmdCommandClearJobs",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "get_allowlist",
+          "constant": "CmdCommandGetAllowlist",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "get_job",
+          "constant": "CmdCommandGetJob",
+          "args": {
+            "kind": "struct",
+            "type": "CmdJobIDArg",
+            "fields": [
+              {
+                "name": "JobID",
+                "json": "JobID",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "kill",
+          "constant": "CmdCommandKill",
+          "args": {
+            "kind": "struct",
+            "type": "CmdKillArgs",
+            "fields": [
+              {
+                "name": "JobID",
+                "json": "JobID",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "list",
+          "constant": "CmdCommandList",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "run",
+          "constant": "CmdCommandRun",
+          "args": {
+            "kind": "struct",
+            "type": "CmdRunArgs",
+            "fields": [
+              {
+                "name": "Name",
+                "json": "Name",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "Args",
+                "json": "Args",
+                "type": "[]string",
+                "required": "unknown"
+              },
+              {
+                "name": "Timeout",
+                "json": "Timeout",
+                "type": "time.Duration",
+                "required": "unknown"
+              },
+              {
+                "name": "Env",
+                "json": "Env",
+                "type": "[]string",
+                "required": "unknown",
+                "doc": "Env 原样透传给子进程环境(空时继承父进程全部环境; 非空时整体替换)。 注意: 不做\"白名单过滤\"——调用方(认证边界内)对其内容负责。"
+              }
+            ]
+          }
+        },
+        {
+          "name": "set_allowlist",
+          "constant": "CmdCommandSetAllowlist",
+          "args": {
+            "kind": "struct",
+            "type": "CmdSetAllowlistArgs",
+            "fields": [
+              {
+                "name": "Entries",
+                "json": "Entries",
+                "type": "[]CmdAllowlistEntry",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "set_allowlist_any",
+          "constant": "CmdCommandSetAllowAny",
+          "args": {
+            "kind": "struct",
+            "type": "CmdSetAllowAnyArgs",
+            "fields": [
+              {
+                "name": "Any",
+                "json": "Any",
+                "type": "bool",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "start",
+          "constant": "CmdCommandStart",
+          "args": {
+            "kind": "struct",
+            "type": "CmdRunArgs",
+            "fields": [
+              {
+                "name": "Name",
+                "json": "Name",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "Args",
+                "json": "Args",
+                "type": "[]string",
+                "required": "unknown"
+              },
+              {
+                "name": "Timeout",
+                "json": "Timeout",
+                "type": "time.Duration",
+                "required": "unknown"
+              },
+              {
+                "name": "Env",
+                "json": "Env",
+                "type": "[]string",
+                "required": "unknown",
+                "doc": "Env 原样透传给子进程环境(空时继承父进程全部环境; 非空时整体替换)。 注意: 不做\"白名单过滤\"——调用方(认证边界内)对其内容负责。"
+              }
+            ]
+          }
+        },
+        {
+          "name": "wait",
+          "constant": "CmdCommandWait",
+          "args": {
+            "kind": "struct",
+            "type": "CmdWaitArgs",
+            "fields": [
+              {
+                "name": "JobID",
+                "json": "JobID",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "Wait",
+                "json": "Wait",
+                "type": "time.Duration",
+                "required": "unknown"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "ConfigFileAbility",
+      "kind": "ability",
+      "source": "FasterEdge/config_file_ability.go",
+      "commands": [
+        {
+          "name": "exists",
+          "constant": "ConfigFileCommandExists",
+          "args": {
+            "kind": "struct",
+            "type": "ConfigFilePathArg",
+            "fields": [
+              {
+                "name": "Path",
+                "json": "Path",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "get_path",
+          "constant": "ConfigFileCommandGetPath",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "load",
+          "constant": "ConfigFileCommandLoad",
+          "args": {
+            "kind": "struct",
+            "type": "ConfigFileLoadArgs",
+            "fields": [
+              {
+                "name": "Path",
+                "json": "Path",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "Strict",
+                "json": "Strict",
+                "type": "bool",
+                "required": "unknown",
+                "doc": "严格模式下文件不存在/解析失败返回错误,否则静默返回当前快照"
+              }
+            ]
+          }
+        },
+        {
+          "name": "save",
+          "constant": "ConfigFileCommandSave",
+          "args": {
+            "kind": "struct",
+            "type": "ConfigFileSaveArgs",
+            "fields": [
+              {
+                "name": "Path",
+                "json": "Path",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "Overwrite",
+                "json": "Overwrite",
+                "type": "bool",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "set_path",
+          "constant": "ConfigFileCommandSetPath",
+          "args": {
+            "kind": "struct",
+            "type": "ConfigFilePathArg",
+            "fields": [
+              {
+                "name": "Path",
+                "json": "Path",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "DockerAbility",
+      "kind": "ability",
+      "source": "FasterEdge/docker_ability.go",
+      "commands": [
+        {
+          "name": "create_container",
+          "constant": "DockerCommandCreate",
+          "args": {
+            "kind": "struct",
+            "type": "DockerCreateArgs",
+            "fields": [
+              {
+                "name": "Name",
+                "json": "Name",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "Image",
+                "json": "Image",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "Command",
+                "json": "Command",
+                "type": "[]string",
+                "required": "unknown"
+              },
+              {
+                "name": "Env",
+                "json": "Env",
+                "type": "[]string",
+                "required": "unknown"
+              },
+              {
+                "name": "Ports",
+                "json": "Ports",
+                "type": "[]string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "get_endpoint",
+          "constant": "DockerCommandGetEndpoint",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "get_logs",
+          "constant": "DockerCommandGetLogs",
+          "args": {
+            "kind": "struct",
+            "type": "DockerContainerArgs",
+            "via": "d.simpleContainerAction",
+            "fields": [
+              {
+                "name": "IDOrName",
+                "json": "IDOrName",
+                "type": "string",
+                "required": "required"
+              },
+              {
+                "name": "Timeout",
+                "json": "Timeout",
+                "type": "time.Duration",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "inspect_container",
+          "constant": "DockerCommandInspect",
+          "args": {
+            "kind": "struct",
+            "type": "DockerContainerArgs",
+            "via": "d.simpleContainerAction",
+            "fields": [
+              {
+                "name": "IDOrName",
+                "json": "IDOrName",
+                "type": "string",
+                "required": "required"
+              },
+              {
+                "name": "Timeout",
+                "json": "Timeout",
+                "type": "time.Duration",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "list_containers",
+          "constant": "DockerCommandListContainers",
+          "args": {
+            "kind": "struct",
+            "type": "struct{All bool}",
+            "fields": [
+              {
+                "name": "All",
+                "json": "All",
+                "type": "bool",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "pull_image",
+          "constant": "DockerCommandPullImage",
+          "args": {
+            "kind": "struct",
+            "type": "DockerPullImageArgs",
+            "fields": [
+              {
+                "name": "Reference",
+                "json": "Reference",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "remove_container",
+          "constant": "DockerCommandRemove",
+          "args": {
+            "kind": "struct",
+            "type": "DockerContainerArgs",
+            "via": "d.simpleContainerAction",
+            "fields": [
+              {
+                "name": "IDOrName",
+                "json": "IDOrName",
+                "type": "string",
+                "required": "required"
+              },
+              {
+                "name": "Timeout",
+                "json": "Timeout",
+                "type": "time.Duration",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "restart_container",
+          "constant": "DockerCommandRestart",
+          "args": {
+            "kind": "struct",
+            "type": "DockerContainerArgs",
+            "via": "d.simpleContainerAction",
+            "fields": [
+              {
+                "name": "IDOrName",
+                "json": "IDOrName",
+                "type": "string",
+                "required": "required"
+              },
+              {
+                "name": "Timeout",
+                "json": "Timeout",
+                "type": "time.Duration",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "set_endpoint",
+          "constant": "DockerCommandSetEndpoint",
+          "args": {
+            "kind": "struct",
+            "type": "DockerEndpointArgs",
+            "fields": [
+              {
+                "name": "URL",
+                "json": "URL",
+                "type": "string",
+                "required": "unknown",
+                "doc": "unix:///var/run/docker.sock 或 tcp://host:2375"
+              }
+            ]
+          }
+        },
+        {
+          "name": "start_container",
+          "constant": "DockerCommandStart",
+          "args": {
+            "kind": "struct",
+            "type": "DockerContainerArgs",
+            "via": "d.simpleContainerAction",
+            "fields": [
+              {
+                "name": "IDOrName",
+                "json": "IDOrName",
+                "type": "string",
+                "required": "required"
+              },
+              {
+                "name": "Timeout",
+                "json": "Timeout",
+                "type": "time.Duration",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "stop_container",
+          "constant": "DockerCommandStop",
+          "args": {
+            "kind": "struct",
+            "type": "DockerContainerArgs",
+            "via": "d.simpleContainerAction",
+            "fields": [
+              {
+                "name": "IDOrName",
+                "json": "IDOrName",
+                "type": "string",
+                "required": "required"
+              },
+              {
+                "name": "Timeout",
+                "json": "Timeout",
+                "type": "time.Duration",
+                "required": "unknown"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "EKuiperAbility",
+      "kind": "ability",
+      "source": "FasterEdge/ekuiper_ability.go",
+      "commands": [
+        {
+          "name": "create_rule",
+          "constant": "EKuiperCommandCreateRule",
+          "args": {
+            "kind": "struct",
+            "type": "EKuiperCreateRuleArgs",
+            "fields": [
+              {
+                "name": "ID",
+                "json": "ID",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "SQL",
+                "json": "SQL",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "Actions",
+                "json": "Actions",
+                "type": "[]string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "create_stream",
+          "constant": "EKuiperCommandCreateStream",
+          "args": {
+            "kind": "struct",
+            "type": "EKuiperStreamArgs",
+            "fields": [
+              {
+                "name": "Name",
+                "json": "Name",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "SQL",
+                "json": "SQL",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "drop_rule",
+          "constant": "EKuiperCommandDropRule",
+          "args": {
+            "kind": "struct",
+            "type": "EKuiperRuleIDArg",
+            "fields": [
+              {
+                "name": "ID",
+                "json": "ID",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "drop_stream",
+          "constant": "EKuiperCommandDropStream",
+          "args": {
+            "kind": "struct",
+            "type": "EKuiperStreamRef",
+            "fields": [
+              {
+                "name": "Name",
+                "json": "Name",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "get_endpoint",
+          "constant": "EKuiperCommandGetEndpoint",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "get_rule_status",
+          "constant": "EKuiperCommandGetRuleStatus",
+          "args": {
+            "kind": "struct",
+            "type": "EKuiperRuleIDArg",
+            "fields": [
+              {
+                "name": "ID",
+                "json": "ID",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "get_stream",
+          "constant": "EKuiperCommandGetStream",
+          "args": {
+            "kind": "struct",
+            "type": "EKuiperStreamRef",
+            "fields": [
+              {
+                "name": "Name",
+                "json": "Name",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "list_streams",
+          "constant": "EKuiperCommandListStreams",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "set_endpoint",
+          "constant": "EKuiperCommandSetEndpoint",
+          "args": {
+            "kind": "struct",
+            "type": "EKuiperEndpointArgs",
+            "fields": [
+              {
+                "name": "URL",
+                "json": "URL",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "show_rules",
+          "constant": "EKuiperCommandShowRules",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "start_rule",
+          "constant": "EKuiperCommandStartRule",
+          "args": {
+            "kind": "struct",
+            "type": "EKuiperRuleIDArg",
+            "fields": [
+              {
+                "name": "ID",
+                "json": "ID",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "stop_rule",
+          "constant": "EKuiperCommandStopRule",
+          "args": {
+            "kind": "struct",
+            "type": "EKuiperRuleIDArg",
+            "fields": [
+              {
+                "name": "ID",
+                "json": "ID",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "EdgeRoleAbility",
+      "kind": "ability",
+      "source": "FasterEdge/edge_role_ability.go",
+      "commands": [
+        {
+          "name": "add_capability",
+          "constant": "EdgeRoleCommandAddCap",
+          "args": {
+            "kind": "struct",
+            "type": "EdgeRoleCapabilityArg",
+            "fields": [
+              {
+                "name": "Name",
+                "json": "Name",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "describe",
+          "constant": "EdgeRoleCommandDescribe",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "get_metrics",
+          "constant": "EdgeRoleCommandGetMetrics",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "get_zone",
+          "constant": "EdgeRoleCommandGetZone",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "list_capabilities",
+          "constant": "EdgeRoleCommandListCaps",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "record_latency",
+          "constant": "EdgeRoleCommandRecordLatency",
+          "args": {
+            "kind": "struct",
+            "type": "EdgeRoleRecordLatencyArgs",
+            "fields": [
+              {
+                "name": "LatencyMs",
+                "json": "LatencyMs",
+                "type": "float64",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "remove_capability",
+          "constant": "EdgeRoleCommandRemoveCap",
+          "args": {
+            "kind": "struct",
+            "type": "EdgeRoleCapabilityArg",
+            "fields": [
+              {
+                "name": "Name",
+                "json": "Name",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "set_capabilities",
+          "constant": "EdgeRoleCommandSetCaps",
+          "args": {
+            "kind": "struct",
+            "type": "EdgeRoleSetCapabilitiesArgs",
+            "fields": [
+              {
+                "name": "Capabilities",
+                "json": "Capabilities",
+                "type": "[]string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "set_online",
+          "constant": "EdgeRoleCommandSetOnline",
+          "args": {
+            "kind": "struct",
+            "type": "EdgeRoleSetOnlineArgs",
+            "fields": [
+              {
+                "name": "Online",
+                "json": "Online",
+                "type": "bool",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "set_zone",
+          "constant": "EdgeRoleCommandSetZone",
+          "args": {
+            "kind": "struct",
+            "type": "EdgeRoleSetZoneArgs",
+            "fields": [
+              {
+                "name": "Zone",
+                "json": "Zone",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "FileTransferAbility",
+      "kind": "ability",
+      "source": "FasterEdge/file_transfer_ability.go",
+      "commands": [
+        {
+          "name": "cancel",
+          "constant": "FileTransferCommandCancel",
+          "args": {
+            "kind": "struct",
+            "type": "FileTransferIDArg",
+            "fields": [
+              {
+                "name": "ID",
+                "json": "ID",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "clear_finished",
+          "constant": "FileTransferCommandClearFinished",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "download",
+          "constant": "FileTransferCommandDownload",
+          "args": {
+            "kind": "struct",
+            "type": "FileTransferUploadArgs",
+            "fields": [
+              {
+                "name": "LocalPath",
+                "json": "LocalPath",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "RemotePath",
+                "json": "RemotePath",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "Target",
+                "json": "Target",
+                "type": "string",
+                "required": "optional",
+                "doc": "可选,非空表示覆盖本次传输的目标对端"
+              }
+            ]
+          }
+        },
+        {
+          "name": "get_target",
+          "constant": "FileTransferCommandGetTarget",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "get_transfer",
+          "constant": "FileTransferCommandGet",
+          "args": {
+            "kind": "struct",
+            "type": "FileTransferIDArg",
+            "fields": [
+              {
+                "name": "ID",
+                "json": "ID",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "list",
+          "constant": "FileTransferCommandList",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "set_target",
+          "constant": "FileTransferCommandSetTarget",
+          "args": {
+            "kind": "struct",
+            "type": "FileTransferTargetArgs",
+            "fields": [
+              {
+                "name": "PeerName",
+                "json": "PeerName",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "upload",
+          "constant": "FileTransferCommandUpload",
+          "args": {
+            "kind": "struct",
+            "type": "FileTransferUploadArgs",
+            "fields": [
+              {
+                "name": "LocalPath",
+                "json": "LocalPath",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "RemotePath",
+                "json": "RemotePath",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "Target",
+                "json": "Target",
+                "type": "string",
+                "required": "optional",
+                "doc": "可选,非空表示覆盖本次传输的目标对端"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "InfluxDBAbility",
+      "kind": "ability",
+      "source": "FasterEdge/influxdb_ability.go",
+      "commands": [
+        {
+          "name": "delete_series",
+          "constant": "InfluxCommandDeleteSeries",
+          "args": {
+            "kind": "struct",
+            "type": "InfluxSeriesArgs",
+            "fields": [
+              {
+                "name": "Measurement",
+                "json": "Measurement",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "get_config",
+          "constant": "InfluxCommandGetConfig",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "get_endpoint",
+          "constant": "InfluxCommandGetEndpoint",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "list_series",
+          "constant": "InfluxCommandListSeries",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "ping",
+          "constant": "InfluxCommandPing",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "query",
+          "constant": "InfluxCommandQuery",
+          "args": {
+            "kind": "struct",
+            "type": "InfluxQueryArgs",
+            "fields": [
+              {
+                "name": "Query",
+                "json": "Query",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "set_bucket",
+          "constant": "InfluxCommandSetBucket",
+          "args": {
+            "kind": "struct",
+            "type": "InfluxConfigArgs",
+            "via": "configValue",
+            "fields": [
+              {
+                "name": "Value",
+                "json": "Value",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "set_endpoint",
+          "constant": "InfluxCommandSetEndpoint",
+          "args": {
+            "kind": "struct",
+            "type": "InfluxConfigArgs",
+            "via": "configValue",
+            "fields": [
+              {
+                "name": "Value",
+                "json": "Value",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "set_org",
+          "constant": "InfluxCommandSetOrg",
+          "args": {
+            "kind": "struct",
+            "type": "InfluxConfigArgs",
+            "via": "configValue",
+            "fields": [
+              {
+                "name": "Value",
+                "json": "Value",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "set_token",
+          "constant": "InfluxCommandSetToken",
+          "args": {
+            "kind": "struct",
+            "type": "InfluxConfigArgs",
+            "via": "configValue",
+            "fields": [
+              {
+                "name": "Value",
+                "json": "Value",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "write",
+          "constant": "InfluxCommandWrite",
+          "args": {
+            "kind": "struct",
+            "type": "InfluxWriteArgs",
+            "fields": [
+              {
+                "name": "Points",
+                "json": "Points",
+                "type": "[]InfluxPoint",
+                "required": "unknown"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "KubernetesAbility",
+      "kind": "ability",
+      "source": "FasterEdge/kubernetes_ability.go",
+      "commands": [
+        {
+          "name": "apply",
+          "constant": "K8sCommandApply",
+          "args": {
+            "kind": "struct",
+            "type": "K8sApplyArgs",
+            "fields": [
+              {
+                "name": "Manifest",
+                "json": "Manifest",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "delete",
+          "constant": "K8sCommandDelete",
+          "args": {
+            "kind": "struct",
+            "type": "K8sDeleteArgs",
+            "fields": [
+              {
+                "name": "Kind",
+                "json": "Kind",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "Name",
+                "json": "Name",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "Namespace",
+                "json": "Namespace",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "get",
+          "constant": "K8sCommandGet",
+          "args": {
+            "kind": "struct",
+            "type": "K8sGetArgs",
+            "fields": [
+              {
+                "name": "Kind",
+                "json": "Kind",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "Name",
+                "json": "Name",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "Namespace",
+                "json": "Namespace",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "get_context",
+          "constant": "K8sCommandGetContext",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "get_logs",
+          "constant": "K8sCommandGetLogs",
+          "args": {
+            "kind": "struct",
+            "type": "K8sLogsArgs",
+            "fields": [
+              {
+                "name": "Pod",
+                "json": "Pod",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "Namespace",
+                "json": "Namespace",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "Tail",
+                "json": "Tail",
+                "type": "int",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "list",
+          "constant": "K8sCommandList",
+          "args": {
+            "kind": "struct",
+            "type": "K8sListArgs",
+            "fields": [
+              {
+                "name": "Kind",
+                "json": "Kind",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "Namespace",
+                "json": "Namespace",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "scale",
+          "constant": "K8sCommandScale",
+          "args": {
+            "kind": "struct",
+            "type": "K8sScaleArgs",
+            "fields": [
+              {
+                "name": "Deployment",
+                "json": "Deployment",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "Namespace",
+                "json": "Namespace",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "Replicas",
+                "json": "Replicas",
+                "type": "int32",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "set_context",
+          "constant": "K8sCommandSetContext",
+          "args": {
+            "kind": "struct",
+            "type": "K8sContextArgs",
+            "fields": [
+              {
+                "name": "Cluster",
+                "json": "Cluster",
+                "type": "string",
+                "required": "unknown",
+                "embedded": true
+              },
+              {
+                "name": "Namespace",
+                "json": "Namespace",
+                "type": "string",
+                "required": "unknown",
+                "embedded": true
+              },
+              {
+                "name": "Kubeconfig",
+                "json": "Kubeconfig",
+                "type": "string",
+                "required": "unknown",
+                "embedded": true
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "MQTTAbility",
+      "kind": "ability",
+      "source": "FasterEdge/mqtt_ability.go",
+      "commands": [
+        {
+          "name": "connect",
+          "constant": "MQTTCommandConnect",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "disconnect",
+          "constant": "MQTTCommandDisconnect",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "drain",
+          "constant": "MQTTCommandDrain",
+          "args": {
+            "kind": "struct",
+            "type": "MQTTPullArgs",
+            "fields": [
+              {
+                "name": "Topic",
+                "json": "Topic",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "Max",
+                "json": "Max",
+                "type": "int",
+                "required": "unknown"
+              },
+              {
+                "name": "Timeout",
+                "json": "Timeout",
+                "type": "time.Duration",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "get_broker",
+          "constant": "MQTTCommandGetBroker",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "is_connected",
+          "constant": "MQTTCommandIsConnected",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "list_subscriptions",
+          "constant": "MQTTCommandListSubs",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "publish",
+          "constant": "MQTTCommandPublish",
+          "args": {
+            "kind": "struct",
+            "type": "MQTTPublishArgs",
+            "fields": [
+              {
+                "name": "Topic",
+                "json": "Topic",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "Payload",
+                "json": "Payload",
+                "type": "[]byte",
+                "required": "unknown"
+              },
+              {
+                "name": "Qos",
+                "json": "Qos",
+                "type": "MQTTQos",
+                "required": "unknown"
+              },
+              {
+                "name": "Retain",
+                "json": "Retain",
+                "type": "bool",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "set_broker",
+          "constant": "MQTTCommandSetBroker",
+          "args": {
+            "kind": "struct",
+            "type": "MQTTBrokerArgs",
+            "fields": [
+              {
+                "name": "URL",
+                "json": "URL",
+                "type": "string",
+                "required": "unknown",
+                "doc": "tcp://host:1883 或 ssl://..."
+              }
+            ]
+          }
+        },
+        {
+          "name": "set_client_id",
+          "constant": "MQTTCommandSetClientID",
+          "args": {
+            "kind": "struct",
+            "type": "MQTTClientIDArgs",
+            "fields": [
+              {
+                "name": "ClientID",
+                "json": "ClientID",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "set_credentials",
+          "constant": "MQTTCommandSetCredentials",
+          "args": {
+            "kind": "struct",
+            "type": "MQTTCredentialsArgs",
+            "fields": [
+              {
+                "name": "Username",
+                "json": "Username",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "Password",
+                "json": "Password",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "subscribe",
+          "constant": "MQTTCommandSubscribe",
+          "args": {
+            "kind": "struct",
+            "type": "MQTTSubscribeArgs",
+            "fields": [
+              {
+                "name": "Topic",
+                "json": "Topic",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "Qos",
+                "json": "Qos",
+                "type": "MQTTQos",
+                "required": "unknown"
+              },
+              {
+                "name": "MaxQueue",
+                "json": "MaxQueue",
+                "type": "int",
+                "required": "unknown",
+                "doc": "消息队列容量,0 表示默认 256"
+              }
+            ]
+          }
+        },
+        {
+          "name": "unsubscribe",
+          "constant": "MQTTCommandUnsubscribe",
+          "args": {
+            "kind": "struct",
+            "type": "MQTTTopicArg",
+            "fields": [
+              {
+                "name": "Topic",
+                "json": "Topic",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "ModbusAbility",
+      "kind": "ability",
+      "source": "FasterEdge/modbus_ability.go",
+      "commands": [
+        {
+          "name": "get_endpoint",
+          "constant": "ModbusCommandGetEndpoint",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "get_unit_id",
+          "constant": "ModbusCommandGetUnitID",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "read_coils",
+          "constant": "ModbusCommandReadCoils",
+          "args": {
+            "kind": "struct",
+            "type": "ModbusReadArgs",
+            "via": "m.handleRead",
+            "fields": [
+              {
+                "name": "Address",
+                "json": "Address",
+                "type": "uint16",
+                "required": "unknown"
+              },
+              {
+                "name": "Quantity",
+                "json": "Quantity",
+                "type": "uint16",
+                "required": "required"
+              }
+            ]
+          }
+        },
+        {
+          "name": "read_discrete",
+          "constant": "ModbusCommandReadDiscrete",
+          "args": {
+            "kind": "struct",
+            "type": "ModbusReadArgs",
+            "via": "m.handleRead",
+            "fields": [
+              {
+                "name": "Address",
+                "json": "Address",
+                "type": "uint16",
+                "required": "unknown"
+              },
+              {
+                "name": "Quantity",
+                "json": "Quantity",
+                "type": "uint16",
+                "required": "required"
+              }
+            ]
+          }
+        },
+        {
+          "name": "read_holding",
+          "constant": "ModbusCommandReadHolding",
+          "args": {
+            "kind": "struct",
+            "type": "ModbusReadArgs",
+            "via": "m.handleRead",
+            "fields": [
+              {
+                "name": "Address",
+                "json": "Address",
+                "type": "uint16",
+                "required": "unknown"
+              },
+              {
+                "name": "Quantity",
+                "json": "Quantity",
+                "type": "uint16",
+                "required": "required"
+              }
+            ]
+          }
+        },
+        {
+          "name": "read_input",
+          "constant": "ModbusCommandReadInput",
+          "args": {
+            "kind": "struct",
+            "type": "ModbusReadArgs",
+            "via": "m.handleRead",
+            "fields": [
+              {
+                "name": "Address",
+                "json": "Address",
+                "type": "uint16",
+                "required": "unknown"
+              },
+              {
+                "name": "Quantity",
+                "json": "Quantity",
+                "type": "uint16",
+                "required": "required"
+              }
+            ]
+          }
+        },
+        {
+          "name": "set_endpoint",
+          "constant": "ModbusCommandSetEndpoint",
+          "args": {
+            "kind": "struct",
+            "type": "ModbusEndpointArgs",
+            "fields": [
+              {
+                "name": "Addr",
+                "json": "Addr",
+                "type": "string",
+                "required": "unknown",
+                "doc": "Addr 形如 \"192.168.1.10:502\" (TCP) 或 \"/dev/ttyUSB0:9600:8N1\" (RTU)。"
+              }
+            ]
+          }
+        },
+        {
+          "name": "set_unit_id",
+          "constant": "ModbusCommandSetUnitID",
+          "args": {
+            "kind": "struct",
+            "type": "ModbusUnitIDArgs",
+            "fields": [
+              {
+                "name": "UnitID",
+                "json": "UnitID",
+                "type": "uint8",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "write_coil",
+          "constant": "ModbusCommandWriteCoil",
+          "args": {
+            "kind": "struct",
+            "type": "ModbusWriteCoilArgs",
+            "via": "m.handleWrite",
+            "fields": [
+              {
+                "name": "Address",
+                "json": "Address",
+                "type": "uint16",
+                "required": "unknown"
+              },
+              {
+                "name": "Value",
+                "json": "Value",
+                "type": "bool",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "write_holding",
+          "constant": "ModbusCommandWriteHolding",
+          "args": {
+            "kind": "struct",
+            "type": "ModbusWriteHoldingArgs",
+            "via": "m.handleWrite",
+            "fields": [
+              {
+                "name": "Address",
+                "json": "Address",
+                "type": "uint16",
+                "required": "unknown"
+              },
+              {
+                "name": "Value",
+                "json": "Value",
+                "type": "uint16",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "write_holding_multi",
+          "constant": "ModbusCommandWriteMultiReg",
+          "args": {
+            "kind": "struct",
+            "type": "ModbusWriteMultiArgs",
+            "via": "m.handleWrite",
+            "fields": [
+              {
+                "name": "Address",
+                "json": "Address",
+                "type": "uint16",
+                "required": "unknown"
+              },
+              {
+                "name": "Values",
+                "json": "Values",
+                "type": "[]uint16",
+                "required": "unknown"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "NetMapAbility",
+      "kind": "ability",
+      "source": "FasterEdge/net_map_ability.go",
+      "commands": [
+        {
+          "name": "get_topology",
+          "constant": "NetMapCommandGetTopology",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "list_peers",
+          "constant": "NetMapCommandListPeers",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "lookup_peer",
+          "constant": "NetMapCommandLookupPeer",
+          "args": {
+            "kind": "struct",
+            "type": "NetMapLookupPeerArgs",
+            "fields": [
+              {
+                "name": "Name",
+                "json": "Name",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "Address",
+                "json": "Address",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "register_peer",
+          "constant": "NetMapCommandRegisterPeer",
+          "args": {
+            "kind": "struct",
+            "type": "NetMapRegisterPeerArgs",
+            "fields": [
+              {
+                "name": "Name",
+                "json": "Name",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "Address",
+                "json": "Address",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "Role",
+                "json": "Role",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "unregister_peer",
+          "constant": "NetMapCommandUnregisterPeer",
+          "args": {
+            "kind": "struct",
+            "type": "NetMapLookupPeerArgs",
+            "fields": [
+              {
+                "name": "Name",
+                "json": "Name",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "Address",
+                "json": "Address",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "update_peer",
+          "constant": "NetMapCommandUpdatePeer",
+          "args": {
+            "kind": "struct",
+            "type": "NetMapUpdatePeerArgs",
+            "fields": [
+              {
+                "name": "Name",
+                "json": "Name",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "NewAddress",
+                "json": "NewAddress",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "NewRole",
+                "json": "NewRole",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "TouchLastSeen",
+                "json": "TouchLastSeen",
+                "type": "bool",
+                "required": "unknown"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "OneKeyAbility",
+      "kind": "ability",
+      "source": "FasterEdge/one_key_ability.go",
+      "commands": [
+        {
+          "name": "issue_token",
+          "constant": "OneKeyCommandIssueToken",
+          "args": {
+            "kind": "struct",
+            "type": "OneKeyIssueTokenArgs",
+            "fields": [
+              {
+                "name": "Subject",
+                "json": "Subject",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "TTL",
+                "json": "TTL",
+                "type": "time.Duration",
+                "required": "unknown",
+                "doc": "0 表示使用 KeyringData 默认值"
+              },
+              {
+                "name": "Algorithm",
+                "json": "Algorithm",
+                "type": "string",
+                "required": "optional",
+                "doc": "可选,留空使用默认"
+              },
+              {
+                "name": "Scope",
+                "json": "Scope",
+                "type": "[]data.KeyringScopeRule",
+                "required": "optional",
+                "doc": "Scope 绑定令牌的能力作用域: component + command 白名单(可选 args 指纹)。 为 nil/空表示不限制(旧格式: 一张令牌 = 整个 Atom 写权限)。 新签发默认应显式声明作用域; 声明后 AuthenticateCommand 会拒绝作用域 外的 component/command, 且该拒绝先于组件查找(不泄露组件存在性)。"
+              },
+              {
+                "name": "OneShot",
+                "json": "OneShot",
+                "type": "bool",
+                "required": "unknown",
+                "doc": "OneShot 为 true 时自动生成一次性 nonce, 使该令牌只能使用一次。"
+              }
+            ]
+          }
+        },
+        {
+          "name": "list_tokens",
+          "constant": "OneKeyCommandListTokens",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "revoke_all",
+          "constant": "OneKeyCommandRevokeAll",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "revoke_token",
+          "constant": "OneKeyCommandRevokeToken",
+          "args": {
+            "kind": "struct",
+            "type": "OneKeyRevokeTokenArgs",
+            "fields": [
+              {
+                "name": "Subject",
+                "json": "Subject",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "rotate",
+          "constant": "OneKeyCommandRotate",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "status",
+          "constant": "OneKeyCommandStatus",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "verify_token",
+          "constant": "OneKeyCommandVerifyToken",
+          "args": {
+            "kind": "struct",
+            "type": "OneKeyVerifyTokenArgs",
+            "fields": [
+              {
+                "name": "Subject",
+                "json": "Subject",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "IssuedAt",
+                "json": "IssuedAt",
+                "type": "time.Time",
+                "required": "unknown"
+              },
+              {
+                "name": "ExpiresAt",
+                "json": "ExpiresAt",
+                "type": "time.Time",
+                "required": "unknown"
+              },
+              {
+                "name": "Signature",
+                "json": "Signature",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "Scope",
+                "json": "Scope",
+                "type": "[]data.KeyringScopeRule",
+                "required": "unknown",
+                "doc": "Scope 必须与签发时一致(进入签名载荷); 旧格式令牌留空即可。"
+              },
+              {
+                "name": "Nonce",
+                "json": "Nonce",
+                "type": "string",
+                "required": "unknown",
+                "doc": "Nonce 必须与签发时一致; 旧格式令牌留空即可。"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "RoleAbility",
+      "kind": "ability",
+      "source": "FasterEdge/role_ability.go",
+      "commands": [
+        {
+          "name": "describe",
+          "constant": "CommandDescribe",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "get_role",
+          "constant": "CommandGetRole",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "set_role",
+          "constant": "CommandSetRole",
+          "args": {
+            "kind": "struct",
+            "type": "RoleAbilityArgs",
+            "fields": [
+              {
+                "name": "Role",
+                "json": "Role",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "SerialAbility",
+      "kind": "ability",
+      "source": "FasterEdge/serial_ability.go",
+      "commands": [
+        {
+          "name": "close",
+          "constant": "SerialCommandClose",
+          "args": {
+            "kind": "struct",
+            "type": "SerialPortArg",
+            "fields": [
+              {
+                "name": "Port",
+                "json": "Port",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "get_config",
+          "constant": "SerialCommandGetConfig",
+          "args": {
+            "kind": "struct",
+            "type": "SerialPortArg",
+            "fields": [
+              {
+                "name": "Port",
+                "json": "Port",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "is_open",
+          "constant": "SerialCommandIsOpen",
+          "args": {
+            "kind": "struct",
+            "type": "SerialPortArg",
+            "fields": [
+              {
+                "name": "Port",
+                "json": "Port",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "list_ports",
+          "constant": "SerialCommandListPorts",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "open",
+          "constant": "SerialCommandOpen",
+          "args": {
+            "kind": "struct",
+            "type": "SerialOpenArgs",
+            "fields": [
+              {
+                "name": "Port",
+                "json": "Port",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "Config",
+                "json": "Config",
+                "type": "SerialConfig",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "read",
+          "constant": "SerialCommandRead",
+          "args": {
+            "kind": "struct",
+            "type": "SerialReadArgs",
+            "fields": [
+              {
+                "name": "Port",
+                "json": "Port",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "Length",
+                "json": "Length",
+                "type": "int",
+                "required": "unknown"
+              },
+              {
+                "name": "Timeout",
+                "json": "Timeout",
+                "type": "time.Duration",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "set_config",
+          "constant": "SerialCommandSetConfig",
+          "args": {
+            "kind": "struct",
+            "type": "SerialSetConfigArgs",
+            "fields": [
+              {
+                "name": "Port",
+                "json": "Port",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "Config",
+                "json": "Config",
+                "type": "SerialConfig",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "write",
+          "constant": "SerialCommandWrite",
+          "args": {
+            "kind": "struct",
+            "type": "SerialWriteArgs",
+            "fields": [
+              {
+                "name": "Port",
+                "json": "Port",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "Data",
+                "json": "Data",
+                "type": "[]byte",
+                "required": "unknown"
+              },
+              {
+                "name": "Length",
+                "json": "Length",
+                "type": "int",
+                "required": "unknown",
+                "doc": "0 表示全部"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "ShAbility",
+      "kind": "ability",
+      "source": "FasterEdge/sh_ability.go",
+      "commands": [
+        {
+          "name": "get_allowlist",
+          "constant": "ShCommandGetAllowlist",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "kill",
+          "constant": "ShCommandKill",
+          "args": {
+            "kind": "struct",
+            "type": "ShKillArgs",
+            "fields": [
+              {
+                "name": "JobID",
+                "json": "JobID",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "list",
+          "constant": "ShCommandList",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "run",
+          "constant": "ShCommandRun",
+          "args": {
+            "kind": "struct",
+            "type": "ShRunArgs",
+            "fields": [
+              {
+                "name": "Command",
+                "json": "Command",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "Timeout",
+                "json": "Timeout",
+                "type": "time.Duration",
+                "required": "unknown"
+              },
+              {
+                "name": "Env",
+                "json": "Env",
+                "type": "[]string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "set_allowlist",
+          "constant": "ShCommandSetAllowlist",
+          "args": {
+            "kind": "struct",
+            "type": "ShSetAllowlistArgs",
+            "fields": [
+              {
+                "name": "Allowed",
+                "json": "Allowed",
+                "type": "[]string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "set_allowlist_any",
+          "constant": "ShCommandSetAllowAny",
+          "args": {
+            "kind": "struct",
+            "type": "CmdSetAllowAnyArgs",
+            "fields": [
+              {
+                "name": "Any",
+                "json": "Any",
+                "type": "bool",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "start",
+          "constant": "ShCommandStart",
+          "args": {
+            "kind": "struct",
+            "type": "ShRunArgs",
+            "fields": [
+              {
+                "name": "Command",
+                "json": "Command",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "Timeout",
+                "json": "Timeout",
+                "type": "time.Duration",
+                "required": "unknown"
+              },
+              {
+                "name": "Env",
+                "json": "Env",
+                "type": "[]string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "wait",
+          "constant": "ShCommandWait",
+          "args": {
+            "kind": "struct",
+            "type": "ShWaitArgs",
+            "fields": [
+              {
+                "name": "JobID",
+                "json": "JobID",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "Wait",
+                "json": "Wait",
+                "type": "time.Duration",
+                "required": "unknown"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "TSNAbility",
+      "kind": "ability",
+      "source": "FasterEdge/tsn_ability.go",
+      "commands": [
+        {
+          "name": "get_interface",
+          "constant": "TSNCommandGetInterface",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "get_priority_map",
+          "constant": "TSNCommandGetPriority",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "get_time_aware",
+          "constant": "TSNCommandGetTimeAware",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "list_streams",
+          "constant": "TSNCommandListStreams",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "register_listener",
+          "constant": "TSNCommandRegisterListener",
+          "args": {
+            "kind": "struct",
+            "type": "TSNRegisterTalkerArgs",
+            "via": "t.registerStream",
+            "fields": [
+              {
+                "name": "ID",
+                "json": "ID",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "MAC",
+                "json": "MAC",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "DestMAC",
+                "json": "DestMAC",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "VLANID",
+                "json": "VLANID",
+                "type": "uint16",
+                "required": "unknown"
+              },
+              {
+                "name": "Priority",
+                "json": "Priority",
+                "type": "uint8",
+                "required": "unknown"
+              },
+              {
+                "name": "PayloadLen",
+                "json": "PayloadLen",
+                "type": "uint16",
+                "required": "unknown"
+              },
+              {
+                "name": "Interval",
+                "json": "Interval",
+                "type": "time.Duration",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "register_talker",
+          "constant": "TSNCommandRegisterTalker",
+          "args": {
+            "kind": "struct",
+            "type": "TSNRegisterTalkerArgs",
+            "via": "t.registerStream",
+            "fields": [
+              {
+                "name": "ID",
+                "json": "ID",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "MAC",
+                "json": "MAC",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "DestMAC",
+                "json": "DestMAC",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "VLANID",
+                "json": "VLANID",
+                "type": "uint16",
+                "required": "unknown"
+              },
+              {
+                "name": "Priority",
+                "json": "Priority",
+                "type": "uint8",
+                "required": "unknown"
+              },
+              {
+                "name": "PayloadLen",
+                "json": "PayloadLen",
+                "type": "uint16",
+                "required": "unknown"
+              },
+              {
+                "name": "Interval",
+                "json": "Interval",
+                "type": "time.Duration",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "set_interface",
+          "constant": "TSNCommandSetInterface",
+          "args": {
+            "kind": "struct",
+            "type": "TSNInterfaceArg",
+            "fields": [
+              {
+                "name": "Interface",
+                "json": "Interface",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "set_priority_map",
+          "constant": "TSNCommandSetPriority",
+          "args": {
+            "kind": "struct",
+            "type": "TSNPriorityMapArgs",
+            "fields": [
+              {
+                "name": "Mappings",
+                "json": "Mappings",
+                "type": "map[uint8]uint8",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "set_time_aware",
+          "constant": "TSNCommandSetTimeAware",
+          "args": {
+            "kind": "struct",
+            "type": "TSNTimeAwareArgs",
+            "fields": [
+              {
+                "name": "Enabled",
+                "json": "Enabled",
+                "type": "bool",
+                "required": "unknown"
+              },
+              {
+                "name": "BaseTime",
+                "json": "BaseTime",
+                "type": "time.Time",
+                "required": "unknown"
+              },
+              {
+                "name": "CycleTime",
+                "json": "CycleTime",
+                "type": "time.Duration",
+                "required": "unknown"
+              },
+              {
+                "name": "GateStates",
+                "json": "GateStates",
+                "type": "[]byte",
+                "required": "unknown",
+                "doc": "每字节低 8 位对应 8 个队列的门状态"
+              }
+            ]
+          }
+        },
+        {
+          "name": "unregister",
+          "constant": "TSNCommandUnregister",
+          "args": {
+            "kind": "struct",
+            "type": "TSNStreamIDArg",
+            "fields": [
+              {
+                "name": "ID",
+                "json": "ID",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "TimeAbility",
+      "kind": "ability",
+      "source": "FasterEdge/time_ability.go",
+      "commands": [
+        {
+          "name": "configure_run",
+          "constant": "TimeCommandConfigureRun",
+          "args": {
+            "kind": "struct",
+            "type": "TimeConfigureRunArgs",
+            "fields": [
+              {
+                "name": "Mode",
+                "json": "Mode",
+                "type": "TimeRunMode",
+                "required": "unknown"
+              },
+              {
+                "name": "Interval",
+                "json": "Interval",
+                "type": "time.Duration",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "get_time",
+          "constant": "TimeCommandGetTime",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "last",
+          "constant": "TimeCommandLastSync",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "sync_manual",
+          "constant": "TimeCommandSyncManual",
+          "args": {
+            "kind": "struct",
+            "type": "TimeSyncManualArgs",
+            "fields": [
+              {
+                "name": "Value",
+                "json": "Value",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "sync_net",
+          "constant": "TimeCommandSyncNetwork",
+          "args": {
+            "kind": "struct",
+            "type": "TimeSyncNetworkArgs",
+            "fields": [
+              {
+                "name": "URL",
+                "json": "URL",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "sync_ntp",
+          "constant": "TimeCommandSyncNTP",
+          "args": {
+            "kind": "struct",
+            "type": "TimeSyncNTPArgs",
+            "fields": [
+              {
+                "name": "Address",
+                "json": "Address",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "sync_system",
+          "constant": "TimeCommandSyncSystem",
+          "args": {
+            "kind": "none"
+          }
+        }
+      ]
+    },
+    {
+      "name": "BaseData",
+      "kind": "data",
+      "source": "FasterEdge/base_data.go",
+      "commands": [
+        {
+          "name": "info",
+          "constant": "CommandInfo",
+          "args": {
+            "kind": "unknown"
+          }
+        },
+        {
+          "name": "logo",
+          "constant": "CommandLogo",
+          "args": {
+            "kind": "unknown"
+          }
+        }
+      ]
+    },
+    {
+      "name": "ConfigData",
+      "kind": "data",
+      "source": "FasterEdge/config_data.go",
+      "commands": [
+        {
+          "name": "delete",
+          "constant": "ConfigCommandDelete",
+          "args": {
+            "kind": "struct",
+            "type": "ConfigDeleteArgs",
+            "fields": [
+              {
+                "name": "Key",
+                "json": "Key",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "get",
+          "constant": "ConfigCommandGet",
+          "args": {
+            "kind": "struct",
+            "type": "ConfigGetArgs",
+            "fields": [
+              {
+                "name": "Key",
+                "json": "Key",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "list",
+          "constant": "ConfigCommandList",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "set",
+          "constant": "ConfigCommandSet",
+          "args": {
+            "kind": "struct",
+            "type": "ConfigSetArgs",
+            "fields": [
+              {
+                "name": "Key",
+                "json": "Key",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "Value",
+                "json": "Value",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "snapshot",
+          "constant": "ConfigCommandSnapshot",
+          "args": {
+            "kind": "none"
+          }
+        }
+      ]
+    },
+    {
+      "name": "InfluxDBData",
+      "kind": "data",
+      "source": "FasterEdge/influxdb_data.go",
+      "commands": [
+        {
+          "name": "clear_secret",
+          "constant": "DatabaseCommandClearSecret",
+          "args": {
+            "kind": "none",
+            "via": "clearDatabaseSecret"
+          }
+        },
+        {
+          "name": "configure",
+          "constant": "DatabaseCommandConfigure",
+          "args": {
+            "kind": "struct",
+            "type": "InfluxDBConfigureArgs",
+            "wrapper": "InfluxDBConfig",
+            "fields": [
+              {
+                "name": "Config",
+                "json": "Config",
+                "type": "InfluxDBConfig",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "get_config",
+          "constant": "DatabaseCommandGetConfig",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "set_secret",
+          "constant": "DatabaseCommandSetSecret",
+          "args": {
+            "kind": "struct",
+            "type": "DatabaseSetSecretArgs",
+            "via": "setDatabaseSecret",
+            "fields": [
+              {
+                "name": "Secret",
+                "json": "Secret",
+                "type": "[]byte",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "snapshot",
+          "constant": "DatabaseCommandSnapshot",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "status",
+          "constant": "DatabaseCommandStatus",
+          "args": {
+            "kind": "none"
+          }
+        }
+      ]
+    },
+    {
+      "name": "KeyringData",
+      "kind": "data",
+      "source": "FasterEdge/keyring_data.go",
+      "commands": [
+        {
+          "name": "issue_token",
+          "constant": "KeyringCommandIssueToken",
+          "args": {
+            "kind": "struct",
+            "type": "KeyringIssueTokenArgs",
+            "fields": [
+              {
+                "name": "Subject",
+                "json": "Subject",
+                "type": "string",
+                "required": "unknown"
+              },
+              {
+                "name": "TTL",
+                "json": "TTL",
+                "type": "time.Duration",
+                "required": "unknown"
+              },
+              {
+                "name": "Algorithm",
+                "json": "Algorithm",
+                "type": "string",
+                "required": "optional",
+                "doc": "可选,留空使用默认 (HMAC-SHA256)"
+              },
+              {
+                "name": "Scope",
+                "json": "scope",
+                "tag": "json:\"scope,omitempty\"",
+                "type": "[]KeyringScopeRule",
+                "required": "optional",
+                "omitEmpty": true,
+                "doc": "Scope 是令牌绑定的能力作用域(component + command 白名单, 可选 args 指纹)。为 nil/空表示不限制(旧格式语义)。规范化和校验见 NormalizeKeyringScope。"
+              },
+              {
+                "name": "Nonce",
+                "json": "nonce",
+                "tag": "json:\"nonce,omitempty\"",
+                "type": "string",
+                "required": "optional",
+                "omitEmpty": true,
+                "doc": "Nonce 非空时该令牌为一次性: 每次鉴权消耗一个 nonce, 重放即被拒。"
+              }
+            ]
+          }
+        },
+        {
+          "name": "list_tokens",
+          "constant": "KeyringCommandListTokens",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "revoke_all",
+          "constant": "KeyringCommandRevokeAll",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "revoke_token",
+          "constant": "KeyringCommandRevokeToken",
+          "args": {
+            "kind": "struct",
+            "type": "KeyringRevokeTokenArgs",
+            "fields": [
+              {
+                "name": "Subject",
+                "json": "Subject",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "rotate",
+          "constant": "KeyringCommandRotate",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "set_secret",
+          "constant": "KeyringCommandSetSecret",
+          "args": {
+            "kind": "struct",
+            "type": "KeyringSetSecretArgs",
+            "fields": [
+              {
+                "name": "Secret",
+                "json": "Secret",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "status",
+          "constant": "KeyringCommandStatus",
+          "args": {
+            "kind": "none"
+          }
+        }
+      ]
+    },
+    {
+      "name": "MongoDBData",
+      "kind": "data",
+      "source": "FasterEdge/database_components.go",
+      "commands": [
+        {
+          "name": "clear_secret",
+          "constant": "DatabaseCommandClearSecret",
+          "args": {
+            "kind": "none",
+            "via": "clearDatabaseSecret"
+          }
+        },
+        {
+          "name": "configure",
+          "constant": "DatabaseCommandConfigure",
+          "args": {
+            "kind": "struct",
+            "type": "MongoDBConfigureArgs",
+            "wrapper": "MongoDBConfig",
+            "fields": [
+              {
+                "name": "Config",
+                "json": "Config",
+                "type": "MongoDBConfig",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "get_config",
+          "constant": "DatabaseCommandGetConfig",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "set_secret",
+          "constant": "DatabaseCommandSetSecret",
+          "args": {
+            "kind": "struct",
+            "type": "DatabaseSetSecretArgs",
+            "via": "setDatabaseSecret",
+            "fields": [
+              {
+                "name": "Secret",
+                "json": "Secret",
+                "type": "[]byte",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "snapshot",
+          "constant": "DatabaseCommandSnapshot",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "status",
+          "constant": "DatabaseCommandStatus",
+          "args": {
+            "kind": "none"
+          }
+        }
+      ]
+    },
+    {
+      "name": "MySQLData",
+      "kind": "data",
+      "source": "FasterEdge/database_components.go",
+      "commands": [
+        {
+          "name": "clear_secret",
+          "constant": "DatabaseCommandClearSecret",
+          "args": {
+            "kind": "none",
+            "via": "sqlCommand -> clearDatabaseSecret"
+          }
+        },
+        {
+          "name": "configure",
+          "constant": "DatabaseCommandConfigure",
+          "args": {
+            "kind": "struct",
+            "type": "SQLDatabaseConfigureArgs",
+            "via": "sqlCommand",
+            "wrapper": "SQLDatabaseConfig",
+            "fields": [
+              {
+                "name": "Config",
+                "json": "Config",
+                "type": "SQLDatabaseConfig",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "get_config",
+          "constant": "DatabaseCommandGetConfig",
+          "args": {
+            "kind": "none",
+            "via": "sqlCommand"
+          }
+        },
+        {
+          "name": "set_secret",
+          "constant": "DatabaseCommandSetSecret",
+          "args": {
+            "kind": "struct",
+            "type": "DatabaseSetSecretArgs",
+            "via": "sqlCommand -> setDatabaseSecret",
+            "fields": [
+              {
+                "name": "Secret",
+                "json": "Secret",
+                "type": "[]byte",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "snapshot",
+          "constant": "DatabaseCommandSnapshot",
+          "args": {
+            "kind": "none",
+            "via": "sqlCommand"
+          }
+        },
+        {
+          "name": "status",
+          "constant": "DatabaseCommandStatus",
+          "args": {
+            "kind": "none",
+            "via": "sqlCommand"
+          }
+        }
+      ]
+    },
+    {
+      "name": "NetMapData",
+      "kind": "data",
+      "source": "FasterEdge/net_map_data.go",
+      "commands": [
+        {
+          "name": "info",
+          "constant": "NetMapCommandInfo",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "interfaces",
+          "constant": "NetMapCommandInterfaces",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "set_default_iface",
+          "constant": "NetMapCommandSetDefaultIface",
+          "args": {
+            "kind": "struct",
+            "type": "NetMapSetDefaultIfaceArgs",
+            "fields": [
+              {
+                "name": "Name",
+                "json": "Name",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "set_node_name",
+          "constant": "NetMapCommandSetNodeName",
+          "args": {
+            "kind": "struct",
+            "type": "NetMapSetNodeNameArgs",
+            "fields": [
+              {
+                "name": "Name",
+                "json": "Name",
+                "type": "string",
+                "required": "unknown"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "PostgreSQLData",
+      "kind": "data",
+      "source": "FasterEdge/database_components.go",
+      "commands": [
+        {
+          "name": "clear_secret",
+          "constant": "DatabaseCommandClearSecret",
+          "args": {
+            "kind": "none",
+            "via": "sqlCommand -> clearDatabaseSecret"
+          }
+        },
+        {
+          "name": "configure",
+          "constant": "DatabaseCommandConfigure",
+          "args": {
+            "kind": "struct",
+            "type": "SQLDatabaseConfigureArgs",
+            "via": "sqlCommand",
+            "wrapper": "SQLDatabaseConfig",
+            "fields": [
+              {
+                "name": "Config",
+                "json": "Config",
+                "type": "SQLDatabaseConfig",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "get_config",
+          "constant": "DatabaseCommandGetConfig",
+          "args": {
+            "kind": "none",
+            "via": "sqlCommand"
+          }
+        },
+        {
+          "name": "set_secret",
+          "constant": "DatabaseCommandSetSecret",
+          "args": {
+            "kind": "struct",
+            "type": "DatabaseSetSecretArgs",
+            "via": "sqlCommand -> setDatabaseSecret",
+            "fields": [
+              {
+                "name": "Secret",
+                "json": "Secret",
+                "type": "[]byte",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "snapshot",
+          "constant": "DatabaseCommandSnapshot",
+          "args": {
+            "kind": "none",
+            "via": "sqlCommand"
+          }
+        },
+        {
+          "name": "status",
+          "constant": "DatabaseCommandStatus",
+          "args": {
+            "kind": "none",
+            "via": "sqlCommand"
+          }
+        }
+      ]
+    },
+    {
+      "name": "RedisData",
+      "kind": "data",
+      "source": "FasterEdge/database_components.go",
+      "commands": [
+        {
+          "name": "clear_secret",
+          "constant": "DatabaseCommandClearSecret",
+          "args": {
+            "kind": "none",
+            "via": "clearDatabaseSecret"
+          }
+        },
+        {
+          "name": "configure",
+          "constant": "DatabaseCommandConfigure",
+          "args": {
+            "kind": "struct",
+            "type": "RedisConfigureArgs",
+            "wrapper": "RedisConfig",
+            "fields": [
+              {
+                "name": "Config",
+                "json": "Config",
+                "type": "RedisConfig",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "get_config",
+          "constant": "DatabaseCommandGetConfig",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "set_secret",
+          "constant": "DatabaseCommandSetSecret",
+          "args": {
+            "kind": "struct",
+            "type": "DatabaseSetSecretArgs",
+            "via": "setDatabaseSecret",
+            "fields": [
+              {
+                "name": "Secret",
+                "json": "Secret",
+                "type": "[]byte",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "snapshot",
+          "constant": "DatabaseCommandSnapshot",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "status",
+          "constant": "DatabaseCommandStatus",
+          "args": {
+            "kind": "none"
+          }
+        }
+      ]
+    },
+    {
+      "name": "SQLiteData",
+      "kind": "data",
+      "source": "FasterEdge/database_components.go",
+      "commands": [
+        {
+          "name": "configure",
+          "constant": "DatabaseCommandConfigure",
+          "args": {
+            "kind": "struct",
+            "type": "SQLiteConfigureArgs",
+            "wrapper": "SQLiteConfig",
+            "fields": [
+              {
+                "name": "Config",
+                "json": "Config",
+                "type": "SQLiteConfig",
+                "required": "unknown"
+              }
+            ]
+          }
+        },
+        {
+          "name": "get_config",
+          "constant": "DatabaseCommandGetConfig",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "snapshot",
+          "constant": "DatabaseCommandSnapshot",
+          "args": {
+            "kind": "none"
+          }
+        },
+        {
+          "name": "status",
+          "constant": "DatabaseCommandStatus",
+          "args": {
+            "kind": "none"
+          }
+        }
+      ]
+    }
+  ],
+  "unusedConstants": []
+}

@@ -24,6 +24,10 @@ const (
 	TSNCommandGetTimeAware     = "get_time_aware"
 )
 
+// maxTSNInterfaceNameLen 对齐 Linux IFNAMSIZ(16, 含结尾 NUL): 接口名是会被
+// 注入实现拼进 tc/ip 参数的字符串, 超长/含特殊字符的名字必须在框架层拒绝。
+const maxTSNInterfaceNameLen = 15
+
 // TSNStreamDirection 标识 TSN 流方向。
 type TSNStreamDirection string
 
@@ -89,14 +93,63 @@ type TSNTimeAwareArgs struct {
 	GateStates []byte // 每字节低 8 位对应 8 个队列的门状态
 }
 
-// TSNAbility 管理 TSN 接口、talker/listener 注册、优先级映射、Qbv 时间感知门控。
-type TSNAbility struct {
-	mu        sync.RWMutex
-	iface     string
-	streams   map[string]*TSNStream
-	prioMap   map[uint8]uint8
-	timeAware TSNTimeAwareArgs
+// TSNTransport 抽象出对真实网卡的 TSN 查询与门控下发。
+// FasterEdge 自身不调用 netlink/tc/taprio: 接口探测、流规则下发/撤销、
+// PCP→队列映射、Qbv 门控全部委托给注入的实现(参考 Linux 上 tc prio/priomap、
+// tc taprio、tc flower 等命令)。未注入时所有设备类命令返回错误,不假装成功。
+type TSNTransport interface {
+	// ProbeInterface 查询网卡是否存在且具备 TSN 门控能力(不支持时应返回错误)。
+	ProbeInterface(iface string) error
+	// AddStream 把 talker/listener 流下发为网卡侧规则。
+	AddStream(iface string, stream TSNStream) error
+	// RemoveStream 撤销 AddStream 下发的规则。
+	RemoveStream(iface string, stream TSNStream) error
+	// ApplyPriorityMap 下发 802.1Q PCP→队列映射(tc prio priomap)。
+	// mappings 是本次调用独占的副本, 实现可保留。
+	ApplyPriorityMap(iface string, mappings map[uint8]uint8) error
+	// ApplyGateControl 下发 802.1Qbv 时间感知门控(tc taprio);Enabled=false 表示
+	// 拆除门控。cfg 是本次调用独占的副本。
+	ApplyGateControl(iface string, cfg TSNTimeAwareArgs) error
 }
+
+// TSNAbility 管理 TSN 接口、talker/listener 注册、优先级映射、Qbv 时间感知门控。
+// 设备操作经注入的 TSNTransport 完成;本地只保留"最近一次成功下发的配置"用于回读。
+type TSNAbility struct {
+	// mu 保护下列字段(仅内存状态, 不在持锁时调用 transport)。
+	mu      sync.RWMutex
+	iface   string
+	streams map[string]*TSNStream
+	prioMap map[uint8]uint8
+	// timeAware 是最近一次成功下发到设备的门控配置。
+	timeAware TSNTimeAwareArgs
+	transport TSNTransport
+
+	// applyMu 串行化"下发设备 + 提交本地状态", 避免同一网卡上的 tc 操作并发交叉,
+	// 也避免两次注册之间互相看到半提交状态。锁序: applyMu → mu。
+	applyMu sync.Mutex
+}
+
+// Compile-time guarantee that TSNAbility satisfies CommandLister.
+var _ types.CommandLister = (*TSNAbility)(nil)
+
+// tsnAbilityCommands 是 TSNAbility 的命令目录, 与 Command 中 act 的
+// switch 分支逐一对应(由 command_contract_test.go 解析源码交叉核对):
+// 接口 2 条, 流注册 3 条, 优先级映射 2 条, Qbv 门控 2 条。
+var tsnAbilityCommands = []string{
+	TSNCommandSetInterface,
+	TSNCommandGetInterface,
+	TSNCommandRegisterTalker,
+	TSNCommandRegisterListener,
+	TSNCommandUnregister,
+	TSNCommandListStreams,
+	TSNCommandSetPriority,
+	TSNCommandGetPriority,
+	TSNCommandSetTimeAware,
+	TSNCommandGetTimeAware,
+}
+
+// ListCommands 实现 types.CommandLister, 返回命令目录的副本(调用方持有所有权)。
+func (t *TSNAbility) ListCommands() []string { return append([]string(nil), tsnAbilityCommands...) }
 
 func NewTSNAbility() *TSNAbility {
 	m := make(map[uint8]uint8, 8)
@@ -106,10 +159,18 @@ func NewTSNAbility() *TSNAbility {
 	return &TSNAbility{streams: make(map[string]*TSNStream), prioMap: m}
 }
 
+// SetTransport 注入网卡查询/门控下发的实现。
+// 与 Modbus/Serial/MQTT 等能力一致: 不注入时设备类命令返回错误而非静默成功。
+func (t *TSNAbility) SetTransport(tr TSNTransport) {
+	t.mu.Lock()
+	t.transport = tr
+	t.mu.Unlock()
+}
+
 func (t *TSNAbility) GetName() string { return "TSNAbility" }
 
 func (t *TSNAbility) Describe() string {
-	return "TSNAbility提供时间敏感网络(TSN)能力:talker/listener 流注册、IEEE 802.1Q 优先级到队列映射、802.1Qbv 时间感知门控配置。"
+	return "TSNAbility提供 TSN 配置能力:talker/listener 流注册、802.1Q 优先级到队列映射、802.1Qbv 时间感知门控;网卡探测与 tc/taprio 下发通过注入的 TSNTransport 完成,未注入时设备类命令返回错误。"
 }
 
 func (t *TSNAbility) Check(atom *types.Atom) error {
@@ -134,10 +195,30 @@ func (t *TSNAbility) Command(atom *types.Atom, act string, args any) types.Comma
 		if !ok || strings.TrimSpace(typed.Interface) == "" {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
 		}
+		iface := strings.TrimSpace(typed.Interface)
+		if !isValidTSNInterfaceName(iface) {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: invalid interface name %q: %w", act, iface, types.ErrInvalidArguments)}
+		}
+		t.applyMu.Lock()
+		defer t.applyMu.Unlock()
+		t.mu.RLock()
+		transport, current, registered := t.transport, t.iface, len(t.streams)
+		t.mu.RUnlock()
+		if transport == nil {
+			return types.CommandOutput{Name: act, Err: errNoTSNTransport(act)}
+		}
+		// 切换接口而旧流仍在设备上注册会让本地记录与网卡实际状态漂移。
+		if registered > 0 && iface != current {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %d stream(s) still registered on %q, unregister them before switching interface: %w", act, registered, current, types.ErrInvalidArguments)}
+		}
+		// 接口必须由 transport 真实探测: 名字存在不等于网卡存在, 更不等于支持 Qbv。
+		if err := transport.ProbeInterface(iface); err != nil {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: probe interface %q: %w: %w", act, iface, types.ErrOperationFailed, err)}
+		}
 		t.mu.Lock()
-		t.iface = strings.TrimSpace(typed.Interface)
+		t.iface = iface
 		t.mu.Unlock()
-		return types.CommandOutput{Name: act, Value: t.iface}
+		return types.CommandOutput{Name: act, Value: iface}
 	case TSNCommandGetInterface:
 		if args != nil {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
@@ -154,13 +235,26 @@ func (t *TSNAbility) Command(atom *types.Atom, act string, args any) types.Comma
 		if !ok || strings.TrimSpace(typed.ID) == "" {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
 		}
-		t.mu.Lock()
-		stream, ok := t.streams[strings.TrimSpace(typed.ID)]
+		id := strings.TrimSpace(typed.ID)
+		t.applyMu.Lock()
+		defer t.applyMu.Unlock()
+		t.mu.RLock()
+		stream, ok := t.streams[id]
+		t.mu.RUnlock()
 		if !ok {
-			t.mu.Unlock()
-			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: stream %q not found: %w", act, typed.ID, types.ErrInvalidArguments)}
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: stream %q not found: %w", act, id, types.ErrInvalidArguments)}
 		}
-		delete(t.streams, strings.TrimSpace(typed.ID))
+		iface, transport, err := t.requireDevice(act)
+		if err != nil {
+			return types.CommandOutput{Name: act, Err: err}
+		}
+		// 设备侧撤销失败时保留本地条目, 调用方可重试;不能先删记录造成"本地已删、
+		// 网卡仍在转发"的假成功。
+		if err := transport.RemoveStream(iface, *stream); err != nil {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: remove stream %q: %w: %w", act, id, types.ErrOperationFailed, err)}
+		}
+		t.mu.Lock()
+		delete(t.streams, id)
 		t.mu.Unlock()
 		return types.CommandOutput{Name: act, Value: *stream}
 	case TSNCommandListStreams:
@@ -188,23 +282,28 @@ func (t *TSNAbility) Command(atom *types.Atom, act string, args any) types.Comma
 				return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: queue %d out of range: %w", act, q, types.ErrInvalidArguments)}
 			}
 		}
-		t.mu.Lock()
-		t.prioMap = make(map[uint8]uint8, len(typed.Mappings))
-		for p, q := range typed.Mappings {
-			t.prioMap[p] = q
+		next := cloneTSNPriorityMap(typed.Mappings)
+		t.applyMu.Lock()
+		defer t.applyMu.Unlock()
+		iface, transport, err := t.requireDevice(act)
+		if err != nil {
+			return types.CommandOutput{Name: act, Err: err}
 		}
+		// 映射必须真正下发到网卡; 只在内存改 map 时 tc priomap 仍是旧值, 属假成功。
+		if err := transport.ApplyPriorityMap(iface, next); err != nil {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: apply priority map: %w: %w", act, types.ErrOperationFailed, err)}
+		}
+		t.mu.Lock()
+		t.prioMap = cloneTSNPriorityMap(next)
 		t.mu.Unlock()
-		return types.CommandOutput{Name: act, Value: typed.Mappings}
+		return types.CommandOutput{Name: act, Value: cloneTSNPriorityMap(next)}
 	case TSNCommandGetPriority:
 		if args != nil {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
 		}
 		t.mu.RLock()
-		defer t.mu.RUnlock()
-		out := make(map[uint8]uint8, len(t.prioMap))
-		for p, q := range t.prioMap {
-			out[p] = q
-		}
+		out := cloneTSNPriorityMap(t.prioMap)
+		t.mu.RUnlock()
 		return types.CommandOutput{Name: act, Value: out}
 	case TSNCommandSetTimeAware:
 		typed, ok := args.(TSNTimeAwareArgs)
@@ -220,12 +319,23 @@ func (t *TSNAbility) Command(atom *types.Atom, act string, args any) types.Comma
 		// 深拷贝 GateStates: 旧实现直接存调用方 slice(别名), 调用方事后修改会与
 		// 并发 GetTimeAware 的读取形成数据竞争。
 		gs := append([]byte(nil), typed.GateStates...)
+		cfg := TSNTimeAwareArgs{Enabled: typed.Enabled, BaseTime: typed.BaseTime, CycleTime: typed.CycleTime, GateStates: gs}
+		t.applyMu.Lock()
+		defer t.applyMu.Unlock()
+		iface, transport, err := t.requireDevice(act)
+		if err != nil {
+			return types.CommandOutput{Name: act, Err: err}
+		}
+		// 门控必须真正下发(tc taprio); 下发失败就不得记录为已启用。
+		if err := transport.ApplyGateControl(iface, cloneTSNTimeAware(cfg)); err != nil {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: apply gate control: %w: %w", act, types.ErrOperationFailed, err)}
+		}
 		t.mu.Lock()
-		t.timeAware = TSNTimeAwareArgs{Enabled: typed.Enabled, BaseTime: typed.BaseTime, CycleTime: typed.CycleTime, GateStates: gs}
+		t.timeAware = cfg
 		t.mu.Unlock()
 		// 返回值另拷贝: 旧实现返回与存储共享底层数组的 gs, 调用方修改
 		// 返回值会污染状态。
-		return types.CommandOutput{Name: act, Value: TSNTimeAwareArgs{Enabled: typed.Enabled, BaseTime: typed.BaseTime, CycleTime: typed.CycleTime, GateStates: append([]byte(nil), gs...)}}
+		return types.CommandOutput{Name: act, Value: cloneTSNTimeAware(cfg)}
 	case TSNCommandGetTimeAware:
 		if args != nil {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
@@ -233,8 +343,7 @@ func (t *TSNAbility) Command(atom *types.Atom, act string, args any) types.Comma
 		t.mu.RLock()
 		ta := t.timeAware
 		t.mu.RUnlock()
-		out := TSNTimeAwareArgs{Enabled: ta.Enabled, BaseTime: ta.BaseTime, CycleTime: ta.CycleTime, GateStates: append([]byte(nil), ta.GateStates...)}
-		return types.CommandOutput{Name: act, Value: out}
+		return types.CommandOutput{Name: act, Value: cloneTSNTimeAware(ta)}
 	}
 	return types.CommandOutput{Name: act, Err: fmt.Errorf("command %s: %w", act, types.ErrUnsupportedCommand)}
 }
@@ -264,17 +373,18 @@ func (t *TSNAbility) registerStream(dir TSNStreamDirection, args any) types.Comm
 		id, mac, dest = strings.TrimSpace(typed.ID), strings.TrimSpace(typed.MAC), strings.TrimSpace(typed.DestMAC)
 		vlan, priority = typed.VLANID, typed.Priority
 	}
+	act := fmt.Sprintf("register_%s", dir)
 	if id == "" || mac == "" {
-		return types.CommandOutput{Name: fmt.Sprintf("register_%s", dir), Err: fmt.Errorf("register_%s: id and mac required: %w", dir, types.ErrInvalidArguments)}
+		return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: id and mac required: %w", act, types.ErrInvalidArguments)}
 	}
 	if !isValidMAC(mac) {
-		return types.CommandOutput{Name: fmt.Sprintf("register_%s", dir), Err: fmt.Errorf("register_%s: invalid mac %q: %w", dir, mac, types.ErrInvalidArguments)}
+		return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: invalid mac %q: %w", act, mac, types.ErrInvalidArguments)}
 	}
 	if dest != "" && !isValidMAC(dest) {
-		return types.CommandOutput{Name: fmt.Sprintf("register_%s", dir), Err: fmt.Errorf("register_%s: invalid dest mac %q: %w", dir, dest, types.ErrInvalidArguments)}
+		return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: invalid dest mac %q: %w", act, dest, types.ErrInvalidArguments)}
 	}
 	if priority > 7 {
-		return types.CommandOutput{Name: fmt.Sprintf("register_%s", dir), Err: fmt.Errorf("register_%s: priority %d out of range: %w", dir, priority, types.ErrInvalidArguments)}
+		return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: priority %d out of range: %w", act, priority, types.ErrInvalidArguments)}
 	}
 	stream := &TSNStream{
 		ID:         id,
@@ -287,14 +397,80 @@ func (t *TSNAbility) registerStream(dir TSNStreamDirection, args any) types.Comm
 		Interval:   interval,
 		CreatedAt:  time.Now(),
 	}
-	t.mu.Lock()
-	if _, exists := t.streams[id]; exists {
-		t.mu.Unlock()
-		return types.CommandOutput{Name: fmt.Sprintf("register_%s", dir), Err: fmt.Errorf("register_%s: id %q already exists: %w", dir, id, types.ErrInvalidArguments)}
+	t.applyMu.Lock()
+	defer t.applyMu.Unlock()
+	iface, transport, err := t.requireDevice(act)
+	if err != nil {
+		return types.CommandOutput{Name: act, Err: err}
 	}
+	t.mu.RLock()
+	_, exists := t.streams[id]
+	t.mu.RUnlock()
+	if exists {
+		return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: id %q already exists: %w", act, id, types.ErrInvalidArguments)}
+	}
+	// 流必须在设备侧落地; 只写内存 map 时网卡没有对应规则, 属骨架假成功。
+	if err := transport.AddStream(iface, *stream); err != nil {
+		return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: add stream %q: %w: %w", act, id, types.ErrOperationFailed, err)}
+	}
+	t.mu.Lock()
 	t.streams[id] = stream
 	t.mu.Unlock()
-	return types.CommandOutput{Name: fmt.Sprintf("register_%s", dir), Value: *stream}
+	return types.CommandOutput{Name: act, Value: *stream}
+}
+
+// requireDevice 返回已选网卡与已注入的 transport; 任一缺失即返回明确错误。
+// 语义对齐 Modbus/Serial/Docker: 没有设备通道时绝不假装成功。
+func (t *TSNAbility) requireDevice(act string) (string, TSNTransport, error) {
+	t.mu.RLock()
+	iface, transport := t.iface, t.transport
+	t.mu.RUnlock()
+	if transport == nil {
+		return "", nil, errNoTSNTransport(act)
+	}
+	if strings.TrimSpace(iface) == "" {
+		return "", nil, fmt.Errorf("%s: no interface selected, set_interface first: %w", act, types.ErrInvalidArguments)
+	}
+	return iface, transport, nil
+}
+
+func errNoTSNTransport(act string) error {
+	return fmt.Errorf("%s: no TSNTransport injected: %w", act, types.ErrInvalidArguments)
+}
+
+func cloneTSNPriorityMap(m map[uint8]uint8) map[uint8]uint8 {
+	out := make(map[uint8]uint8, len(m))
+	for p, q := range m {
+		out[p] = q
+	}
+	return out
+}
+
+func cloneTSNTimeAware(cfg TSNTimeAwareArgs) TSNTimeAwareArgs {
+	return TSNTimeAwareArgs{
+		Enabled:    cfg.Enabled,
+		BaseTime:   cfg.BaseTime,
+		CycleTime:  cfg.CycleTime,
+		GateStates: append([]byte(nil), cfg.GateStates...),
+	}
+}
+
+// isValidTSNInterfaceName 接受 Linux 风格接口名(字母/数字/_/-/., 1..15 字节)。
+func isValidTSNInterfaceName(name string) bool {
+	if name == "" || len(name) > maxTSNInterfaceNameLen {
+		return false
+	}
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '_' || r == '-' || r == '.':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func isValidMAC(mac string) bool {

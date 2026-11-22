@@ -66,6 +66,67 @@ func TestShAbilityRejectsNotAllowed(t *testing.T) {
 	}
 }
 
+// TestShAbilityFailClosed 验证 fail-closed 授权语义:
+// 未配置 allowlist(空)时, run/start 一律以 ErrAllowlistEmpty 拒绝, 不再"不限制"。
+func TestShAbilityFailClosed(t *testing.T) {
+	s := NewShAbility()
+	atom := newShAtom(t)
+	// 新实例 allowlist 为空 → 缺省即拒绝(旧实现此处放行, 是 fail-open 洞)
+	if out := s.Command(atom, ShCommandRun, ShRunArgs{Command: "printf hello"}); !errors.Is(out.Err, ErrAllowlistEmpty) {
+		t.Fatalf("default empty allowlist run: err=%v (want ErrAllowlistEmpty, fail-closed)", out.Err)
+	}
+	if out := s.Command(atom, ShCommandStart, ShRunArgs{Command: "printf hello"}); !errors.Is(out.Err, ErrAllowlistEmpty) {
+		t.Fatalf("default empty allowlist start: err=%v (want ErrAllowlistEmpty, fail-closed)", out.Err)
+	}
+	// 显式 set_allowlist 空列表同样回落到 fail-closed
+	if out := s.Command(atom, ShCommandSetAllowlist, ShSetAllowlistArgs{}); out.Err != nil {
+		t.Fatalf("set empty allowlist: %v", out.Err)
+	}
+	if out := s.Command(atom, ShCommandRun, ShRunArgs{Command: "printf hello"}); !errors.Is(out.Err, ErrAllowlistEmpty) {
+		t.Fatalf("set-empty allowlist run: err=%v (want ErrAllowlistEmpty)", out.Err)
+	}
+}
+
+// TestShAbilitySetAllowAny 验证显式 opt-in:SetAllowAny(true) 放行任意命令,
+// false 回到 fail-closed; 且 get_allowlist 能区分两种状态。
+func TestShAbilitySetAllowAny(t *testing.T) {
+	s := NewShAbility()
+	atom := newShAtom(t)
+	if out := s.Command(atom, ShCommandSetAllowAny, "raw"); !errors.Is(out.Err, types.ErrInvalidArguments) {
+		t.Fatalf("set_allowlist_any wrong type: %v", out.Err)
+	}
+	// opt-in 打开前仍拒绝(不产生状态)
+	if out := s.Command(atom, ShCommandRun, ShRunArgs{Command: "printf hi"}); !errors.Is(out.Err, ErrAllowlistEmpty) {
+		t.Fatalf("before allow-any run: err=%v (want ErrAllowlistEmpty)", out.Err)
+	}
+	// 显式 opt-in
+	if out := s.Command(atom, ShCommandSetAllowAny, CmdSetAllowAnyArgs{Any: true}); out.Err != nil {
+		t.Fatalf("set_allowlist_any(true): %v", out.Err)
+	}
+	if !s.AllowAny() {
+		t.Fatal("AllowAny() = false, want true after opt-in")
+	}
+	// 打开后任意命令被放行(不会因白名单为空而被拒)
+	if out := s.Command(atom, ShCommandRun, ShRunArgs{Command: "rm -rf /tmp/x"}); errors.Is(out.Err, ErrAllowlistEmpty) {
+		t.Fatalf("run after allow-any wrongly reports empty allowlist: %v", out.Err)
+	}
+	// get_allowlist 明确标识 AllowAny
+	alv := s.Command(atom, ShCommandGetAllowlist, nil).Value.(ShAllowlist)
+	if !alv.AllowAny || len(alv.Allowed) != 1 || alv.Allowed[0] != "*" {
+		t.Fatalf("get_allowlist after allow-any = %+v (want AllowAny=true, [*])", alv)
+	}
+	// 关闭 → 回到 fail-closed
+	if out := s.Command(atom, ShCommandSetAllowAny, CmdSetAllowAnyArgs{Any: false}); out.Err != nil {
+		t.Fatalf("set_allowlist_any(false): %v", out.Err)
+	}
+	if s.AllowAny() {
+		t.Fatal("AllowAny() = true, want false after opt-out")
+	}
+	if out := s.Command(atom, ShCommandRun, ShRunArgs{Command: "printf hi"}); !errors.Is(out.Err, ErrAllowlistEmpty) {
+		t.Fatalf("run after opt-out: err=%v (want ErrAllowlistEmpty)", out.Err)
+	}
+}
+
 // TestShAbilityRejectsChainingBypass 验证首词白名单不能被 shell 链接元字符绕过。
 func TestShAbilityRejectsChainingBypass(t *testing.T) {
 	s := NewShAbility()
@@ -204,6 +265,49 @@ func TestShAbilityRunTimeout(t *testing.T) {
 		res := out.Value.(CmdResult)
 		if res.ExitCode == 0 {
 			t.Fatalf("expected non-zero exit on timeout, got 0")
+		}
+	}
+}
+
+// TestShAbilityRejectsExtendedChainingBypass 补充任务要求的绕过形态用例:
+// 换行(含 \r)、$()、反引号、管道按位或 |&、进程替换 <(、ANSI-C 引号 $'...'。
+// 这些形态在"引号外字符级扫描"范围内全部被 hasShellChaining 拒绝;
+// 反斜杠转义(编码绕过)不被字符级扫描解码, 该局限如实记录为文档化行为,
+// 断言固定"当前实现", 不假装已拦截(详见 hasShellChaining 注释与 README)。
+func TestShAbilityRejectsExtendedChainingBypass(t *testing.T) {
+	s := NewShAbility()
+	atom := newShAtom(t)
+	s.SetAllowed([]string{"printf", "echo"})
+	// 已被字符级扫描拦截的形态
+	rejected := []string{
+		"echo hi\rprintf pwned",       // 回车控制字符(hasShellChaining 的控制字符分支)
+		"echo hi $'\\n' printf pwned", // ANSI-C 引号: $ 在引号外即拦截
+		"echo hi |& tee /dev/stderr",  // 管道按位或
+		"echo <(printf injected)",     // 进程替换(输入)
+		"echo a >(printf injected)",   // 进程替换(输出)
+		"printf 'x'`touch /tmp/x`",    // 反引号命令替换
+		"printf 'x'$(touch /tmp/y)",   // $() 命令替换
+		"printf 'x'\ntouch /tmp/z",    // 换行分隔命令
+	}
+	for _, c := range rejected {
+		if out := s.Command(atom, ShCommandRun, ShRunArgs{Command: c, Timeout: 2 * time.Second}); !errors.Is(out.Err, types.ErrInvalidArguments) {
+			t.Fatalf("extended bypass %q should be rejected, err=%v", c, out.Err)
+		}
+	}
+	// 反斜杠转义的编码绕过(\x3b 分号 / \u003c 尖括号)当前不展开解码,
+	// 按字面量处理——断言当前实现行为, 便于未来改成真解码器时翻转。
+	// 断言点放在"未被授权层拒绝"(Err 为 nil)而非"进程一定跑起来":
+	// 无 sh 的平台上 exec 启动失败只体现为 ExitCode=-1, 仍满足 Err==nil。
+	for _, c := range []string{
+		"printf 'x'\\x3btouch /tmp/x-enc",
+		"echo hi \\u003c /etc/passwd",
+	} {
+		out := s.Command(atom, ShCommandRun, ShRunArgs{Command: c, Timeout: 2 * time.Second})
+		if out.Err != nil {
+			t.Fatalf("encoding case %q: 当前实现按字面量放行, 不应被授权层拒绝, got %v", c, out.Err)
+		}
+		if _, ok := out.Value.(CmdResult); !ok {
+			t.Fatalf("encoding case %q: 期望走到执行层并返回 CmdResult(退出码可为 -1), got %T (%v)", c, out.Value, out.Value)
 		}
 	}
 }

@@ -98,6 +98,48 @@ func verifySkeletonExtras(atom, extAtom *types.Atom) {
 		}
 	}
 
+	// --- SerialAbility: 注入真实 transport 后的正路径 ---
+	// 有可用串口设备时走完整 open→is_open→write→get_config→close 往返;
+	// 无设备(或设备被占用)时明确 SKIP, 不把"没有硬件"伪装成通过。
+	if sa, ok := extAtom.Ability("SerialAbility"); ok {
+		sa.(*ability.SerialAbility).SetTransport(newSerialTransport())
+		ports, _ := listSerialPorts()
+		if len(ports) == 0 {
+			fmt.Println("  [SKIP] Serial/real-roundtrip (本机没有可用串口设备)")
+		} else {
+			port := ports[0]
+			report("Serial/real-open", port, sa.Command(extAtom, ability.SerialCommandOpen, ability.SerialOpenArgs{
+				Port: port, Config: ability.SerialConfig{Baud: 115200, DataBits: 8, StopBits: 1, Parity: "N"},
+			}).Err)
+			o := sa.Command(extAtom, ability.SerialCommandIsOpen, ability.SerialPortArg{Port: port})
+			if v, ok := o.Value.(bool); ok && v {
+				report("Serial/real-is_open", "true", nil)
+			} else if o.Err != nil {
+				report("Serial/real-is_open", fmt.Sprintf("%v", o.Value), o.Err)
+			} else {
+				report("Serial/real-is_open", "false", fmt.Errorf("is_open returned false after open"))
+			}
+			// write 必须打到真实句柄上 (无设备时 open 已失败, 此处端口已打开)
+			o = sa.Command(extAtom, ability.SerialCommandWrite, ability.SerialWriteArgs{Port: port, Data: []byte("fe-verify")})
+			if o.Err != nil {
+				report("Serial/real-write", fmt.Sprintf("%v", o.Err), o.Err)
+			} else if n, _ := o.Value.(int); n != len("fe-verify") {
+				report("Serial/real-write", fmt.Sprintf("n=%d", n), fmt.Errorf("write returned %d, want %d", n, len("fe-verify")))
+			} else {
+				report("Serial/real-write", fmt.Sprintf("%d bytes", n), nil)
+			}
+			o = sa.Command(extAtom, ability.SerialCommandGetConfig, ability.SerialPortArg{Port: port})
+			if cfg, _ := o.Value.(ability.SerialConfig); o.Err != nil {
+				report("Serial/real-get_config", fmt.Sprintf("%v", cfg), o.Err)
+			} else if cfg.Baud != 115200 {
+				report("Serial/real-get_config", fmt.Sprintf("%d", cfg.Baud), fmt.Errorf("get_config baud = %d, want 115200", cfg.Baud))
+			} else {
+				report("Serial/real-get_config", fmt.Sprintf("%d-8N1", cfg.Baud), nil)
+			}
+			report("Serial/real-close", port, sa.Command(extAtom, ability.SerialCommandClose, ability.SerialPortArg{Port: port}).Err)
+		}
+	}
+
 	// --- ModbusAbility: get_endpoint/get_unit_id/read_input/read_discrete/write_multi_reg ---
 	if a, ok := extAtom.Ability("ModbusAbility"); ok {
 		o := a.Command(extAtom, ability.ModbusCommandSetUnitID, ability.ModbusUnitIDArgs{UnitID: 7})

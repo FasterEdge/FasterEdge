@@ -42,6 +42,81 @@ func TestBashAbilityAllowlistCRUD(t *testing.T) {
 	}
 }
 
+// TestBashAbilityFailClosed 验证 fail-closed 语义: 未配置白名单时 run/start
+// 一律以 ErrAllowlistEmpty 拒绝(旧实现"空 allowlist = 不限制")。
+func TestBashAbilityFailClosed(t *testing.T) {
+	b := NewBashAbility()
+	atom := newBashAtom(t)
+	if out := b.Command(atom, BashCommandRun, ShRunArgs{Command: "printf hi"}); !errors.Is(out.Err, ErrAllowlistEmpty) {
+		t.Fatalf("default empty allowlist run: err=%v (want ErrAllowlistEmpty)", out.Err)
+	}
+	if out := b.Command(atom, BashCommandStart, ShRunArgs{Command: "printf hi"}); !errors.Is(out.Err, ErrAllowlistEmpty) {
+		t.Fatalf("default empty allowlist start: err=%v (want ErrAllowlistEmpty)", out.Err)
+	}
+	// set_allowlist 空列表 → 仍 fail-closed
+	if out := b.Command(atom, BashCommandSetAllowlist, ShSetAllowlistArgs{}); out.Err != nil {
+		t.Fatalf("set empty allowlist: %v", out.Err)
+	}
+	if out := b.Command(atom, BashCommandRun, ShRunArgs{Command: "printf hi"}); !errors.Is(out.Err, ErrAllowlistEmpty) {
+		t.Fatalf("set-empty allowlist run: err=%v (want ErrAllowlistEmpty)", out.Err)
+	}
+}
+
+// TestBashAbilitySetAllowAny 验证显式 opt-in: set_allowlist_any 打开全放行,
+// false 回到 fail-closed, 且 opt-in 能穿透 ShAbility→CmdAbility 两层委托。
+func TestBashAbilitySetAllowAny(t *testing.T) {
+	b := NewBashAbility()
+	atom := newBashAtom(t)
+	if out := b.Command(atom, BashCommandSetAllowAny, "raw"); !errors.Is(out.Err, types.ErrInvalidArguments) {
+		t.Fatalf("set_allowlist_any wrong type: %v", out.Err)
+	}
+	if out := b.Command(atom, BashCommandSetAllowAny, CmdSetAllowAnyArgs{Any: true}); out.Err != nil {
+		t.Fatalf("set_allowlist_any(true): %v", out.Err)
+	}
+	if !b.AllowAny() || !b.sh.AllowAny() || !b.sh.cmd.AllowAny() {
+		t.Fatalf("allow-any 未穿透委托链: bash=%v sh=%v cmd=%v", b.AllowAny(), b.sh.AllowAny(), b.sh.cmd.AllowAny())
+	}
+	// opt-in 后任意命令不再被 ErrAllowlistEmpty 拒绝
+	if out := b.Command(atom, BashCommandRun, ShRunArgs{Command: "rm -rf /tmp/x"}); errors.Is(out.Err, ErrAllowlistEmpty) {
+		t.Fatalf("run after allow-any wrongly reports empty allowlist: %v", out.Err)
+	}
+	alv := b.Command(atom, BashCommandGetAllowlist, nil).Value.(ShAllowlist)
+	if !alv.AllowAny || len(alv.Allowed) != 1 || alv.Allowed[0] != "*" {
+		t.Fatalf("get_allowlist after allow-any = %+v", alv)
+	}
+	if out := b.Command(atom, BashCommandSetAllowAny, CmdSetAllowAnyArgs{Any: false}); out.Err != nil {
+		t.Fatalf("set_allowlist_any(false): %v", out.Err)
+	}
+	if b.AllowAny() || b.sh.AllowAny() || b.sh.cmd.AllowAny() {
+		t.Fatalf("opt-out 未回落到 fail-closed: bash=%v sh=%v cmd=%v", b.AllowAny(), b.sh.AllowAny(), b.sh.cmd.AllowAny())
+	}
+	if out := b.Command(atom, BashCommandRun, ShRunArgs{Command: "printf hi"}); !errors.Is(out.Err, ErrAllowlistEmpty) {
+		t.Fatalf("run after opt-out: err=%v (want ErrAllowlistEmpty)", out.Err)
+	}
+}
+
+// TestBashAbilityRejectsExtendedChainingBypass 补齐任务要求的绕过形态:
+// |& 进程管道、<( 进程替换、$() 与反引号命令替换、换行/控制字符。
+func TestBashAbilityRejectsExtendedChainingBypass(t *testing.T) {
+	b := NewBashAbility()
+	atom := newBashAtom(t)
+	b.SetAllowed([]string{"printf", "echo"})
+	for _, c := range []string{
+		"echo hi |& tee /dev/stderr",
+		"echo <(printf injected)",
+		"echo a >(printf injected)",
+		"printf 'x'$(touch /tmp/bash-b-1)",
+		"printf 'x'`touch /tmp/bash-b-2`",
+		"printf 'x'\ntouch /tmp/bash-b-3",
+		"echo hi\rprintf pwned",
+		"printf $'a;touch /tmp/bash-b-4'",
+	} {
+		if out := b.Command(atom, BashCommandRun, ShRunArgs{Command: c, Timeout: 2 * time.Second}); !errors.Is(out.Err, types.ErrInvalidArguments) {
+			t.Fatalf("extended bypass %q should be rejected, err=%v", c, out.Err)
+		}
+	}
+}
+
 func TestBashAbilityRejectsWrongArgs(t *testing.T) {
 	b := NewBashAbility()
 	atom := newBashAtom(t)

@@ -290,6 +290,23 @@ func (a *ConfigFileAbility) Command(atom *types.Atom, act string, args any) type
 	return types.CommandOutput{Name: act, Err: fmt.Errorf("command %s: %w", act, types.ErrUnsupportedCommand)}
 }
 
+// configFileAbilityCommands 是 ConfigFileAbility 的命令目录, 与 Command 的 case 分支一一对应。
+var configFileAbilityCommands = []string{
+	ConfigFileCommandSetPath,
+	ConfigFileCommandGetPath,
+	ConfigFileCommandExists,
+	ConfigFileCommandLoad,
+	ConfigFileCommandSave,
+}
+
+// ListCommands satisfies types.CommandLister.
+func (a *ConfigFileAbility) ListCommands() []string {
+	return append([]string(nil), configFileAbilityCommands...)
+}
+
+// Compile-time guarantee that ConfigFileAbility declares its command catalogue.
+var _ types.CommandLister = (*ConfigFileAbility)(nil)
+
 // parseFlatJSON 解析 {"a.b": "v", "c": "d"} 形式的扁平 JSON,所有 value 必须是字符串。
 // 不支持嵌套对象,以保持 ConfigData 的扁平语义一致。
 func parseFlatJSON(raw []byte) (map[string]string, error) {

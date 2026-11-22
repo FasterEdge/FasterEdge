@@ -252,7 +252,10 @@ func (a *Atom) MountAll() (err error) {
 
 	var checkErrs []error
 	for _, item := range items {
+		// 注册名与运行期 GetName() 不一致(改名)是"未进入 Check 即失败"的
+		// 情形, 单独发一对事件, 否则 metrics 只留下 check:success。
 		if err := verifyName(item); err != nil {
+			a.observeGateFailure(item.name, PhaseCheck, err)
 			checkErrs = append(checkErrs, err)
 			continue
 		}
@@ -261,6 +264,7 @@ func (a *Atom) MountAll() (err error) {
 			continue
 		}
 		if err := verifyName(item); err != nil {
+			a.observeGateFailure(item.name, PhaseCheck, err)
 			checkErrs = append(checkErrs, err)
 		}
 	}
@@ -271,6 +275,7 @@ func (a *Atom) MountAll() (err error) {
 	mounted := make([]namedComponent, 0, len(items))
 	for _, item := range items {
 		if err := verifyName(item); err != nil {
+			a.observeGateFailure(item.name, PhaseMount, err)
 			return finish(rollback(a, mounted, err), nil)
 		}
 		if err := a.observe(item.name, "", PhaseMount, func() error { return callMount(item, a) }); err != nil {
@@ -278,6 +283,7 @@ func (a *Atom) MountAll() (err error) {
 		}
 		mounted = append(mounted, item)
 		if err := verifyName(item); err != nil {
+			a.observeGateFailure(item.name, PhaseMount, err)
 			return finish(rollback(a, mounted, err), nil)
 		}
 	}
@@ -345,9 +351,10 @@ func rollback(atom *Atom, mounted []namedComponent, cause error) error {
 		}
 		compCtx, compCancel := context.WithTimeout(context.Background(), perComponent)
 		result := make(chan error, 1)
+		timer := atom.beginPhase(m.name, "", PhaseRollback)
 		go func() {
 			defer compCancel()
-			result <- atom.observe(m.name, "", PhaseRollback, func() (err error) {
+			result <- atom.observePhased(timer, func() (err error) {
 				defer func() {
 					if v := recover(); v != nil {
 						err = &ComponentPanicError{Name: m.name, Phase: "rollback", Value: v, Stack: debug.Stack()}
@@ -361,13 +368,20 @@ func rollback(atom *Atom, mounted []namedComponent, cause error) error {
 		}()
 		select {
 		case err := <-result:
+			// observe 内部已按 fn 的结果发终态事件; 此处只聚合错误。
 			if err != nil {
 				errs = append(errs, err)
 			}
 		case <-compCtx.Done():
 			// 仅记录该组件超时并继续卸载剩余组件(goroutine 随 compCtx
 			// 取消自行收敛; 缓冲 chan 保证发送侧不阻塞)。
-			errs = append(errs, &ShutdownTimeoutError{Timeout: perComponent, Phase: "rollback", Components: []string{m.name}})
+			// 超时侧必须补发终态事件: 否则组件挂死时该 rollback 相位只有
+			// start 没有终态, metrics 里的计数与耗时统计永远缺这一笔——
+			// 挂死本身变成不可观测。timer.once 保证组件后续即便返回也不会
+			// 重复发第二个终态事件(一次相位一对事件)。
+			timeoutErr := &ShutdownTimeoutError{Timeout: perComponent, Phase: "rollback", Components: []string{m.name}}
+			timer.finish(timeoutErr)
+			errs = append(errs, timeoutErr)
 		}
 	}
 	return errors.Join(errs...)
@@ -582,9 +596,10 @@ func (a *Atom) unmountWithTimeout(base context.Context, mounted []namedComponent
 		// 执行, 且 UnmountAll 随即清空 mounted 置 AtomFailed, 无重试路径。
 		compCtx, compCancel := context.WithTimeout(base, timeout)
 		result := make(chan error, 1)
+		timer := a.beginPhase(m.name, "", PhaseUnmount)
 		go func() {
 			defer compCancel()
-			result <- a.observe(m.name, "", PhaseUnmount, func() (err error) {
+			result <- a.observePhased(timer, func() (err error) {
 				defer func() {
 					if v := recover(); v != nil {
 						err = NewComponentPanicError(m.name, "unmount", v)
@@ -598,13 +613,18 @@ func (a *Atom) unmountWithTimeout(base context.Context, mounted []namedComponent
 		}()
 		select {
 		case err := <-result:
+			// observe 内部已按 fn 的结果发终态事件; 此处只聚合错误。
 			if err != nil {
 				errs = append(errs, err)
 			}
 		case <-compCtx.Done():
 			// 仅记录该组件超时并继续卸载剩余组件(goroutine 随 compCtx
 			// 取消自行收敛; 缓冲 chan 保证发送侧不阻塞)。
-			errs = append(errs, &ShutdownTimeoutError{Timeout: timeout, Phase: "unmount", Components: []string{m.name}})
+			// 超时侧补发终态事件(理由同 rollback): 否则挂死组件只有 start
+			// 没有终态, metrics 缺这一笔, 挂死不可观测。
+			timeoutErr := &ShutdownTimeoutError{Timeout: timeout, Phase: "unmount", Components: []string{m.name}}
+			timer.finish(timeoutErr)
+			errs = append(errs, timeoutErr)
 		}
 	}
 	return errors.Join(errs...)

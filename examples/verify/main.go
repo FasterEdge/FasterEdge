@@ -20,6 +20,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -101,6 +102,52 @@ func (t *modbusTCPTransport) Close() error {
 	if t.conn != nil {
 		return t.conn.Close()
 	}
+	return nil
+}
+
+// verifyTSNTransport 是内存假 TSNTransport: 只记录收到的参数, 不驱动真实网卡。
+// verify 用它在"注入后参数正确透传"上做断言, 而不是声称完成了 tc/taprio 下发。
+type verifyTSNTransport struct {
+	mu      sync.Mutex
+	probed  string
+	added   []ability.TSNStream
+	removed []string
+	prioMap map[uint8]uint8
+	gate    ability.TSNTimeAwareArgs
+}
+
+func (v *verifyTSNTransport) ProbeInterface(iface string) error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.probed = iface
+	return nil
+}
+
+func (v *verifyTSNTransport) AddStream(iface string, stream ability.TSNStream) error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.added = append(v.added, stream)
+	return nil
+}
+
+func (v *verifyTSNTransport) RemoveStream(iface string, stream ability.TSNStream) error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.removed = append(v.removed, stream.ID)
+	return nil
+}
+
+func (v *verifyTSNTransport) ApplyPriorityMap(iface string, mappings map[uint8]uint8) error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.prioMap = mappings
+	return nil
+}
+
+func (v *verifyTSNTransport) ApplyGateControl(iface string, cfg ability.TSNTimeAwareArgs) error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.gate = cfg
 	return nil
 }
 
@@ -486,7 +533,10 @@ func main() {
 
 	// --- ability: BashAbility (同样走 CmdRunArgs 风格?) 用 ShRunArgs 兼容 ---
 	if a, ok := atom.Ability("BashAbility"); ok {
-		o := a.Command(atom, ability.BashCommandRun, ability.ShRunArgs{Command: "echo bash-ability-ok", Timeout: 3 * time.Second})
+		// fail-closed: 必须先显式配置 allowlist 才允许执行(空 allowlist 拒绝一切)
+		o := a.Command(atom, ability.BashCommandSetAllowlist, ability.ShSetAllowlistArgs{Allowed: []string{"echo"}})
+		report("BashAbility/set_allowlist", "echo", o.Err)
+		o = a.Command(atom, ability.BashCommandRun, ability.ShRunArgs{Command: "echo bash-ability-ok", Timeout: 3 * time.Second})
 		if res, ok := o.Value.(ability.CmdResult); ok {
 			if res.ExitCode < 0 {
 				fmt.Printf("  [SKIP] BashAbility/run (exec 启动失败, 环境缺 bash): %s\n", strings.TrimSpace(res.Stderr))
@@ -949,31 +999,80 @@ func main() {
 		}
 	}
 
-	// TSNAbility (配置类)
+	// TSNAbility: 设备类命令必须有 transport 才允许成功——先断言"未注入即拒绝",
+	// 再注入内存假 transport 验证参数透传(旧实现在无 transport 下也 PASS, 属假成功)。
 	if a, ok := extAtom.Ability("TSNAbility"); ok {
 		o := a.Command(extAtom, ability.TSNCommandSetInterface, ability.TSNInterfaceArg{Interface: "eth0"})
-		report("TSN/set_interface", "eth0", o.Err)
-		o = a.Command(extAtom, ability.TSNCommandGetInterface, nil)
-		// set 后 get 相等断言(旧实现只打印——set 变 no-op 也 PASS)
-		if got, ok := o.Value.(string); ok {
-			if got != "eth0" {
-				report("TSN/get_interface", fmt.Sprintf("%q", got), fmt.Errorf("get_interface round-trip mismatch: got %q want eth0", got))
-			} else {
-				report("TSN/get_interface", got, nil)
-			}
-		} else if o.Err != nil {
-			report("TSN/get_interface", fmt.Sprintf("%v", o.Value), o.Err)
+		if o.Err == nil {
+			report("TSN/set_interface-no-transport", "应拒绝但成功", fmt.Errorf("set_interface accepted without TSNTransport"))
 		} else {
-			report("TSN/get_interface", fmt.Sprintf("%v", o.Value), fmt.Errorf("get_interface returned %T (want string)", o.Value))
+			report("TSN/set_interface-no-transport", "正确拒绝", nil)
 		}
-		o = a.Command(extAtom, ability.TSNCommandRegisterTalker, ability.TSNRegisterTalkerArgs{ID: "stream-100", MAC: "00:11:22:33:44:55", DestMAC: "01:00:5e:00:00:01", VLANID: 100, Priority: 3, PayloadLen: 512, Interval: 1000000000})
-		report("TSN/register_talker", "stream-100", o.Err)
-		o = a.Command(extAtom, ability.TSNCommandListStreams, nil)
-		report("TSN/list_streams", fmt.Sprintf("%v", o.Value), o.Err)
-		o = a.Command(extAtom, ability.TSNCommandSetPriority, ability.TSNPriorityMapArgs{Mappings: map[uint8]uint8{0: 0, 1: 0, 2: 1, 3: 1, 4: 2, 5: 2, 6: 3, 7: 3}})
-		report("TSN/set_priority_map", "8->4 queue", o.Err)
-		o = a.Command(extAtom, ability.TSNCommandSetTimeAware, ability.TSNTimeAwareArgs{Enabled: true, CycleTime: 1000000000, GateStates: []byte{0xAA}})
-		report("TSN/set_time_aware", "Qbv enabled", o.Err)
+		o = a.Command(extAtom, ability.TSNCommandSetTimeAware, ability.TSNTimeAwareArgs{Enabled: true, CycleTime: time.Second, GateStates: []byte{0xAA}})
+		if o.Err == nil {
+			report("TSN/set_time_aware-no-transport", "应拒绝但成功", fmt.Errorf("set_time_aware accepted without TSNTransport"))
+		} else {
+			report("TSN/set_time_aware-no-transport", "正确拒绝", nil)
+		}
+		// 注入内存假 transport: 只验证参数透传, 不声称驱动了真实网卡
+		if ta, ok := a.(*ability.TSNAbility); ok {
+			tr := &verifyTSNTransport{}
+			ta.SetTransport(tr)
+			o = a.Command(extAtom, ability.TSNCommandSetInterface, ability.TSNInterfaceArg{Interface: "eth0"})
+			report("TSN/set_interface", "eth0", o.Err)
+			if tr.probed != "eth0" {
+				report("TSN/probe_interface", fmt.Sprintf("%q", tr.probed), fmt.Errorf("probe interface mismatch: got %q want eth0", tr.probed))
+			} else {
+				report("TSN/probe_interface", tr.probed, nil)
+			}
+			o = a.Command(extAtom, ability.TSNCommandGetInterface, nil)
+			// set 后 get 相等断言(旧实现只打印——set 变 no-op 也 PASS)
+			if got, ok := o.Value.(string); ok {
+				if got != "eth0" {
+					report("TSN/get_interface", fmt.Sprintf("%q", got), fmt.Errorf("get_interface round-trip mismatch: got %q want eth0", got))
+				} else {
+					report("TSN/get_interface", got, nil)
+				}
+			} else if o.Err != nil {
+				report("TSN/get_interface", fmt.Sprintf("%v", o.Value), o.Err)
+			} else {
+				report("TSN/get_interface", fmt.Sprintf("%v", o.Value), fmt.Errorf("get_interface returned %T (want string)", o.Value))
+			}
+			o = a.Command(extAtom, ability.TSNCommandRegisterTalker, ability.TSNRegisterTalkerArgs{ID: "stream-100", MAC: "00:11:22:33:44:55", DestMAC: "01:00:5e:00:00:01", VLANID: 100, Priority: 3, PayloadLen: 512, Interval: 1000000000})
+			report("TSN/register_talker", "stream-100", o.Err)
+			if len(tr.added) != 1 || tr.added[0].ID != "stream-100" || tr.added[0].VLANID != 100 || tr.added[0].Priority != 3 {
+				report("TSN/add_stream-passthrough", fmt.Sprintf("%+v", tr.added), fmt.Errorf("AddStream did not receive the registered stream"))
+			} else {
+				report("TSN/add_stream-passthrough", fmt.Sprintf("id=%s vlan=%d prio=%d", tr.added[0].ID, tr.added[0].VLANID, tr.added[0].Priority), nil)
+			}
+			o = a.Command(extAtom, ability.TSNCommandListStreams, nil)
+			report("TSN/list_streams", fmt.Sprintf("%v", o.Value), o.Err)
+			prioMap := map[uint8]uint8{0: 0, 1: 0, 2: 1, 3: 1, 4: 2, 5: 2, 6: 3, 7: 3}
+			o = a.Command(extAtom, ability.TSNCommandSetPriority, ability.TSNPriorityMapArgs{Mappings: prioMap})
+			report("TSN/set_priority_map", "8->4 queue", o.Err)
+			if !reflect.DeepEqual(tr.prioMap, prioMap) {
+				report("TSN/prio_map-passthrough", fmt.Sprintf("%v", tr.prioMap), fmt.Errorf("ApplyPriorityMap mappings mismatch"))
+			} else {
+				report("TSN/prio_map-passthrough", fmt.Sprintf("entries=%d", len(tr.prioMap)), nil)
+			}
+			o = a.Command(extAtom, ability.TSNCommandSetTimeAware, ability.TSNTimeAwareArgs{Enabled: true, CycleTime: time.Second, GateStates: []byte{0xAA}})
+			report("TSN/set_time_aware", "Qbv enabled", o.Err)
+			if !tr.gate.Enabled || tr.gate.CycleTime != time.Second || len(tr.gate.GateStates) != 1 || tr.gate.GateStates[0] != 0xAA {
+				report("TSN/gate-passthrough", fmt.Sprintf("%+v", tr.gate), fmt.Errorf("ApplyGateControl cfg mismatch"))
+			} else {
+				report("TSN/gate-passthrough", fmt.Sprintf("cycle=%v gates=%v", tr.gate.CycleTime, tr.gate.GateStates), nil)
+			}
+			// unregister 走 RemoveStream: 设备侧收到同一 stream
+			o = a.Command(extAtom, ability.TSNCommandUnregister, ability.TSNStreamIDArg{ID: "stream-100"})
+			report("TSN/unregister", "stream-100", o.Err)
+			if len(tr.removed) != 1 || tr.removed[0] != "stream-100" {
+				report("TSN/remove_stream-passthrough", fmt.Sprintf("%v", tr.removed), fmt.Errorf("RemoveStream did not receive stream-100"))
+			} else {
+				report("TSN/remove_stream-passthrough", "stream-100", nil)
+			}
+		} else {
+			report("TSN/inject", "", fmt.Errorf("cannot inject TSNTransport: %T", a))
+		}
 	}
 
 	// SerialAbility (无设备则 list_ports 正常即可)

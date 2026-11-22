@@ -5,105 +5,58 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/FasterEdge/FasterEdge/types"
 	"net"
-	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
+
+	"github.com/FasterEdge/FasterEdge/types"
 )
 
-var ErrTimeAddressDisallowed = errors.New("time source address is disallowed")
+// ErrTimeAddressDisallowed 是 TimeAbility 的地址策略哨兵。
+// 与全库统一的 ErrAddressDisallowed 是同一个值: 时间源被拒时
+// errors.Is 判 ErrTimeAddressDisallowed 或 ErrAddressDisallowed 均成立,
+// 不再有第二套判定逻辑可以与之分歧。
+var ErrTimeAddressDisallowed = ErrAddressDisallowed
 
 type ipResolver interface {
 	LookupIPAddr(context.Context, string) ([]net.IPAddr, error)
 }
+
+// addressPolicy 是 TimeAbility 的策略视图, 只做等级映射, 判定全部委托给
+// AddressPolicyLevel / AddressGuard(见 address_policy.go)。
+// allowPrivate=true 对应 AddressPolicyAllowLoopback: 与旧实现语义逐条对齐
+// (回环 + 私网放行, 未指定/组播/链路本地仍拒绝), 因此既有测试无需改动。
 type addressPolicy struct {
 	allowPrivate bool
 	resolver     ipResolver
 	tcpDial      func(context.Context, string, string) (net.Conn, error)
 }
 
-func (p addressPolicy) validateIP(ip net.IP) error {
-	a, ok := netip.AddrFromSlice(ip)
-	if !ok {
-		return fmt.Errorf("%w: invalid IP", ErrTimeAddressDisallowed)
-	}
-	a = a.Unmap()
-	if !a.IsValid() || a.IsUnspecified() || a.IsMulticast() {
-		return fmt.Errorf("%w: %s", ErrTimeAddressDisallowed, a)
-	}
+func (p addressPolicy) level() AddressPolicyLevel {
 	if p.allowPrivate {
-		return nil
+		return AddressPolicyAllowLoopback
 	}
-	// IsPrivate excludes CGNAT and several special-use ranges.
-	bad := a.IsLoopback() || a.IsPrivate() || a.IsLinkLocalUnicast()
-	if a.Is4() {
-		v := a.As4()
-		n := uint32(v[0])<<24 | uint32(v[1])<<16 | uint32(v[2])<<8 | uint32(v[3])
-		for _, r := range [][2]uint32{{0x64400000, 0x647fffff}, {0xc0000000, 0xc00000ff}, {0xc0000200, 0xc00002ff}, {0xc6336400, 0xc63364ff}, {0xcb007100, 0xcb0071ff}, {0x0a000000, 0x0affffff}, {0xac100000, 0xac1fffff}, {0xc0a80000, 0xc0a8ffff}} {
-			if n >= r[0] && n <= r[1] {
-				bad = true
-			}
-		}
-	} else if a.IsLinkLocalUnicast() {
-		bad = true
-	}
-	if bad {
-		return fmt.Errorf("%w: %s", ErrTimeAddressDisallowed, a)
-	}
-	return nil
+	return AddressPolicyPublicOnly
 }
 
+func (p addressPolicy) guard() AddressGuard {
+	return AddressGuard{Level: p.level(), Resolver: p.resolver, Dial: p.tcpDial}
+}
+
+func (p addressPolicy) validateIP(ip net.IP) error { return p.guard().CheckResolvedIP(ip) }
+
 func (p addressPolicy) resolve(ctx context.Context, host string) ([]net.IPAddr, error) {
-	if ip := net.ParseIP(host); ip != nil {
-		if err := p.validateIP(ip); err != nil {
-			return nil, err
-		}
-		return []net.IPAddr{{IP: ip}}, nil
-	}
-	if p.resolver == nil {
-		p.resolver = net.DefaultResolver
-	}
-	ips, err := p.resolver.LookupIPAddr(ctx, host)
-	if err != nil {
-		return nil, err
-	}
-	if len(ips) == 0 {
-		return nil, fmt.Errorf("%w: no addresses", ErrTimeAddressDisallowed)
-	}
-	for _, x := range ips {
-		if err := p.validateIP(x.IP); err != nil {
-			return nil, err
-		}
-	}
-	return ips, nil
+	return p.guard().ResolveAndCheck(ctx, host)
 }
 
 func (p addressPolicy) dialContext(d *net.Dialer) func(context.Context, string, string) (net.Conn, error) {
 	base := p.tcpDial
-	if base == nil {
+	if base == nil && d != nil {
 		base = d.DialContext
 	}
-	return func(ctx context.Context, network, address string) (net.Conn, error) {
-		host, port, err := net.SplitHostPort(address)
-		if err != nil {
-			return nil, fmt.Errorf("%w: %w: %v", types.ErrInvalidArguments, ErrInvalidTimeURL, err)
-		}
-		ips, err := p.resolve(ctx, host)
-		if err != nil {
-			return nil, err
-		}
-		var errs []error
-		for _, ip := range ips {
-			c, e := base(ctx, network, net.JoinHostPort(ip.IP.String(), port))
-			if e == nil {
-				return c, nil
-			}
-			errs = append(errs, e)
-		}
-		return nil, errors.Join(errs...)
-	}
+	g := AddressGuard{Level: p.level(), Resolver: p.resolver, Dial: base}
+	return g.DialContext
 }
 
 var ErrInvalidTimeURL = errors.New("invalid time source URL")

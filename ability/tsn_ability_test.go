@@ -18,6 +18,28 @@ func newTSNAtom(t *testing.T) *types.Atom {
 	return a
 }
 
+// newTSNAbilityWithFakeTransport 返回注入了假 transport 的能力实例。
+// 行为变更(TSNTransport 注入): 旧实现无 transport 也能"成功"并把配置存在内存里,
+// 属假履约; 现在设备类命令必须经 transport 下发, 因此原有用例在调用前先注入。
+func newTSNAbilityWithFakeTransport(t *testing.T) (*TSNAbility, *fakeTSNTransport) {
+	t.Helper()
+	ft := &fakeTSNTransport{}
+	tn := NewTSNAbility()
+	tn.SetTransport(ft)
+	return tn, ft
+}
+
+// newTSNDevice 在 newTSNAbilityWithFakeTransport 之上选定 eth0: 设备类命令
+// 需要"已注入 transport + 已选接口"两个前提。
+func newTSNDevice(t *testing.T, atom *types.Atom) (*TSNAbility, *fakeTSNTransport) {
+	t.Helper()
+	tn, ft := newTSNAbilityWithFakeTransport(t)
+	if out := tn.Command(atom, TSNCommandSetInterface, TSNInterfaceArg{Interface: "eth0"}); out.Err != nil {
+		t.Fatalf("set_interface: %v", out.Err)
+	}
+	return tn, ft
+}
+
 func TestTSNAbilityRejectsMissingDeps(t *testing.T) {
 	tn := NewTSNAbility()
 	if out := tn.Command(&types.Atom{}, TSNCommandGetInterface, nil); !errors.Is(out.Err, types.ErrMissingDependency) {
@@ -26,7 +48,7 @@ func TestTSNAbilityRejectsMissingDeps(t *testing.T) {
 }
 
 func TestTSNAbilitySetGetInterface(t *testing.T) {
-	tn := NewTSNAbility()
+	tn, _ := newTSNAbilityWithFakeTransport(t)
 	atom := newTSNAtom(t)
 	if out := tn.Command(atom, TSNCommandSetInterface, "raw-string"); !errors.Is(out.Err, types.ErrInvalidArguments) {
 		t.Fatalf("set wrong type error = %v", out.Err)
@@ -48,8 +70,8 @@ func TestTSNAbilitySetGetInterface(t *testing.T) {
 }
 
 func TestTSNAbilityRegisterTalker(t *testing.T) {
-	tn := NewTSNAbility()
 	atom := newTSNAtom(t)
+	tn, _ := newTSNDevice(t, atom)
 	// 类型错误
 	if out := tn.Command(atom, TSNCommandRegisterTalker, "raw-string"); !errors.Is(out.Err, types.ErrInvalidArguments) {
 		t.Fatalf("register wrong type error = %v", out.Err)
@@ -98,8 +120,8 @@ func TestTSNAbilityRegisterTalker(t *testing.T) {
 }
 
 func TestTSNAbilityRegisterListener(t *testing.T) {
-	tn := NewTSNAbility()
 	atom := newTSNAtom(t)
+	tn, _ := newTSNDevice(t, atom)
 	if out := tn.Command(atom, TSNCommandRegisterListener, "raw-string"); !errors.Is(out.Err, types.ErrInvalidArguments) {
 		t.Fatalf("register wrong type error = %v", out.Err)
 	}
@@ -114,8 +136,8 @@ func TestTSNAbilityRegisterListener(t *testing.T) {
 }
 
 func TestTSNAbilityUnregisterAndList(t *testing.T) {
-	tn := NewTSNAbility()
 	atom := newTSNAtom(t)
+	tn, _ := newTSNDevice(t, atom)
 	if out := tn.Command(atom, TSNCommandRegisterTalker, TSNRegisterTalkerArgs{
 		ID: "s1", MAC: "00:11:22:33:44:55", Interval: time.Millisecond,
 	}); out.Err != nil {
@@ -148,8 +170,8 @@ func TestTSNAbilityUnregisterAndList(t *testing.T) {
 }
 
 func TestTSNAbilityPriorityMap(t *testing.T) {
-	tn := NewTSNAbility()
 	atom := newTSNAtom(t)
+	tn, _ := newTSNDevice(t, atom)
 	// 类型错误
 	if out := tn.Command(atom, TSNCommandSetPriority, "raw-string"); !errors.Is(out.Err, types.ErrInvalidArguments) {
 		t.Fatalf("set wrong type error = %v", out.Err)
@@ -178,8 +200,8 @@ func TestTSNAbilityPriorityMap(t *testing.T) {
 }
 
 func TestTSNAbilityTimeAware(t *testing.T) {
-	tn := NewTSNAbility()
 	atom := newTSNAtom(t)
+	tn, _ := newTSNDevice(t, atom)
 	// 类型错误
 	if out := tn.Command(atom, TSNCommandSetTimeAware, "raw-string"); !errors.Is(out.Err, types.ErrInvalidArguments) {
 		t.Fatalf("set wrong type error = %v", out.Err)

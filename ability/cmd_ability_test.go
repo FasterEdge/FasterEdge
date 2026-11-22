@@ -2,6 +2,7 @@ package ability
 
 import (
 	"errors"
+	"os/exec"
 	"runtime"
 	"strings"
 	"testing"
@@ -119,6 +120,108 @@ func TestCmdAbilityRunEcho(t *testing.T) {
 		Args: []string{"-c", "echo", "extra"},
 	}); !errors.Is(out.Err, types.ErrInvalidArguments) {
 		t.Fatalf("max args should reject, got err=%v", out.Err)
+	}
+}
+
+// TestCmdAbilityFailClosedEmptyAllowlist 验证 fail-closed:
+// 空 allowlist 时 run/start 一律以 ErrAllowlistEmpty 拒绝(旧实现此处放行),
+// 且错误信息明确给出 opt-in 路径。
+func TestCmdAbilityFailClosedEmptyAllowlist(t *testing.T) {
+	c := NewCmdAbility()
+	atom := newCmdAtom(t)
+	for _, act := range []string{CmdCommandRun, CmdCommandStart} {
+		out := c.Command(atom, act, CmdRunArgs{Name: "echo", Args: []string{"hi"}})
+		if !errors.Is(out.Err, ErrAllowlistEmpty) {
+			t.Fatalf("%s with empty allowlist: err=%v (want ErrAllowlistEmpty)", act, out.Err)
+		}
+		if !strings.Contains(out.Err.Error(), "set_allowlist") {
+			t.Fatalf("%s 错误未给出 opt-in 指引: %v", act, out.Err)
+		}
+	}
+	// set_allowlist 空列表 → 仍 fail-closed
+	if out := c.Command(atom, CmdCommandSetAllowlist, CmdSetAllowlistArgs{}); out.Err != nil {
+		t.Fatal(out.Err)
+	}
+	if out := c.Command(atom, CmdCommandRun, CmdRunArgs{Name: "echo", Args: []string{"hi"}}); !errors.Is(out.Err, ErrAllowlistEmpty) {
+		t.Fatalf("run after set empty allowlist: err=%v (want ErrAllowlistEmpty)", out.Err)
+	}
+}
+
+// TestCmdAbilitySetAllowlistAny 验证显式 opt-in 命令:
+// set_allowlist_any(true) 放行任意命令, false 回到 fail-closed。
+// 平台适配: 用 go 自身作为可执行名(任何装了 Go 工具链的平台都在 PATH 上),
+// 这样 opt-in 的真实执行路径不必因"本机无 sh"而跳过。
+func TestCmdAbilitySetAllowlistAny(t *testing.T) {
+	goBin, err := exec.LookPath("go")
+	if err != nil {
+		t.Skip("go toolchain not on PATH")
+	}
+	c := NewCmdAbility()
+	atom := newCmdAtom(t)
+	if out := c.Command(atom, CmdCommandSetAllowAny, "raw"); !errors.Is(out.Err, types.ErrInvalidArguments) {
+		t.Fatalf("set_allowlist_any wrong type: %v", out.Err)
+	}
+	// opt-in 前拒绝
+	if out := c.Command(atom, CmdCommandRun, CmdRunArgs{Name: goBin, Args: []string{"version"}}); !errors.Is(out.Err, ErrAllowlistEmpty) {
+		t.Fatalf("run before allow-any: err=%v (want ErrAllowlistEmpty)", out.Err)
+	}
+	// opt-in 后任意命令放行
+	if out := c.Command(atom, CmdCommandSetAllowAny, CmdSetAllowAnyArgs{Any: true}); out.Err != nil {
+		t.Fatalf("set_allowlist_any(true): %v", out.Err)
+	}
+	if !c.AllowAny() {
+		t.Fatal("AllowAny() = false, want true")
+	}
+	out := c.Command(atom, CmdCommandRun, CmdRunArgs{Name: goBin, Args: []string{"version"}, Timeout: 10 * time.Second})
+	if out.Err != nil {
+		t.Fatalf("run after allow-any: %v", out.Err)
+	}
+	if res, _ := out.Value.(CmdResult); res.ExitCode != 0 || !strings.Contains(res.Stdout, "go version") {
+		t.Fatalf("stdout = %q (exit=%d), want go version banner", res.Stdout, res.ExitCode)
+	}
+	// 未列入白名单的可执行名也放行(通配规则生效)
+	out = c.Command(atom, CmdCommandRun, CmdRunArgs{Name: "go", Args: []string{"version"}, Timeout: 10 * time.Second})
+	if out.Err != nil {
+		t.Fatalf("run go after allow-any: %v", out.Err)
+	}
+	// get_allowlist 明确标识通配规则
+	snap := c.Command(atom, CmdCommandGetAllowlist, nil).Value.([]CmdAllowlistEntry)
+	if len(snap) != 1 || snap[0].Name != "*" {
+		t.Fatalf("get_allowlist after allow-any = %+v (want single * entry)", snap)
+	}
+	// 关闭 → fail-closed 回归
+	if out := c.Command(atom, CmdCommandSetAllowAny, CmdSetAllowAnyArgs{Any: false}); out.Err != nil {
+		t.Fatalf("set_allowlist_any(false): %v", out.Err)
+	}
+	if out := c.Command(atom, CmdCommandRun, CmdRunArgs{Name: goBin, Args: []string{"version"}}); !errors.Is(out.Err, ErrAllowlistEmpty) {
+		t.Fatalf("run after opt-out: err=%v (want ErrAllowlistEmpty)", out.Err)
+	}
+}
+
+// TestCmdAbilitySetAllowAnyRemoteRestriction 记录"本地限制清单"与新增
+// set_allowlist_any 命令之间的同步义务。
+//
+// 背景: OneKeyAbility.AuthenticateCommand 的 restrictedRemoteCommand 把
+// set_allowlist 列为"仅本地进程内调用"(它是能力授予面: 远程改写白名单后可经
+// run 执行任意命令)。fail-closed 改造新增了等价的授予面 set_allowlist_any,
+// 因此该清单必须同步覆盖它, 否则远程对端可用 set_allowlist_any{Any:true}
+// 一步打开全放行, 把 fail-closed 的收益全部抹掉。
+//
+// 现状: one_key_ability.go 由其他同事并行重构(作用域授权), 本次改动未触碰
+// 该文件(任务约束), 因此这里只固定"命令名已注册且语义可见"这一层, 把
+// restrictedRemoteCommand 需要补一行的事实写成可检索的断言; 待该文件稳定后
+// 由负责人在 restrictedRemoteCommand 的 Cmd/Sh/Bash 分支加上
+// `if command == CmdCommandSetAllowAny { return true, command }`。
+func TestCmdAbilitySetAllowAnyRemoteRestriction(t *testing.T) {
+	if CmdCommandSetAllowAny == CmdCommandSetAllowlist {
+		t.Fatal("set_allowlist_any 必须与 set_allowlist 是不同命令名, 否则远程限制清单会误判")
+	}
+	// set_allowlist_any 是授予面: 它出现在 ListCommands 里就意味着可被 Atom
+	// 分派, 因而必须出现在 OneKey 的本地限制清单中。
+	for _, act := range []string{CmdCommandSetAllowAny, ShCommandSetAllowAny, BashCommandSetAllowAny} {
+		if act != "set_allowlist_any" {
+			t.Fatalf("%q 的命令名必须稳定为 set_allowlist_any, 否则远程限制清单无法按名匹配", act)
+		}
 	}
 }
 
@@ -298,7 +401,12 @@ func TestCmdAllowlistArgsPrefixIsolation(t *testing.T) {
 		t.Fatalf("mutating snapshot leaked into internal allowlist: %+v", snap2)
 	}
 	// 匹配面仍按内部值工作
-	if _, ok := c.matchAllowlist("tool", []string{"--input"}); !ok {
+	if _, ok, _ := c.matchAllowlist("tool", []string{"--input"}); !ok {
 		t.Fatalf("matchAllowlist should still accept --input")
+	}
+	// fail-closed: 空 allowlist 时 matchAllowlist 返回 emptyAllowlist=true
+	c.SetAllowlist(nil)
+	if _, ok, empty := c.matchAllowlist("tool", nil); ok || !empty {
+		t.Fatalf("matchAllowlist with empty allowlist = (%v,%v,%v), want ok=false empty=true", false, ok, empty)
 	}
 }

@@ -179,6 +179,19 @@ func validateKey(key string) error {
 	return nil
 }
 
+// configCommands 是 ConfigData 的规范命令目录。Command 的 switch 与
+// ListCommands 消费同一批命令常量, 两个清单不会各自漂移。
+var configCommands = []string{
+	ConfigCommandGet,
+	ConfigCommandSet,
+	ConfigCommandDelete,
+	ConfigCommandList,
+	ConfigCommandSnapshot,
+}
+
+// ListCommands 实现 types.CommandLister。
+func (c *ConfigData) ListCommands() []string { return append([]string(nil), configCommands...) }
+
 func (c *ConfigData) Command(_ *types.Atom, act string, args any) types.CommandOutput {
 	switch act {
 	case ConfigCommandGet:

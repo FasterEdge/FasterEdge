@@ -4,6 +4,9 @@ package ability
 import (
 	"context"
 	"fmt"
+	"net"
+	"net/netip"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -12,6 +15,12 @@ import (
 
 	"github.com/FasterEdge/FasterEdge/types"
 )
+
+// k8sClusterPolicy 是 K8s API server 地址的策略等级(AllowPrivate): API server
+// 通常就地部署在内网(10.x/172.16-31/192.168 或集群 Service 网段), 故放行私网,
+// 但仍拒绝回环/未指定/组播/链路本地(169.254.169.254 云元数据)与十进制写法 IP。
+// 与 net_map/mqtt 同级; docker/ekuiper/influxdb 因端点常经公网暴露取 PublicOnly。
+var k8sClusterPolicy = NewAddressGuard(AddressPolicyAllowPrivate)
 
 const (
 	K8sCommandSetContext = "set_context"
@@ -157,6 +166,28 @@ func (k *K8sAbility) Check(atom *types.Atom) error {
 
 func (k *K8sAbility) Mount(atom *types.Atom) error { return k.Check(atom) }
 
+// Compile-time guarantee that KubernetesAbility satisfies CommandLister.
+var _ types.CommandLister = (*K8sAbility)(nil)
+
+// k8sAbilityCommands 是 KubernetesAbility 的命令目录, 与 Command 中 act 的
+// switch 分支逐一对应(由 command_contract_test.go 解析源码交叉核对):
+// 上下文 2 条, 资源动作 5 条, 日志 1 条。
+var k8sAbilityCommands = []string{
+	K8sCommandSetContext,
+	K8sCommandGetContext,
+	K8sCommandApply,
+	K8sCommandDelete,
+	K8sCommandList,
+	K8sCommandGet,
+	K8sCommandScale,
+	K8sCommandGetLogs,
+}
+
+// ListCommands 实现 types.CommandLister, 返回命令目录的副本(调用方持有所有权)。
+func (k *K8sAbility) ListCommands() []string {
+	return append([]string(nil), k8sAbilityCommands...)
+}
+
 func (k *K8sAbility) Command(atom *types.Atom, act string, args any) types.CommandOutput {
 	if err := k.Check(atom); err != nil {
 		return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, err)}
@@ -167,8 +198,15 @@ func (k *K8sAbility) Command(atom *types.Atom, act string, args any) types.Comma
 		if !ok {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
 		}
-		if strings.TrimSpace(typed.Cluster) == "" {
+		cluster := strings.TrimSpace(typed.Cluster)
+		if cluster == "" {
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: cluster required: %w", act, types.ErrInvalidArguments)}
+		}
+		// Cluster 形如 host[:port]/IP 字面量(含 [v6]:port)时按统一地址策略校验;
+		// 裸集群名(如 "prod"、"edge-cluster")不是网络地址, 不做策略判定——
+		// kubeconfig 场景下 Cluster 只是上下文标识, 真实端点来自 kubeconfig。
+		if err := checkK8sClusterAddress(cluster); err != nil {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %v: %w", act, err, types.ErrInvalidArguments)}
 		}
 		ns := strings.TrimSpace(typed.Namespace)
 		if ns == "" {
@@ -180,7 +218,7 @@ func (k *K8sAbility) Command(atom *types.Atom, act string, args any) types.Comma
 		}
 		// 本地变量构造: 写锁内赋值、放锁后只读本地值——旧实现放锁后回读
 		// k.ctx 字段, 与并发 set_context 的整体替换构成数据竞争。
-		ctx := K8sContext{Cluster: strings.TrimSpace(typed.Cluster), Namespace: ns, Kubeconfig: typed.Kubeconfig}
+		ctx := K8sContext{Cluster: cluster, Namespace: ns, Kubeconfig: typed.Kubeconfig}
 		k.mu.Lock()
 		k.ctx = ctx
 		k.mu.Unlock()
@@ -408,6 +446,55 @@ func (k *K8sAbility) k8sBegin(act string) (context.Context, func(), types.Comman
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), k8sCallTimeout)
 	return ctx, func() { cancel(); k.running.Add(-1) }, types.CommandOutput{}
+}
+
+// checkK8sClusterAddress 只在 Cluster **看起来像网络端点**时才做地址策略判定:
+// 含端口分隔符(host:port / [v6]:port)、带协议前缀(https://host:6443)、
+// 或本身就是 IP 字面量。裸集群名(prod、edge-cluster、gke_xxx_us-central1_a)
+// 不含这些特征, 原样放行——它们经 kubeconfig 间接映射到端点, 不是可直接拨的地址。
+// 这一步只做存储期语法/字面量判定; 域名在拨号层由 AddressGuard.DialContext
+// 对解析出的实际 IP 二次校验(防 DNS rebinding)。
+func checkK8sClusterAddress(cluster string) error {
+	c := strings.TrimSpace(cluster)
+	if c == "" {
+		return fmt.Errorf("cluster required")
+	}
+	lower := strings.ToLower(c)
+	if strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") {
+		parsed, err := url.Parse(c)
+		if err != nil || parsed.User != nil || parsed.Hostname() == "" {
+			return fmt.Errorf("malformed cluster url %q", cluster)
+		}
+		return checkK8sClusterHost(parsed.Hostname())
+	}
+	if strings.ContainsAny(c, " \t\r\n/\\?#@") {
+		return fmt.Errorf("malformed cluster %q", cluster)
+	}
+	// 裸 IP 字面量(IPv4 / IPv6): 直接按策略判定。
+	if _, err := netip.ParseAddr(c); err == nil {
+		return k8sClusterPolicy.CheckHost(c)
+	}
+	// host:port / [v6]:port 形式: 拆出 host 后按策略判定, 端口须为 1..65535。
+	if strings.LastIndex(c, ":") > 0 {
+		host, port, err := net.SplitHostPort(c)
+		if err != nil {
+			return fmt.Errorf("malformed cluster endpoint %q", cluster)
+		}
+		if !isValidPeerPort(port) {
+			return fmt.Errorf("invalid cluster port %q", port)
+		}
+		return checkK8sClusterHost(host)
+	}
+	// 其余视为集群标识名, 非网络地址。
+	return nil
+}
+
+// checkK8sClusterHost 剥掉 IPv6 方括号后交统一策略判定。
+func checkK8sClusterHost(host string) error {
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") && len(host) >= 2 {
+		host = host[1 : len(host)-1]
+	}
+	return k8sClusterPolicy.CheckHost(host)
 }
 
 // isValidK8sKind 校验 K8s Kind 与资源名(名称白名单): 允许 [a-zA-Z0-9.-]、

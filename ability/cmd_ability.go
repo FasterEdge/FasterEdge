@@ -25,6 +25,7 @@ const (
 	CmdCommandList         = "list"
 	CmdCommandSetAllowlist = "set_allowlist"
 	CmdCommandGetAllowlist = "get_allowlist"
+	CmdCommandSetAllowAny  = "set_allowlist_any"
 	CmdCommandClearJobs    = "clear_finished"
 	CmdCommandGetJob       = "get_job"
 )
@@ -40,6 +41,9 @@ const (
 // 例如: {"Name":"sh","ArgsPrefix":[],"MaxArgs":0} 允许 sh 任意参数。
 //
 //	{"Name":"ls","ArgsPrefix":[],"MaxArgs":2}    允许 ls 带最多 2 个参数。
+//
+// 授权语义为 fail-closed: allowlist 为空时拒绝一切执行(ErrAllowlistEmpty);
+// 需要放行任意命令必须显式 opt-in(SetAllowAny / set_allowlist_any)。
 type CmdAllowlistEntry struct {
 	Name       string
 	ArgsPrefix []string
@@ -77,6 +81,13 @@ type CmdSetAllowlistArgs struct {
 	Entries []CmdAllowlistEntry
 }
 
+// CmdSetAllowAnyArgs 是 set_allowlist_any 命令的参数(显式 opt-in)。
+// Any=false(默认)时恢复 fail-closed 语义: 清空 allowlist 并拒绝一切执行;
+// Any=true 时允许执行任意命令(等价于一条 {"Name":"*", MaxArgs:0} 全放行规则)。
+type CmdSetAllowAnyArgs struct {
+	Any bool
+}
+
 // CmdResult 是 run / wait 命令成功执行后的返回结构。
 type CmdResult struct {
 	JobID     string
@@ -108,12 +119,28 @@ type CmdJob struct {
 // cmdClosingError 表示能力已被 Unmount 关闭后再次接收新命令。
 var cmdClosingError = errors.New("CmdAbility is closing")
 
+// ErrAllowlistEmpty 表示 allowlist 为空且调用方未显式 opt-in。
+// 授权模型是 fail-closed: 空 allowlist 拒绝一切执行(而不是"不限制"),
+// 需要全放行的使用者必须显式调用 SetAllowAny(true) 主动打开。
+// 与 ErrInvalidArguments 一同包裹, 便于调用方既能机器识别授权拒绝,
+// 又保持"参数/授权校验失败"这一既有哨兵语义。
+var ErrAllowlistEmpty = errors.New("allowlist is empty: fail-closed denies execution")
+
+// CmdAllowlistEntry 的 Name 匹配通配符: allowAny 模式下它匹配任意可执行文件。
+const cmdAllowAnyName = "*"
+
 // CmdAbility 提供受 allowlist 约束的命令执行能力,支持同步运行与异步任务。
+//
+// 授权语义(fail-closed): 默认 allowlist 为空, run/start 一律以
+// ErrAllowlistEmpty 拒绝; 使用者必须显式授权——要么 set_allowlist 列出具体
+// 命令, 要么 set_allowlist_any 主动打开"全放行"。空 allowlist 不再等价于
+// "不限制"(旧实现的 fail-open 洞)。
 type CmdAbility struct {
 	mu sync.RWMutex
 
 	closing    bool
 	allowlist  map[string]CmdAllowlistEntry
+	allowAny   bool // 显式 opt-in: true 时 allowlist 仅含一条 * 规则
 	jobs       map[string]*CmdJob
 	jobSeq     atomic.Uint64
 	maxOutput  int64
@@ -137,7 +164,7 @@ func NewCmdAbility() *CmdAbility {
 func (c *CmdAbility) GetName() string { return "CmdAbility" }
 
 func (c *CmdAbility) Describe() string {
-	return "CmdAbility提供受 allowlist 约束的系统命令执行能力,支持同步运行与异步任务,限制最大输出与并发数。"
+	return "CmdAbility提供受 allowlist 约束的系统命令执行能力,支持同步运行与异步任务,限制最大输出与并发数。授权语义为 fail-closed: allowlist 为空时拒绝一切执行,需显式 set_allowlist_any 打开全放行。"
 }
 
 func (c *CmdAbility) Check(atom *types.Atom) error {
@@ -211,9 +238,12 @@ func (c *CmdAbility) Unmount(ctx context.Context, _ *types.Atom) error {
 }
 
 // SetAllowlist 直接覆盖 allowlist(供测试或初始化使用)。
+// 传空切片即清空白名单, 回到 fail-closed(拒绝一切执行);
+// 需要放行任意命令必须显式调用 SetAllowAny(true)。
 func (c *CmdAbility) SetAllowlist(entries []CmdAllowlistEntry) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.allowAny = false
 	c.allowlist = make(map[string]CmdAllowlistEntry, len(entries))
 	for _, e := range entries {
 		name := strings.TrimSpace(e.Name)
@@ -226,6 +256,30 @@ func (c *CmdAbility) SetAllowlist(entries []CmdAllowlistEntry) {
 		e.ArgsPrefix = append([]string(nil), e.ArgsPrefix...)
 		c.allowlist[name] = e
 	}
+}
+
+// SetAllowAny 显式打开/关闭"允许任意命令"。
+// true 时 allowlist 装入唯一的通配规则 {"Name":"*", MaxArgs:0}, run/start 不再
+// 因白名单为空而拒绝; false 时清空 allowlist, 回到 fail-closed。
+// 这是一个显式的 opt-in: 缺省(空 allowlist)永不放行任意命令。
+func (c *CmdAbility) SetAllowAny(any_ bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.allowAny = any_
+	if any_ {
+		if _, ok := c.allowlist[cmdAllowAnyName]; !ok {
+			c.allowlist = map[string]CmdAllowlistEntry{cmdAllowAnyName: {Name: cmdAllowAnyName}}
+		}
+		return
+	}
+	c.allowlist = make(map[string]CmdAllowlistEntry)
+}
+
+// AllowAny 返回当前是否处于显式"允许任意命令"模式。
+func (c *CmdAbility) AllowAny() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.allowAny
 }
 
 // rejectIfClosing 检查 ability 是否处于 closing 状态,用于拒绝新任务。
@@ -257,6 +311,13 @@ func (c *CmdAbility) Command(atom *types.Atom, act string, args any) types.Comma
 			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
 		}
 		return types.CommandOutput{Name: act, Value: c.allowlistSnapshot()}
+	case CmdCommandSetAllowAny:
+		typed, ok := args.(CmdSetAllowAnyArgs)
+		if !ok {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, types.ErrInvalidArguments)}
+		}
+		c.SetAllowAny(typed.Any)
+		return types.CommandOutput{Name: act, Value: c.AllowAny()}
 	case CmdCommandRun:
 		typed, ok := args.(CmdRunArgs)
 		if !ok {
@@ -327,36 +388,62 @@ func (c *CmdAbility) allowlistSnapshot() []CmdAllowlistEntry {
 	}
 	c.mu.RUnlock()
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	// 显式全放行时 allowlist 里装着唯一的 "*" 通配规则, 因此 get_allowlist 的
+	// 返回值本身就能区分"空 = fail-closed 拒绝一切"与"已 opt-in 全放行"
+	// ([] 与 [{"Name":"*"}]), 调用方无需额外查询。
 	return out
 }
 
-func (c *CmdAbility) matchAllowlist(name string, args []string) (CmdAllowlistEntry, bool) {
+// matchAllowlist 返回 (entry, ok, emptyAllowlist)。ok=false 时:
+// emptyAllowlist=true 表示白名单为空(fail-closed 默认拒绝), false 表示命令不在白名单内。
+func (c *CmdAbility) matchAllowlist(name string, args []string) (CmdAllowlistEntry, bool, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	// fail-closed: 空 allowlist 一律拒绝(不再解释为"不限制"), 需显式 opt-in。
+	if len(c.allowlist) == 0 {
+		return CmdAllowlistEntry{}, false, true
+	}
 	entry, ok := c.allowlist[name]
 	if !ok {
-		return CmdAllowlistEntry{}, false
+		if c.allowAny {
+			entry, ok = c.allowlist[cmdAllowAnyName]
+		}
+		if !ok {
+			return CmdAllowlistEntry{}, false, false
+		}
 	}
 	if len(args) < len(entry.ArgsPrefix) {
-		return CmdAllowlistEntry{}, false
+		return CmdAllowlistEntry{}, false, false
 	}
 	for i, p := range entry.ArgsPrefix {
 		if args[i] != p {
-			return CmdAllowlistEntry{}, false
+			return CmdAllowlistEntry{}, false, false
 		}
 	}
 	if entry.MaxArgs > 0 && len(args) > entry.MaxArgs {
-		return CmdAllowlistEntry{}, false
+		return CmdAllowlistEntry{}, false, false
 	}
-	return entry, true
+	return entry, true, false
+}
+
+// denyCmd 把 run/start 的授权拒绝统一翻译为明确错误: 空 allowlist 走
+// ErrAllowlistEmpty(含 fail-closed 提示与 opt-in 指引), 其余按 not allowed。
+// 两种拒绝都保留 ErrInvalidArguments 哨兵: 授权/参数校验失败本是同一个对外
+// 语义(既有调用方与测试按它判断), ErrAllowlistEmpty 只是让"白名单为空"
+// 这一个具体原因可被机器识别。
+func (c *CmdAbility) denyCmd(act, name string, empty bool) types.CommandOutput {
+	if empty {
+		return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w (use %s or %s to grant execution): %w", act, ErrAllowlistEmpty, CmdCommandSetAllowlist, CmdCommandSetAllowAny, types.ErrInvalidArguments)}
+	}
+	return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %q not allowed: %w", act, name, types.ErrInvalidArguments)}
 }
 
 func (c *CmdAbility) runSync(a CmdRunArgs) types.CommandOutput {
 	if strings.TrimSpace(a.Name) == "" {
 		return types.CommandOutput{Name: CmdCommandRun, Err: fmt.Errorf("%s: empty name: %w", CmdCommandRun, types.ErrInvalidArguments)}
 	}
-	if _, ok := c.matchAllowlist(a.Name, a.Args); !ok {
-		return types.CommandOutput{Name: CmdCommandRun, Err: fmt.Errorf("%s: %q not allowed: %w", CmdCommandRun, a.Name, types.ErrInvalidArguments)}
+	if _, ok, empty := c.matchAllowlist(a.Name, a.Args); !ok {
+		return c.denyCmd(CmdCommandRun, a.Name, empty)
 	}
 	if c.running.Add(1) > int32(c.maxConc) {
 		c.running.Add(-1)
@@ -457,8 +544,8 @@ func (c *CmdAbility) startAsync(a CmdRunArgs) types.CommandOutput {
 	if strings.TrimSpace(a.Name) == "" {
 		return types.CommandOutput{Name: CmdCommandStart, Err: fmt.Errorf("%s: empty name: %w", CmdCommandStart, types.ErrInvalidArguments)}
 	}
-	if _, ok := c.matchAllowlist(a.Name, a.Args); !ok {
-		return types.CommandOutput{Name: CmdCommandStart, Err: fmt.Errorf("%s: %q not allowed: %w", CmdCommandStart, a.Name, types.ErrInvalidArguments)}
+	if _, ok, empty := c.matchAllowlist(a.Name, a.Args); !ok {
+		return c.denyCmd(CmdCommandStart, a.Name, empty)
 	}
 	if c.running.Add(1) > int32(c.maxConc) {
 		c.running.Add(-1)
@@ -630,5 +717,26 @@ func (j *CmdJob) publicView() CmdJob {
 	}
 }
 
+// cmdAbilityCommands 是 CmdAbility 的命令目录, 与 Command 的 case 分支一一对应。
+// 二者的一致性由 TestCommandCatalogMatchesDispatch 用 AST 比对源码强制(不靠人工同步)。
+var cmdAbilityCommands = []string{
+	CmdCommandRun,
+	CmdCommandStart,
+	CmdCommandWait,
+	CmdCommandKill,
+	CmdCommandList,
+	CmdCommandSetAllowlist,
+	CmdCommandGetAllowlist,
+	CmdCommandSetAllowAny,
+	CmdCommandClearJobs,
+	CmdCommandGetJob,
+}
+
+// ListCommands satisfies types.CommandLister. 返回副本, 调用方修改不影响目录本身。
+func (c *CmdAbility) ListCommands() []string { return append([]string(nil), cmdAbilityCommands...) }
+
 // Compile-time guarantee that CmdAbility satisfies Unmounter.
 var _ types.Unmounter = (*CmdAbility)(nil)
+
+// Compile-time guarantee that CmdAbility declares its command catalogue.
+var _ types.CommandLister = (*CmdAbility)(nil)

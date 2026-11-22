@@ -537,5 +537,26 @@ func (a *FileTransferAbility) run(t *FileTransfer, transport FileTransferTranspo
 	}
 }
 
+// fileTransferAbilityCommands 是 FileTransferAbility 的命令目录, 与 Command 的 case
+// 分支一一对应(upload / download 共用同一 case, 二者都在目录里)。
+var fileTransferAbilityCommands = []string{
+	FileTransferCommandSetTarget,
+	FileTransferCommandGetTarget,
+	FileTransferCommandUpload,
+	FileTransferCommandDownload,
+	FileTransferCommandList,
+	FileTransferCommandGet,
+	FileTransferCommandCancel,
+	FileTransferCommandClearFinished,
+}
+
+// ListCommands satisfies types.CommandLister.
+func (a *FileTransferAbility) ListCommands() []string {
+	return append([]string(nil), fileTransferAbilityCommands...)
+}
+
 // Compile-time guarantee that FileTransferAbility satisfies Unmounter.
 var _ types.Unmounter = (*FileTransferAbility)(nil)
+
+// Compile-time guarantee that FileTransferAbility declares its command catalogue.
+var _ types.CommandLister = (*FileTransferAbility)(nil)

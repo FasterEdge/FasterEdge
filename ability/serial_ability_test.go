@@ -3,6 +3,7 @@ package ability
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -343,5 +344,21 @@ func TestSerialAbilityUnmountClosesAllPorts(t *testing.T) {
 	defer s.mu.RUnlock()
 	if len(s.openPorts) != 0 {
 		t.Fatalf("openPorts after unmount = %d, want 0", len(s.openPorts))
+	}
+}
+
+// TestSerialAbilityDescribeMatchesBehaviour 守护 Describe() 的自描述与真实
+// 行为一致: 文档/描述里说"默认提供 tty* 风格 lister"曾是假承诺(默认实现返回
+// 空列表), 本轮把措辞改成诚实表述并在此钉住, 防止再次漂移。
+func TestSerialAbilityDescribeMatchesBehaviour(t *testing.T) {
+	s := NewSerialAbility()
+	desc := s.Describe()
+	for _, must := range []string{"SerialTransport", "open 报错", "PortLister"} {
+		if !strings.Contains(desc, must) {
+			t.Fatalf("Describe() = %q, want to contain %q", desc, must)
+		}
+	}
+	if strings.Contains(desc, "tty* 风格") {
+		t.Fatalf("Describe() = %q 仍宣称不存在的默认 lister 行为", desc)
 	}
 }

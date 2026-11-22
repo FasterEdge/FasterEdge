@@ -143,6 +143,31 @@ func (m *ModbusAbility) Unmount(_ context.Context, _ *types.Atom) error {
 // Compile-time guarantee that ModbusAbility satisfies Unmounter.
 var _ types.Unmounter = (*ModbusAbility)(nil)
 
+// Compile-time guarantee that ModbusAbility satisfies CommandLister.
+var _ types.CommandLister = (*ModbusAbility)(nil)
+
+// modbusAbilityCommands 是 ModbusAbility 的命令目录, 与 Command 中 act 的
+// switch 分支逐一对应(由 command_contract_test.go 解析源码交叉核对):
+// 端点/UnitID 配置 4 条, 读 4 条, 写 3 条。
+var modbusAbilityCommands = []string{
+	ModbusCommandSetEndpoint,
+	ModbusCommandGetEndpoint,
+	ModbusCommandSetUnitID,
+	ModbusCommandGetUnitID,
+	ModbusCommandReadHolding,
+	ModbusCommandReadInput,
+	ModbusCommandReadCoils,
+	ModbusCommandReadDiscrete,
+	ModbusCommandWriteHolding,
+	ModbusCommandWriteCoil,
+	ModbusCommandWriteMultiReg,
+}
+
+// ListCommands 实现 types.CommandLister, 返回命令目录的副本(调用方持有所有权)。
+func (m *ModbusAbility) ListCommands() []string {
+	return append([]string(nil), modbusAbilityCommands...)
+}
+
 func (m *ModbusAbility) Command(atom *types.Atom, act string, args any) types.CommandOutput {
 	if err := m.Check(atom); err != nil {
 		return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %w", act, err)}

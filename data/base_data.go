@@ -7,6 +7,15 @@ import (
 	"github.com/FasterEdge/FasterEdge/types"
 )
 
+// Compile-time interface assertions. 每个 data 组件都通过 ListCommands
+// 自描述其命令目录, 供 Atom.CommandNames 汇总。
+var (
+	_ types.CommandLister = (*BaseData)(nil)
+	_ types.CommandLister = (*ConfigData)(nil)
+	_ types.CommandLister = (*NetMapData)(nil)
+	_ types.CommandLister = (*KeyringData)(nil)
+)
+
 // 所用公共参数定义
 var logo = `
  _______ _______ _______ _______ _______  ______ _______ ______   ______ _______
@@ -46,6 +55,13 @@ func (b *BaseData) Mount(atmo *types.Atom) error {
 	}
 	return nil
 }
+
+// baseDataCommands 是 BaseData 的规范命令目录。Command 的 switch 与
+// ListCommands 消费同一批命令常量, 两个清单不会各自漂移。
+var baseDataCommands = []string{CommandLogo, CommandInfo}
+
+// ListCommands 实现 types.CommandLister。
+func (b *BaseData) ListCommands() []string { return append([]string(nil), baseDataCommands...) }
 
 // 指令入口
 func (b *BaseData) Command(atmo *types.Atom, act string, args any) types.CommandOutput {

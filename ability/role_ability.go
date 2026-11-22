@@ -83,3 +83,14 @@ func (r *RoleAbility) Command(atmo *types.Atom, act string, args any) types.Comm
 	}
 	return types.CommandOutput{Name: act, Err: fmt.Errorf("command %s: %w", act, types.ErrUnsupportedCommand)}
 }
+
+// roleAbilityCommands 是 RoleAbility 的命令目录, 与 Command 中 act 的
+// switch 分支一一对应(由 command_contract_test.go 解析源码交叉核对)。
+var roleAbilityCommands = []string{
+	CommandDescribe,
+	CommandSetRole,
+	CommandGetRole,
+}
+
+// ListCommands 实现 types.CommandLister, 返回命令目录的副本。
+func (r *RoleAbility) ListCommands() []string { return append([]string(nil), roleAbilityCommands...) }

@@ -136,3 +136,6 @@ func (d *InfluxDBData) JSONMarshal() ([]byte, error) {
 	cfg, st := d.store.public()
 	return databaseJSON(cfg, st)
 }
+
+// Compile-time interface assertions.
+var _ types.CommandLister = (*InfluxDBData)(nil)

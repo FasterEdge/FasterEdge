@@ -3,6 +3,7 @@ package ability
 
 import (
 	"fmt"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -11,6 +12,28 @@ import (
 	"github.com/FasterEdge/FasterEdge/data"
 	"github.com/FasterEdge/FasterEdge/types"
 )
+
+// influxEndpointPolicy 是 InfluxDB 端点的策略等级(PublicOnly): 与数据层
+// InfluxDBData.validateInfluxEndpoint 的历史策略一致(拒绝私网), 与 ekuiper/
+// docker 同级。域名在拨号层由 AddressGuard.DialContext 对解析出的实际 IP
+// 二次校验(存储期不解析, 避免 TOCTOU 与 set_endpoint 阻塞)。
+var influxEndpointPolicy = NewAddressGuard(AddressPolicyPublicOnly)
+
+// validateInfluxEndpointURL 在 ability 层补一层**与 data 层同源**的地址策略
+// 判定: data 包无法 import ability(ability 已 import data, 反向即循环), 因此
+// 真实配置入口 InfluxDBData 保留自己的判定副本, 这里不重复实现而是直接调用
+// 统一策略, 使 set_endpoint 走 ability 时也受同一套结论约束。
+func validateInfluxEndpointURL(endpoint string) error {
+	parsed, err := url.Parse(strings.TrimSpace(endpoint))
+	if err != nil || parsed.User != nil || parsed.Fragment != "" ||
+		(parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" {
+		return types.ErrInvalidArguments
+	}
+	if err := influxEndpointPolicy.CheckHost(parsed.Hostname()); err != nil {
+		return fmt.Errorf("influx endpoint host: %w", err)
+	}
+	return nil
+}
 
 const (
 	InfluxCommandSetEndpoint  = "set_endpoint"
@@ -85,6 +108,33 @@ func (i *InfluxAbility) Dependencies() []types.Dependency {
 }
 func (i *InfluxAbility) Check(atom *types.Atom) error { _, err := i.database(atom); return err }
 func (i *InfluxAbility) Mount(atom *types.Atom) error { return i.Check(atom) }
+
+// Compile-time guarantee that InfluxAbility satisfies CommandLister.
+var _ types.CommandLister = (*InfluxAbility)(nil)
+
+// influxAbilityCommands 是 InfluxAbility 的命令目录, 与 Command 中 act 的
+// switch 分支逐一对应(由 command_contract_test.go 解析源码交叉核对):
+// 配置 4 条 + 回读 2 条 + 连通性 1 条 + 数据面 4 条。
+// 注意 set_* 系列命令只是 InfluxDBData 的兼容入口(真实配置存放在 Data 中),
+// 但它们在 Command 里有真实分支, 因此必须出现在目录里。
+var influxAbilityCommands = []string{
+	InfluxCommandSetEndpoint,
+	InfluxCommandSetToken,
+	InfluxCommandSetOrg,
+	InfluxCommandSetBucket,
+	InfluxCommandGetEndpoint,
+	InfluxCommandGetConfig,
+	InfluxCommandPing,
+	InfluxCommandWrite,
+	InfluxCommandQuery,
+	InfluxCommandListSeries,
+	InfluxCommandDeleteSeries,
+}
+
+// ListCommands 实现 types.CommandLister, 返回命令目录的副本(调用方持有所有权)。
+func (i *InfluxAbility) ListCommands() []string {
+	return append([]string(nil), influxAbilityCommands...)
+}
 func (i *InfluxAbility) database(atom *types.Atom) (*data.InfluxDBData, error) {
 	if atom == nil {
 		return nil, types.ErrMissingDependency
@@ -119,6 +169,9 @@ func (i *InfluxAbility) Command(atom *types.Atom, act string, args any) types.Co
 		v, ok := configValue(args)
 		if !ok {
 			return invalidInflux(act)
+		}
+		if err := validateInfluxEndpointURL(v); err != nil {
+			return types.CommandOutput{Name: act, Err: fmt.Errorf("%s: %v: %w", act, err, types.ErrInvalidArguments)}
 		}
 		if err := db.SetEndpoint(v); err != nil {
 			return invalidInflux(act)

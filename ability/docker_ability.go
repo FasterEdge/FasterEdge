@@ -2,10 +2,7 @@
 package ability
 
 import (
-	"context"
 	"fmt"
-	"net"
-	"net/netip"
 	"net/url"
 	"sort"
 	"strconv"
@@ -127,6 +124,31 @@ func (d *DockerAbility) Check(atom *types.Atom) error {
 }
 
 func (d *DockerAbility) Mount(atom *types.Atom) error { return d.Check(atom) }
+
+// Compile-time guarantee that DockerAbility satisfies CommandLister.
+var _ types.CommandLister = (*DockerAbility)(nil)
+
+// dockerAbilityCommands 是 DockerAbility 的命令目录, 与 Command 中 act 的
+// switch 分支逐一对应(由 command_contract_test.go 解析源码交叉核对):
+// 端点 2 条, list 1 条, 容器动作 6 条, 镜像 1 条, 创建 1 条。
+var dockerAbilityCommands = []string{
+	DockerCommandSetEndpoint,
+	DockerCommandGetEndpoint,
+	DockerCommandListContainers,
+	DockerCommandStart,
+	DockerCommandStop,
+	DockerCommandRestart,
+	DockerCommandRemove,
+	DockerCommandInspect,
+	DockerCommandGetLogs,
+	DockerCommandPullImage,
+	DockerCommandCreate,
+}
+
+// ListCommands 实现 types.CommandLister, 返回命令目录的副本(调用方持有所有权)。
+func (d *DockerAbility) ListCommands() []string {
+	return append([]string(nil), dockerAbilityCommands...)
+}
 
 func (d *DockerAbility) Command(atom *types.Atom, act string, args any) types.CommandOutput {
 	if err := d.Check(atom); err != nil {
@@ -317,6 +339,15 @@ func (d *DockerAbility) simpleContainerAction(act string, args any) types.Comman
 	return types.CommandOutput{Name: act, Err: fmt.Errorf("command %s: %w", act, types.ErrUnsupportedCommand)}
 }
 
+// isValidDockerEndpoint 只做**语法**把关: 协议白名单(unix/tcp/tls)、
+// userinfo 拒绝、端口/空白纪律。地址语义(回环/私网/链路本地/组播/十进制写法)
+// 全部委托 ability/address_policy.go 的 dockerEndpointPolicy
+// (等级 PublicOnly: daemon API 通常跨主机或经公网暴露, 私网一并拒绝,
+// 与 InfluxDBData/ekuiper 的历史策略一致), 避免"每个能力一套判定"。
+// 注意这里不再做存储期 DNS 解析: 旧实现的 3s LookupHost 只挡住"解析时
+// 恰为回环"的名字, 挡不住 DNS rebinding(校验与拨号两次解析可不同),
+// 且让 set_endpoint 白白阻塞最多 3 秒。真正的防线在拨号层:
+// AddressGuard.DialContext 对解析出的实际 IP 逐个二次校验。
 func isValidDockerEndpoint(u string) bool {
 	if u == "" {
 		return false
@@ -325,65 +356,26 @@ func isValidDockerEndpoint(u string) bool {
 	if strings.HasPrefix(lower, "unix://") {
 		return true
 	}
-	if strings.HasPrefix(lower, "tcp://") || strings.HasPrefix(lower, "tls://") {
-		rest := u
-		if i := strings.Index(lower, "://"); i >= 0 {
-			rest = u[i+3:]
-		}
-		host := rest
-		if i := strings.IndexAny(rest, "/?#"); i >= 0 {
-			host = rest[:i]
-		}
-		if i := strings.LastIndex(host, ":"); i >= 0 {
-			host = host[:i]
-		}
-		if host == "" {
-			return false
-		}
-		// userinfo 防护: 标准 URL 解析后 Hostname() 不含 userinfo
-		// (tcp://alice@127.0.0.1:2375 的 Hostname 是 127.0.0.1 而非
-		// "alice@127.0.0.1", 旧实现按冒号切分后两者都命中不了回环名单)。
-		if parsed, perr := url.Parse(u); perr == nil && parsed.Hostname() != "" {
-			host = parsed.Hostname()
-		}
-		// IPv6 字面量带方括号, 先剥掉 (如 tcp://[::1]:2375)
-		if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") && len(host) >= 2 {
-			host = host[1 : len(host)-1]
-		}
-		// IP 字面量: 用 netip 规范化后再判回环/私网等。
-		// 关键: netip 可解析 IPv4-mapped IPv6(如 ::ffff:127.0.0.1),
-		// Unmap() 后规范化为 127.0.0.1, IsLoopback() 命中 —— 旧实现仅与 "::1"
-		// 字面比较, 该形态可绕过回环封锁。
-		if addr, err := netip.ParseAddr(host); err == nil {
-			addr = addr.Unmap()
-			if addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast() || addr.IsMulticast() || addr.IsUnspecified() {
-				return false
-			}
-			return true
-		}
-		// 主机名: 去掉尾点 FQDN 后比较回环别名, 并尽力解析验证非回环
-		// (注意 DNS rebinding 的 TOCTOU 限制: 校验时解析与连接时解析可能不同,
-		// 这里是尽力而为的纵深防御)。
-		if strings.TrimSuffix(host, ".") == "localhost" {
-			return false
-		}
-		// DNS 解析加超时保护: 慢/挂死的解析器不应阻塞校验路径。
-		lookupCtx, lookupCancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer lookupCancel()
-		if ips, err := net.DefaultResolver.LookupHost(lookupCtx, host); err == nil {
-			for _, ipStr := range ips {
-				if addr, aerr := netip.ParseAddr(ipStr); aerr == nil {
-					addr = addr.Unmap()
-					if addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast() || addr.IsUnspecified() {
-						return false
-					}
-				}
-			}
-		}
-		return true
+	if !strings.HasPrefix(lower, "tcp://") && !strings.HasPrefix(lower, "tls://") {
+		return false
 	}
-	return false
+	// 标准解析: 拒绝畸形 URL/带 userinfo/无端口, 并按 Hostname() 取主机
+	// (tcp://alice@127.0.0.1:2375 的 Hostname 是 127.0.0.1, 旧实现按冒号
+	// 切分会得到 "alice@127.0.0.1", 回环名单整个失配)。
+	parsed, err := url.Parse(u)
+	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.Port() == "" {
+		return false
+	}
+	host := parsed.Hostname()
+	// IPv6 字面量 Hostname() 带方括号([::1]), 剥掉再交策略判定
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") && len(host) >= 2 {
+		host = host[1 : len(host)-1]
+	}
+	return dockerEndpointPolicy.CheckHost(host) == nil
 }
+
+// dockerEndpointPolicy 是 Docker daemon 端点的策略等级(PublicOnly)。
+var dockerEndpointPolicy = NewAddressGuard(AddressPolicyPublicOnly)
 
 // dockerBegin/dockerEnd 是并发 transport 调用闸门(对比 CmdAbility 16 基线)。
 // 原子 Add 后比较: 旧实现 Load+Add 之间有窗口, 突发并发可临时超上限

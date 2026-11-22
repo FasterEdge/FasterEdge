@@ -263,6 +263,26 @@ func (e *EdgeRoleAbility) Command(atom *types.Atom, act string, args any) types.
 	return types.CommandOutput{Name: act, Err: fmt.Errorf("command %s: %w", act, types.ErrUnsupportedCommand)}
 }
 
+// edgeRoleAbilityCommands 是 EdgeRoleAbility 的命令目录, 与 Command 中 act
+// 的 switch 分支一一对应(由 command_contract_test.go 解析源码交叉核对)。
+var edgeRoleAbilityCommands = []string{
+	EdgeRoleCommandDescribe,
+	EdgeRoleCommandSetZone,
+	EdgeRoleCommandGetZone,
+	EdgeRoleCommandAddCap,
+	EdgeRoleCommandRemoveCap,
+	EdgeRoleCommandListCaps,
+	EdgeRoleCommandSetCaps,
+	EdgeRoleCommandRecordLatency,
+	EdgeRoleCommandGetMetrics,
+	EdgeRoleCommandSetOnline,
+}
+
+// ListCommands 实现 types.CommandLister, 返回命令目录的副本。
+func (e *EdgeRoleAbility) ListCommands() []string {
+	return append([]string(nil), edgeRoleAbilityCommands...)
+}
+
 func (e *EdgeRoleAbility) snapshotCaps() []string {
 	e.mu.RLock()
 	out := make([]string, 0, len(e.capabilities))

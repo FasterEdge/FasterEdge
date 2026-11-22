@@ -92,9 +92,7 @@ func (d *SQLiteData) GetName() string         { return "SQLiteData" }
 func (d *SQLiteData) Describe() string        { return "SQLiteData保存SQLite文件和运行参数。" }
 func (d *SQLiteData) Check(*types.Atom) error { return nil }
 func (d *SQLiteData) Mount(*types.Atom) error { return nil }
-func (d *SQLiteData) ListCommands() []string {
-	return []string{DatabaseCommandConfigure, DatabaseCommandGetConfig, DatabaseCommandStatus, DatabaseCommandSnapshot}
-}
+func (d *SQLiteData) ListCommands() []string  { return databaseLocalCommands() }
 func (d *SQLiteData) Command(_ *types.Atom, act string, args any) types.CommandOutput {
 	switch act {
 	case DatabaseCommandConfigure:
@@ -232,8 +230,18 @@ func (d *MongoDBData) Command(_ *types.Atom, act string, args any) types.Command
 	}
 }
 
+// databaseSecretCommands 返回带独立密钥的数据库组件的规范命令目录。
+// Command 的 switch 与 ListCommands 消费同一批数据库命令常量, 两个清单
+// 不会各自漂移。
 func databaseSecretCommands() []string {
 	return []string{DatabaseCommandConfigure, DatabaseCommandSetSecret, DatabaseCommandClearSecret, DatabaseCommandGetConfig, DatabaseCommandStatus, DatabaseCommandSnapshot}
+}
+
+// databaseLocalCommands 是 SQLiteData(本地文件, 无独立密钥)的规范命令目录。
+// 与 databaseSecretCommands 的差异仅在缺少 set_secret / clear_secret——
+// 这是一处刻意的目录差异, 由 ListCommands 精确暴露给 Atom.CommandNames。
+func databaseLocalCommands() []string {
+	return []string{DatabaseCommandConfigure, DatabaseCommandGetConfig, DatabaseCommandStatus, DatabaseCommandSnapshot}
 }
 func setDatabaseSecret[T any](store *databaseStore[T], act string, args any) types.CommandOutput {
 	typed, ok := args.(DatabaseSetSecretArgs)
@@ -278,3 +286,12 @@ func (d *MongoDBData) JSONMarshal() ([]byte, error) {
 }
 
 var _ = fmt.Sprintf
+
+// Compile-time interface assertions.
+var (
+	_ types.CommandLister = (*MySQLData)(nil)
+	_ types.CommandLister = (*PostgreSQLData)(nil)
+	_ types.CommandLister = (*SQLiteData)(nil)
+	_ types.CommandLister = (*RedisData)(nil)
+	_ types.CommandLister = (*MongoDBData)(nil)
+)
