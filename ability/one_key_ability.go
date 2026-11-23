@@ -248,11 +248,12 @@ func restrictedRemoteCommand(component, command string) (bool, string) {
 			return true, command
 		}
 	case "CmdAbility", "ShAbility", "BashAbility":
-		// set_allowlist 是能力授予面: 远程改写白名单后可经 run 执行任意命令
-		// (allowlist 以 Name 精确匹配 shell 条目即放行)——绕过命令执行的
-		// 安全边界演化为远程 RCE。set_allowlist 仅限本地; run 保持远程可达
-		// 但受 allowlist 约束。
-		if command == "set_allowlist" {
+		// set_allowlist / set_allowlist_any 是能力授予面: 远程改写白名单后可经
+		// run 执行任意命令(allowlist 以 Name 精确匹配 shell 条目即放行)——绕过
+		// 命令执行的安全边界演化为远程 RCE。set_allowlist_any 更彻底: 它一步就把
+		// 白名单换成"允许任意命令", 因此与 set_allowlist 同级受限。两者都仅限本地;
+		// run 保持远程可达但受 allowlist 约束。
+		if command == CmdCommandSetAllowlist || command == CmdCommandSetAllowAny {
 			return true, command
 		}
 	}

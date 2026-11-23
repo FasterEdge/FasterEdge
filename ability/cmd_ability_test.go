@@ -198,29 +198,36 @@ func TestCmdAbilitySetAllowlistAny(t *testing.T) {
 	}
 }
 
-// TestCmdAbilitySetAllowAnyRemoteRestriction 记录"本地限制清单"与新增
-// set_allowlist_any 命令之间的同步义务。
+// TestCmdAbilitySetAllowAnyRemoteRestriction 锁定 set_allowlist_any 的远程限制。
 //
-// 背景: OneKeyAbility.AuthenticateCommand 的 restrictedRemoteCommand 把
-// set_allowlist 列为"仅本地进程内调用"(它是能力授予面: 远程改写白名单后可经
-// run 执行任意命令)。fail-closed 改造新增了等价的授予面 set_allowlist_any,
-// 因此该清单必须同步覆盖它, 否则远程对端可用 set_allowlist_any{Any:true}
-// 一步打开全放行, 把 fail-closed 的收益全部抹掉。
+// 背景: set_allowlist 早已被 restrictedRemoteCommand 列为"仅本地进程内调用"
+// (它是能力授予面: 远程改写白名单后可经 run 执行任意命令)。fail-closed 改造
+// 新增了等价的授予面 set_allowlist_any, 它一步就能把白名单换成"允许任意命令",
+// 若不进同一份清单, 远程对端用 set_allowlist_any{Any:true} 即可抹掉 fail-closed
+// 的全部收益。
 //
-// 现状: one_key_ability.go 由其他同事并行重构(作用域授权), 本次改动未触碰
-// 该文件(任务约束), 因此这里只固定"命令名已注册且语义可见"这一层, 把
-// restrictedRemoteCommand 需要补一行的事实写成可检索的断言; 待该文件稳定后
-// 由负责人在 restrictedRemoteCommand 的 Cmd/Sh/Bash 分支加上
-// `if command == CmdCommandSetAllowAny { return true, command }`。
+// 这条断言直接查 restrictedRemoteCommand 的返回值, 而不是只比对命令名——名字
+// 对了但清单没覆盖, 恰恰是这个缺口原本的形态。
 func TestCmdAbilitySetAllowAnyRemoteRestriction(t *testing.T) {
 	if CmdCommandSetAllowAny == CmdCommandSetAllowlist {
 		t.Fatal("set_allowlist_any 必须与 set_allowlist 是不同命令名, 否则远程限制清单会误判")
 	}
-	// set_allowlist_any 是授予面: 它出现在 ListCommands 里就意味着可被 Atom
-	// 分派, 因而必须出现在 OneKey 的本地限制清单中。
 	for _, act := range []string{CmdCommandSetAllowAny, ShCommandSetAllowAny, BashCommandSetAllowAny} {
 		if act != "set_allowlist_any" {
 			t.Fatalf("%q 的命令名必须稳定为 set_allowlist_any, 否则远程限制清单无法按名匹配", act)
+		}
+	}
+	// 三个 shell 能力都必须被判为"仅本地": component 不同但命令名相同。
+	for _, component := range []string{"CmdAbility", "ShAbility", "BashAbility"} {
+		for _, command := range []string{CmdCommandSetAllowlist, CmdCommandSetAllowAny} {
+			local, hit := restrictedRemoteCommand(component, command)
+			if !local || hit != command {
+				t.Fatalf("%s/%s 必须是仅本地调用 (local=%v hit=%q)", component, command, local, hit)
+			}
+		}
+		// run 仍须保持远程可达: 否则远程编排能力全废, 且这不是本缺口要修的东西。
+		if local, _ := restrictedRemoteCommand(component, CmdCommandRun); local {
+			t.Fatalf("%s/run 不应被加入本地限制清单", component)
 		}
 	}
 }

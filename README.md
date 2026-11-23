@@ -193,7 +193,7 @@ mysql.Command(atom, data.DatabaseCommandSetSecret, data.DatabaseSetSecretArgs{
 - **显式授权两条路径**:
   1. `set_allowlist` 列出允许执行的命令(CmdAbility 按可执行文件名 + 参数前缀匹配;Sh/Bash 按命令首词匹配);
   2. `set_allowlist_any`(`CmdSetAllowAnyArgs{Any:true}`,或 Go API `SetAllowAny(true)`)主动打开"允许任意命令"——这是**使用者自己的决定**,框架不会替你做这个决定。
-- **远程调用面(含一处已登记的缺口)**:`set_allowlist` 是能力授予面,`OneKeyAbility` 的认证边界已把它限制为仅本地进程内调用;`run` / `start` 可远程调用但始终受 allowlist 约束。**新增的 `set_allowlist_any` 尚未加入该本地限制清单**——它需要在 `ability/one_key_ability.go` 的 `restrictedRemoteCommand` 里补一条判断,而该文件在本轮改动期间由其他负责人并行重构,本轮按约定未触碰,缺口已在 `TestCmdAbilitySetAllowAnyRemoteRestriction` 中登记。在该行补齐之前,不要把 `set_allowlist_any` 暴露给远程传输层。
+- **远程调用面**:`set_allowlist` 与 `set_allowlist_any` 都是能力授予面,`OneKeyAbility` 的认证边界已把两者一并限制为仅本地进程内调用(`ability/one_key_ability.go` 的 `restrictedRemoteCommand`,`TestCmdAbilitySetAllowAnyRemoteRestriction` 直接断言其返回值);`run` / `start` 可远程调用但始终受 allowlist 约束。
 - **复合命令拦截(诚实表述,非完备)**:白名单命中首词后仍会扫描 shell 链接元字符(`;` `&` `|` `<` `>` `$()` 反引号 `` ` `` 进程替换 `<(` `>()` `|&` `${` 以及换行/回车等控制字符),命中即整体拒绝。该扫描是**引号感知的字符级检查,不是 shell 解析器**:反斜杠转义的编码绕过(如 `\x3b` 分号)不展开解码,由调用方通过收紧白名单或坚持 fail-closed 兜底。相关边界用例见 `ability/sh_ability_test.go` 的 `TestShAbilityRejectsExtendedChainingBypass`。
 
 #### 跨能力组合示例
@@ -285,4 +285,4 @@ go run ./cmd/contract -out contract/contract.json   # 也可 -stdout 直接打�
 
 - `examples/demo`:独立 module(`examples/demo/go.mod`,以 `replace` 指回主库),`go run .` 即跑一遍最小可用流程——挂载常用组件、NetMap 注册对端、OneKey 签发并校验短期令牌、TimeAbility 同步系统时间、ConfigFileAbility 持久化 JSON 配置、ShAbility 执行 `echo`,最后优雅退出。
 - `Dockerfile`:多阶段构建,静态编译 `examples/demo` 后落到 `alpine:3.21` 非 root 运行(uid 1000),产物为 `/usr/local/bin/fasteredge-demo`。
-- `SECURITY.md`:漏洞私密报告渠道(GitHub Security Advisory / `shun_@outlook.com`)、48 小时确认与 7 天修复计划的响应承诺,以及本项目已落实的加固清单与已知局限(含 `set_allowlist_any` 未入本地限制清单的登记缺口)。
+- `SECURITY.md`:漏洞私密报告渠道(GitHub Security Advisory / `shun_@outlook.com`)、48 小时确认与 7 天修复计划的响应承诺,以及本项目已落实的加固清单与已知局限。
