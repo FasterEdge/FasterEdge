@@ -11,6 +11,7 @@ package main
 import (
 	"errors"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -253,16 +254,43 @@ func TestSerialTransportListPortsIsSortedUnique(t *testing.T) {
 
 // probeSerialPort 挑一个可用于往返的端口: 优先 listSerialPorts 的结果,
 // 否则退回环境变量 FE_SERIAL_PORT (CI/容器联调时注入)。
+//
+// 枚举到不等于能用: CI runner 上 /dev/ttyS0 一定存在, 但当前用户没有权限
+// 打开它。若只按"枚举结果非空"就往下走, 用例会拿到 EACCES 而 FAIL——那是
+// 环境缺设备, 不是能力坏了。所以这里再打一次可读写探测, 打不开就返回空,
+// 由调用方 skip。
 func probeSerialPort(t *testing.T) string {
 	t.Helper()
+	candidates := []string{}
 	if p := os.Getenv("FE_SERIAL_PORT"); p != "" {
-		return p
+		candidates = append(candidates, p)
+	} else if ports, err := listSerialPorts(); err == nil {
+		candidates = append(candidates, ports...)
 	}
-	ports, err := listSerialPorts()
-	if err != nil || len(ports) == 0 {
-		return ""
+	for _, p := range candidates {
+		if canOpenSerialPort(p) {
+			return p
+		}
 	}
-	return ports[0]
+	return ""
+}
+
+// canOpenSerialPort 用只读打开探测权限, 不碰任何串口参数(不置 DTR/不改波特率),
+// 因此探测本身对已连接的设备没有副作用。
+//
+// 只在非 Windows 上探测: Linux CI runner 的 /dev/ttyS0 恒存在但常无权限,
+// 这是"枚举到却打不开"的典型场景; Windows 的端口来自注册表(SERIALCOMM),
+// 枚举到即是已安装的端口, 不需要额外探测, 也避免对真实串口做多余的打开动作。
+func canOpenSerialPort(port string) bool {
+	if runtime.GOOS == "windows" {
+		return true
+	}
+	f, err := os.OpenFile(port, os.O_RDONLY, 0)
+	if err != nil {
+		return false
+	}
+	_ = f.Close()
+	return true
 }
 
 // serialTestAtom 构造只含 BaseData 的最小 atom (SerialAbility.Check 要求)。

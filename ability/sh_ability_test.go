@@ -165,6 +165,9 @@ func TestShAbilityRunEcho(t *testing.T) {
 		t.Skip("no standard shell on this platform")
 	}
 	s := NewShAbility()
+	// fail-closed 语义(空 allowlist 拒绝一切)由 TestShAbilityAllowlistCRUD
+	// 断言; 本用例要跑真实执行, 因此显式配白名单。
+	s.SetAllowed([]string{"printf"})
 	atom := newShAtom(t)
 	if out := s.Command(atom, ShCommandRun, ShRunArgs{Command: "printf hello-sh"}); out.Err != nil {
 		t.Fatal(out.Err)
@@ -184,23 +187,18 @@ func TestShAbilityStartWaitKill(t *testing.T) {
 		t.Skip("no standard shell on this platform")
 	}
 	s := NewShAbility()
+	// 同上: 本用例跑真实 start/wait/kill, 白名单必须显式给出。
+	s.SetAllowed([]string{"sleep", "printf"})
 	atom := newShAtom(t)
-	startOut := s.Command(atom, ShCommandStart, ShRunArgs{Command: "sleep 0.1; printf done-sh"})
+	// 长任务用于 kill: 单条命令, 不含 shell 链接元字符(白名单会整体拒绝复合
+	// 命令, 见 hasShellChaining), 因此用一条纯 sleep 而不是 "sleep; printf"。
+	startOut := s.Command(atom, ShCommandStart, ShRunArgs{Command: "sleep 30"})
 	if startOut.Err != nil {
 		t.Fatal(startOut.Err)
 	}
 	jobID, ok := startOut.Value.(string)
 	if !ok || !strings.HasPrefix(jobID, "job-") {
 		t.Fatalf("start value = %#v", startOut.Value)
-	}
-	// wait
-	waitOut := s.Command(atom, ShCommandWait, ShWaitArgs{JobID: jobID})
-	if waitOut.Err != nil {
-		t.Fatal(waitOut.Err)
-	}
-	res := waitOut.Value.(CmdResult)
-	if res.ExitCode != 0 || res.Stdout != "done-sh" {
-		t.Fatalf("wait = %+v", res)
 	}
 	// wait 空 ID
 	if out := s.Command(atom, ShCommandWait, ShWaitArgs{}); !errors.Is(out.Err, types.ErrInvalidArguments) {
@@ -209,6 +207,24 @@ func TestShAbilityStartWaitKill(t *testing.T) {
 	// kill
 	if out := s.Command(atom, ShCommandKill, ShKillArgs{JobID: jobID}); out.Err != nil {
 		t.Fatal(out.Err)
+	}
+
+	// 短任务用于 wait 的返回值: 同样必须是单条命令。
+	shortOut := s.Command(atom, ShCommandStart, ShRunArgs{Command: "printf done-sh"})
+	if shortOut.Err != nil {
+		t.Fatal(shortOut.Err)
+	}
+	shortID, ok := shortOut.Value.(string)
+	if !ok || !strings.HasPrefix(shortID, "job-") {
+		t.Fatalf("start value = %#v", shortOut.Value)
+	}
+	waitOut := s.Command(atom, ShCommandWait, ShWaitArgs{JobID: shortID})
+	if waitOut.Err != nil {
+		t.Fatal(waitOut.Err)
+	}
+	res := waitOut.Value.(CmdResult)
+	if res.ExitCode != 0 || res.Stdout != "done-sh" {
+		t.Fatalf("wait = %+v", res)
 	}
 	// 类型错误
 	if out := s.Command(atom, ShCommandKill, "raw-string"); !errors.Is(out.Err, types.ErrInvalidArguments) {
@@ -258,6 +274,7 @@ func TestShAbilityRunTimeout(t *testing.T) {
 		t.Skip("no standard shell on this platform")
 	}
 	s := NewShAbility()
+	s.SetAllowed([]string{"sleep"})
 	atom := newShAtom(t)
 	if out := s.Command(atom, ShCommandRun, ShRunArgs{Command: "sleep 5", Timeout: 200 * time.Millisecond}); out.Err != nil {
 		t.Fatal(out.Err)
